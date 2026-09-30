@@ -250,7 +250,13 @@ impl LlamaServer {
             "--cors-origins", "http://127.0.0.1",
             "--no-cors-credentials",
         ].map(String::from));
+        // For diagnosing the server, such as -v for its detailed log.
+        if let Some(extra) = std::env::var_os("SCOOBERT_SERVER_ARGS") {
+            args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
+        }
 
+        // The previous log is kept, since a restart would otherwise erase what happened before it.
+        let _ = std::fs::rename(paths::get().server_log(), paths::get().server_log().with_extension("previous.log"));
         let log = std::fs::File::create(paths::get().server_log()).context("Could not create the server log")?;
         let mut cmd = tokio::process::Command::new(&exe);
         cmd.args(&args)

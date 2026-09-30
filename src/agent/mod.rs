@@ -995,6 +995,11 @@ impl Host {
     async fn persist(&self, live: &Live, shared: bool, exclude_last: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let conv = live.conv.lock().unwrap().clone();
         let Target::Local(model) = self.target(&conv.model)? else { return Ok(()) };
+        // Another conversation may have swapped the model since this one loaded it, and filling the wrong model's
+        // slot costs minutes and evicts that conversation's cache.
+        if self.llama.loaded_model().as_deref() != Some(&model.name) {
+            return Ok(());
+        }
         let target = Target::Local(model);
         let ep = self.endpoint(&target);
         let (system, mut messages, thinking) = self.request_parts(live);
