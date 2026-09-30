@@ -5,6 +5,7 @@ edition = "2024"
 description = "Desktop coding assistant that runs local Qwen models or hosted models, with project notes"
 authors = ["Maple Sugarstone"]
 license = "MIT"
+repository = "https://github.com/MapleSugarstone/Scoobert"
 publish = false
 
 [dependencies]

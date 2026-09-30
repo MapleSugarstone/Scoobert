@@ -30,6 +30,8 @@ pub struct ChatRequest<'a> {
     pub messages: &'a [Message],
     pub tools: &'a [Value],
     pub thinking: Thinking,
+    /// Overrides the thinking budget of `thinking` without changing how the prompt is rendered.
+    pub thinking_budget: Option<u32>,
     pub max_tokens: u32,
 }
 
@@ -99,10 +101,16 @@ fn openai_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
     let on = req.thinking != Thinking::Off;
     if ep.local {
         if ep.reasoning {
-            body.insert("chat_template_kwargs".into(), json!({ "enable_thinking": on, "preserve_thinking": true }));
+            // Qwen's template writes the effort level into the system prompt, so a request that changes it cannot
+            // reuse the cached prompt. Side requests keep the conversation's level and shrink only the budget.
+            let mut kwargs = json!({ "enable_thinking": on, "preserve_thinking": true });
+            if on {
+                kwargs["reasoning_effort"] = qwen_effort(req.thinking).into();
+            }
+            body.insert("chat_template_kwargs".into(), kwargs);
             if on {
                 // Reasoning and the answer share max_tokens, so an uncapped reasoning phase could leave no answer.
-                body.insert("thinking_budget_tokens".into(), req.thinking.budget().into());
+                body.insert("thinking_budget_tokens".into(), req.thinking_budget.unwrap_or(req.thinking.budget()).into());
             }
         }
         body.insert("cache_prompt".into(), true.into());
@@ -142,6 +150,15 @@ fn arguments_text(args: &Value) -> String {
     match args {
         Value::String(s) => s.clone(),
         other => other.to_string(),
+    }
+}
+
+/// The effort names Qwen's chat template accepts.
+fn qwen_effort(level: Thinking) -> &'static str {
+    match level {
+        Thinking::Off | Thinking::Low => "low",
+        Thinking::Medium => "medium",
+        Thinking::High => "xhigh",
     }
 }
 

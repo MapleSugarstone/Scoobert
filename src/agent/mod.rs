@@ -150,6 +150,8 @@ const KEEP_SHARE: f64 = 0.35;
 /// Characters per token when estimating, set low so the estimate errs toward summarizing early.
 const CHARS_PER_TOKEN: f64 = 3.2;
 const MAX_RETRIES: u32 = 3;
+/// Thinking tokens a local model may spend on a side request before it must answer.
+const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
 const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Check what is already done first, because a file may be only partly written.</interrupted>";
 /// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
@@ -561,7 +563,7 @@ impl Host {
             self.emit(Event::Activity { conv: id.into(), text: Some("Reading...".into()) });
             let (system, messages, thinking) = self.request_parts(live);
             let tools = self.tool_specs(live);
-            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, max_tokens: self.max_tokens(&target) };
+            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
             let mut body = stream::payload(&ep, &req);
             if ep.local {
                 body["return_progress"] = true.into();
@@ -700,7 +702,8 @@ impl Host {
         let mut messages: Vec<Message> = if extend { view } else { view[..offset + (kept_from - start)].to_vec() };
         messages.push(Message::User(UserMessage { text: SUMMARY_PROMPT.into(), context: String::new(), images: Vec::new(), time: 0 }));
         let tools = self.tool_specs(live);
-        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking: Thinking::Off, max_tokens: if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED } };
+        let (thinking, thinking_budget) = side_thinking(ep, live);
+        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens: if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED } };
         let body = stream::payload(ep, &req);
         let reply = stream::send(&self.http, ep, &body, cancel, |_| {}).await?;
         if reply.stop == StopReason::Aborted {
@@ -931,7 +934,7 @@ impl Host {
             return Ok(());
         }
         let tools = self.tool_specs(live);
-        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, max_tokens: self.max_tokens(&target) };
+        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
         let body = stream::payload(&ep, &req);
         let prefix = self.llama.shared_prefix(&body).await?;
         let name = if shared {
@@ -1033,7 +1036,8 @@ impl Host {
         let (system, mut messages, _) = self.request_parts(live);
         messages.push(Message::User(UserMessage { text: question.into(), context: String::new(), images: Vec::new(), time: 0 }));
         let tools = self.tool_specs(live);
-        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking: Thinking::Off, max_tokens };
+        let (thinking, thinking_budget) = side_thinking(&ep, live);
+        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens };
         let body = stream::payload(&ep, &req);
         let _busy = ep.local.then(|| self.llama.busy());
         let reply = stream::send(&self.http, &ep, &body, cancel, |_| {}).await?;
@@ -1142,6 +1146,13 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
         }
     }
     messages
+}
+
+/// Thinking for a short side request, such as a summary, a title, or the note step. A local model keeps the
+/// conversation's thinking level, because changing it changes the rendered prompt and loses the cache, and gets a
+/// tiny budget instead. A hosted model simply does not think.
+fn side_thinking(ep: &Endpoint, live: &Live) -> (Thinking, Option<u32>) {
+    if ep.local { (live.conv.lock().unwrap().thinking, Some(SIDE_THINKING_TOKENS)) } else { (Thinking::Off, None) }
 }
 
 /// Whether a conversation has no project: it works in the shared folder where new projects are created.

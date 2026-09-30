@@ -918,7 +918,7 @@ impl App {
             .width(SIDEBAR_WIDTH)
             .padding([0, 16]);
         let mut crumbs = row![].spacing(8).align_y(Alignment::Center);
-        let place = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| "No project".into());
+        let place = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| "New chat".into());
         crumbs = crumbs.push(text(place).size(14).font(fonts::ui_semibold()));
         if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty()) {
             crumbs = crumbs.push(text("/").size(14).style(theme::muted));
@@ -983,7 +983,7 @@ impl App {
         let general = current.is_none();
         list = list.push(
             button(
-                row![icon(Icon::File, 15.0), text("No project").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() })]
+                row![icon(Icon::File, 15.0), text("New chat").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() })]
                     .spacing(8)
                     .align_y(Alignment::Center),
             )

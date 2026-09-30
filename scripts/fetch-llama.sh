@@ -8,9 +8,10 @@ out="$root/vendor/llama"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-url="https://github.com/ggml-org/llama.cpp/releases/download/$release/llama-$release-bin-ubuntu-x64.zip"
-curl -fL --retry 3 -o "$tmp/llama.zip" "$url"
-unzip -q "$tmp/llama.zip" -d "$tmp/src"
+url="https://github.com/ggml-org/llama.cpp/releases/download/$release/llama-$release-bin-ubuntu-x64.tar.gz"
+curl -fL --retry 3 -o "$tmp/llama.tar.gz" "$url"
+mkdir -p "$tmp/src"
+tar -xzf "$tmp/llama.tar.gz" -C "$tmp/src"
 bin="$(dirname "$(find "$tmp/src" -name llama-server -type f | head -n 1)")"
 
 rm -rf "$out"

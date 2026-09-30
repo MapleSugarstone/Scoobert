@@ -59,7 +59,7 @@ Hosted models run on the provider's servers, so Scoobert sends them your prompts
 ## Features
 
 - **Local assistant:** Scoobert reads files, edits code, runs commands and tests, and fixes what fails, in the project folder you open. It needs no account or internet connection once a model is downloaded.
-- **Start without a project:** Scoobert opens with **No project** selected, so you can ask it anything. When a task needs its own files, it starts a project folder in `Documents\Scoobert` (`~/Documents/Scoobert` on Linux) and moves the conversation into it. Switch between **No project** and your projects with one click in the sidebar.
+- **Start without a project:** Scoobert opens with **New chat** selected, so you can ask it anything. When a task needs its own files, it starts a project folder in `Documents\Scoobert` (`~/Documents/Scoobert` on Linux) and moves the conversation into it. Switch between **New chat** and your projects with one click in the sidebar.
 - **Projects and conversations:** add any folder as a project. Scoobert reopens the last project and conversation when it starts, and names each conversation after its first task.
 - **Past conversations on request:** Scoobert only looks at your other conversations when you ask about them ("what did we decide last time?"). Then it lists the project's conversations and reads the one that matters.
 - **Web research (off until you turn it on):** with **Let Scoobert search the web** on in Settings, Scoobert searches DuckDuckGo, skims the promising results, and reads the best pages in full. Pages built by JavaScript are rendered in the browser already on your computer (Edge on Windows, Chrome or Chromium on Linux) with a throwaway profile. When web search is off and you ask for something that needs it, Scoobert offers to turn it on first. No account or key is needed.
@@ -148,7 +148,7 @@ The program looks for `llama-server` next to itself in a `llama` folder, then in
 - Windows: `scripts\fetch-llama.ps1` copies the build installed by `winget install ggml.llamacpp`, or downloads a release with `-Release b11193`. Then `scripts\package-windows.ps1` builds the installer with NSIS.
 - Linux: `scripts/fetch-llama.sh b11193`, then `scripts/package-linux.sh` builds the AppImage and the tarball.
 
-Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds both and publishes a GitHub release. Set `repository` in `Cargo.toml` to your GitHub repository so Scoobert can tell users about new releases.
+Pushing a tag such as `v0.1.0` runs `.github/workflows/release.yml`, which builds the Windows installer, the portable zip, the AppImage, and the tarball, and publishes them as a GitHub release. The `repository` field in `Cargo.toml` is where Scoobert checks for newer releases.
 
 ## License
 

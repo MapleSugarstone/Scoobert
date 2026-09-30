@@ -181,6 +181,10 @@ impl Chat {
                 }
             }
             E::Message { message, .. } => {
+                // A tool result joins the context before the next request counts it, so it is estimated now.
+                if let AgentMessage::Tool(t) = &message {
+                    self.context += (t.output.chars().count() as f64 / 3.5) as u64;
+                }
                 if matches!(message, AgentMessage::User(_)) {
                     self.pending = None;
                     self.error = None;
