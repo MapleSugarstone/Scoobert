@@ -129,6 +129,10 @@ impl Pane {
         }
     }
 
+    pub fn width(&self) -> f32 {
+        if self.wide { 720.0 } else { 420.0 }
+    }
+
     pub fn dirty(&self) -> bool {
         self.editor.as_ref().is_some_and(|e| e.edited.is_some())
     }
@@ -437,7 +441,7 @@ impl Pane {
     }
 
     pub fn view(&self, theme: &Theme) -> Element<'_, Message> {
-        let width = if self.wide { 720 } else { 420 };
+        let width = self.width();
         if self.root.is_none() {
             let body = column![
                 text("Notes").size(14).font(fonts::ui_semibold()),

@@ -1201,10 +1201,39 @@ impl App {
             caption(if self.maximized { Icon::Restore } else { Icon::Maximize }, Message::ToggleMaximize),
             close,
         ];
-        row![brand, space::horizontal(), right.padding([0, 16]), container(controls).height(Fill).align_y(Alignment::Start)]
+        row![brand, self.location(), right.padding([0, 16]), container(controls).height(Fill).align_y(Alignment::Start)]
             .height(56)
             .align_y(Alignment::Center)
             .into()
+    }
+
+    /// Where the open conversation lives: the project as a label that opens its folder, then the conversation title.
+    fn location(&self) -> Element<'_, Message> {
+        let name = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| "Chats".into());
+        let place: Element<'_, Message> = match self.current_project() {
+            Some(p) => tooltip(
+                button(row![icon(Icon::Folder, 14.0), text(name.clone()).size(13)].spacing(6).align_y(Alignment::Center))
+                    .padding([4, 10])
+                    .style(theme::place)
+                    .on_press(Message::RevealProject(p)),
+                container(text("Show the project folder").size(12)).padding([4, 8]).style(theme::tooltip),
+                tooltip::Position::Bottom,
+            )
+            .into(),
+            None => button(text(name.clone()).size(13)).padding([4, 10]).style(theme::place).into(),
+        };
+        let mut crumbs = row![place].spacing(8).align_y(Alignment::Center);
+        if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty()) {
+            crumbs = crumbs.push(icons::tinted(Icon::ChevronRight, 14.0, |t| t.muted));
+            // A long project name leaves less room, and the title is shortened with an ellipsis before it reaches the model menu.
+            let room = 46usize.saturating_sub(name.chars().count()).max(12);
+            crumbs = crumbs.push(text(clip(&c.title, room)).size(13).style(theme::muted).wrapping(text::Wrapping::None));
+        }
+        // Lines the label up with the messages, which sit 24 in from the chat column and center once it is wider than they are.
+        let notes = if self.notes.open { 1.0 + self.notes.width() } else { 0.0 };
+        let column = self.window_size.map_or(0.0, |s| s.width) - SIDEBAR_WIDTH - 1.0 - notes;
+        let left = 1.0 + ((column - chat::MAX_WIDTH) / 2.0).max(0.0) + 24.0;
+        container(crumbs).width(Fill).clip(true).padding(iced::Padding { left, right: 32.0, ..Default::default() }).into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {

@@ -218,6 +218,13 @@ pub fn tooltip(theme: &Theme) -> container::Style {
     toast(theme)
 }
 
+/// The project label in the top bar: a filled pill that lightens on hover.
+pub fn place(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let bg = if matches!(status, button::Status::Hovered | button::Status::Pressed) { t.line } else { t.surface2 };
+    button::Style { background: Some(bg.into()), text_color: t.text, border: border::rounded(RADIUS), ..Default::default() }
+}
+
 pub fn chip(theme: &Theme) -> container::Style {
     let t = tokens(theme);
     container::Style { background: Some(t.surface.into()), border: line_border(t, RADIUS), text_color: Some(t.muted), ..Default::default() }

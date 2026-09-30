@@ -18,7 +18,7 @@ use crate::util::clip;
 
 pub const TRANSCRIPT_ID: &str = "transcript";
 const COMPACTED: &str = "Scoobert summarized the messages above to make room and continued from the summary. The summary is in the Tasks folder of the notes.";
-const MAX_WIDTH: f32 = 820.0;
+pub const MAX_WIDTH: f32 = 820.0;
 
 pub struct ToolCard {
     pub call: ToolCall,
