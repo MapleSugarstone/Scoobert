@@ -18,6 +18,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Fetch llama.cpp
         run: ./scripts/fetch-llama.ps1 -Release $env:LLAMA_RELEASE
+      # Newer Windows runner images no longer include NSIS.
+      - name: Install NSIS
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis --no-progress -y
+          }
       - name: Build the installer
         run: ./scripts/package-windows.ps1
       - uses: actions/upload-artifact@v4
