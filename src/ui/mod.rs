@@ -85,6 +85,8 @@ impl std::fmt::Display for ModelChoice {
 pub enum Confirm {
     DeleteConversation(PathBuf),
     RemoveProject(PathBuf),
+    /// Go back to the user message at `index`, with `files` files the model changed after it.
+    Rewind { index: usize, text: String, files: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +119,9 @@ pub enum Message {
     CommitRename,
     AskConfirm(Confirm),
     Confirmed(Confirm),
+    AskRewind(usize, String),
+    RewindFiles(bool),
+    Rewound(Result<(Box<Snapshot>, Vec<String>), String>, String),
 
     Composer(text_editor::Action),
     Send,
@@ -175,6 +180,8 @@ pub struct App {
     update_notice: Option<(String, String)>,
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
+    /// Whether a rewind also puts back the files the model changed.
+    rewind_files: bool,
 }
 
 struct HostSeed(SharedSettings);
@@ -231,6 +238,7 @@ impl App {
             toast: None,
             update_notice: None,
             web_offer: false,
+            rewind_files: true,
         };
         let mut tasks = vec![system::theme().map(Message::Mode)];
         if crate::update::due(app.state.update_checked_at) {
@@ -518,9 +526,33 @@ impl App {
                 }
             }
             Message::AskConfirm(c) => self.confirm = Some(c),
+            Message::AskRewind(index, text) => {
+                let files = match (&self.host, &self.chat) {
+                    (Some(host), Some(chat)) => host.files_changed_after(&chat.id, index),
+                    _ => 0,
+                };
+                self.rewind_files = true;
+                self.confirm = Some(Confirm::Rewind { index, text, files });
+            }
+            Message::RewindFiles(on) => self.rewind_files = on,
+            Message::Rewound(Ok((snap, problems)), text) => {
+                self.chat = Some(Chat::from_snapshot(*snap));
+                self.composer = text_editor::Content::with_text(&text);
+                self.toast(if problems.is_empty() { "Rewound. Edit the message and send it again.".to_string() } else { problems.join(" ") });
+                return Task::batch([self.load_sessions(), operation::focus(COMPOSER_ID)]);
+            }
+            Message::Rewound(Err(e), _) => self.toast(e),
             Message::Confirmed(c) => {
                 self.confirm = None;
                 match c {
+                    Confirm::Rewind { index, text, .. } => {
+                        let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_ref()) else { return Task::none() };
+                        let (id, restore) = (chat.id.clone(), self.rewind_files);
+                        return Task::perform(
+                            async move { host.rewind(&id, index, restore).await.map(|(s, p)| (Box::new(s), p)).map_err(|e| format!("{e:#}")) },
+                            move |r| Message::Rewound(r, text.clone()),
+                        );
+                    }
                     Confirm::DeleteConversation(file) => {
                         let Some(host) = &self.host else { return Task::none() };
                         if let Err(e) = host.delete(&file) {
@@ -891,7 +923,7 @@ impl App {
             layers = layers.push(modal(panel.view(ctx).map(Message::Settings), 760.0));
         }
         if let Some(c) = &self.confirm {
-            layers = layers.push(modal(confirm_dialog(c), 420.0));
+            layers = layers.push(modal(confirm_dialog(c, self.rewind_files), 460.0));
         }
         if let Some((t, _)) = &self.toast {
             layers = layers.push(
@@ -1271,10 +1303,33 @@ fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> 
     )
 }
 
-fn confirm_dialog<'a>(c: &Confirm) -> Element<'a, Message> {
+fn confirm_dialog<'a>(c: &Confirm, rewind_files: bool) -> Element<'a, Message> {
+    if let Confirm::Rewind { files, .. } = c {
+        let mut col = column![
+            text("Rewind to this message?").size(16).font(fonts::ui_semibold()),
+            text("Scoobert stops what it is doing and forgets everything after this message. The message goes back into the box so you can change it and send it again.").size(13).style(theme::muted),
+        ]
+        .spacing(12)
+        .padding(20);
+        if *files > 0 {
+            let label = if *files == 1 { "Also undo the change to 1 file made after this message".to_string() } else { format!("Also undo the changes to {files} files made after this message") };
+            col = col.push(iced::widget::checkbox(rewind_files).label(label).on_toggle(Message::RewindFiles).text_size(13).style(theme::check));
+            col = col.push(text("Commands Scoobert ran cannot be undone.").size(12).style(theme::muted));
+        }
+        col = col.push(
+            row![
+                space::horizontal(),
+                button(text("Cancel").size(13)).padding([6, 14]).style(theme::secondary).on_press(Message::CloseModal),
+                button(text("Rewind").size(13)).padding([6, 14]).style(theme::primary).on_press(Message::Confirmed(c.clone())),
+            ]
+            .spacing(8),
+        );
+        return col.into();
+    }
     let (title, body, action) = match c {
         Confirm::DeleteConversation(_) => ("Delete this conversation?", "The conversation file moves to the trash, so you can restore it from there.", "Delete"),
         Confirm::RemoveProject(_) => ("Remove this project from the list?", "Scoobert forgets the folder but keeps its files, notes, and conversations.", "Remove"),
+        Confirm::Rewind { .. } => unreachable!("handled above"),
     };
     column![
         text(title).size(16).font(fonts::ui_semibold()),

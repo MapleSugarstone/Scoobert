@@ -226,11 +226,13 @@ pub struct Limits {
     pub notes: Option<PathBuf>,
     /// Whether the user turned on web search.
     pub web: bool,
+    /// Where each file's previous version is kept before a change, so a rewind can undo it.
+    pub checkpoints: Option<PathBuf>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { unattended: false, isolation: Isolation::Refuse, max_output: MAX_BYTES, notes: None, web: false }
+        Limits { unattended: false, isolation: Isolation::Refuse, max_output: MAX_BYTES, notes: None, web: false, checkpoints: None }
     }
 }
 
@@ -247,8 +249,8 @@ pub async fn run(
     }
     let result = match call.name.as_str() {
         "read" => read(call, cwd, limits).await,
-        "edit" => edit(call, cwd, limits.notes.as_deref()).await,
-        "write" => write(call, cwd, limits.notes.as_deref()).await,
+        "edit" => edit(call, cwd, limits).await,
+        "write" => write(call, cwd, limits).await,
         "bash" | "powershell" => command(call, cwd, shell, limits, cancel, on_output).await,
         "web_search" if limits.web => match super::web::search(arg(call, &["query", "q"]).unwrap_or_default()).await {
             Ok(results) => Ok(Outcome::ok(super::web::format_results(arg(call, &["query", "q"]).unwrap_or_default(), &results))),
@@ -322,8 +324,9 @@ fn read_conversation(cwd: &Path, id: &str, max_bytes: usize) -> Result<Outcome, 
     Ok(Outcome::ok(conv.transcript(max_bytes)))
 }
 
-async fn write(call: &ToolCall, cwd: &Path, notes: Option<&Path>) -> Result<Outcome, String> {
-    let path = target_path(cwd, call, notes).ok_or("write needs a path.")?;
+async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
+    let path = target_path(cwd, call, limits.notes.as_deref()).ok_or("write needs a path.")?;
+    save_checkpoint(limits.checkpoints.as_deref(), &call.id, &path).await;
     let content = arg(call, &["content", "text", "contents"]).ok_or("write needs content.")?;
     let old = tokio::fs::read_to_string(&path).await.ok();
     if let Some(dir) = path.parent() {
@@ -349,8 +352,9 @@ async fn write(call: &ToolCall, cwd: &Path, notes: Option<&Path>) -> Result<Outc
     })
 }
 
-async fn edit(call: &ToolCall, cwd: &Path, notes: Option<&Path>) -> Result<Outcome, String> {
-    let path = target_path(cwd, call, notes).ok_or("edit needs a path.")?;
+async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
+    let path = target_path(cwd, call, limits.notes.as_deref()).ok_or("edit needs a path.")?;
+    save_checkpoint(limits.checkpoints.as_deref(), &call.id, &path).await;
     let old_text = arg(call, &["old_text", "oldText", "old_string", "old_str"]).ok_or("edit needs old_text.")?;
     let new_text = arg(call, &["new_text", "newText", "new_string", "new_str"]).ok_or("edit needs new_text.")?;
     let shown = paths::display(&path);
@@ -374,6 +378,51 @@ async fn edit(call: &ToolCall, cwd: &Path, notes: Option<&Path>) -> Result<Outco
     let written = if crlf { updated.replace('\n', "\r\n") } else { updated.clone() };
     tokio::fs::write(&path, &written).await.map_err(|e| format!("Could not write {shown}: {e}"))?;
     Ok(Outcome { output: format!("Edited {shown}."), is_error: false, diff: Some(unified_diff(&text, &updated)) })
+}
+
+/// A file's state before a tool call changed it: its bytes, or that it did not exist.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Checkpoint {
+    pub path: PathBuf,
+    pub existed: bool,
+}
+
+/// Saves the file as it is now, before the call changes it.
+async fn save_checkpoint(dir: Option<&Path>, call_id: &str, path: &Path) {
+    let Some(dir) = dir else { return };
+    let meta = dir.join(format!("{call_id}.json"));
+    if meta.exists() || tokio::fs::create_dir_all(dir).await.is_err() {
+        return;
+    }
+    let existed = path.is_file();
+    if existed && tokio::fs::copy(path, dir.join(format!("{call_id}.bin"))).await.is_err() {
+        return;
+    }
+    let record = Checkpoint { path: path.to_path_buf(), existed };
+    if let Ok(json) = serde_json::to_string(&record) {
+        let _ = tokio::fs::write(meta, json).await;
+    }
+}
+
+/// Puts a file back the way a checkpoint saved it: its old bytes, or removed when it did not exist before.
+pub fn restore_checkpoint(dir: &Path, call_id: &str) -> Option<Result<PathBuf, String>> {
+    let meta = std::fs::read_to_string(dir.join(format!("{call_id}.json"))).ok()?;
+    let record: Checkpoint = serde_json::from_str(&meta).ok()?;
+    let shown = paths::display(&record.path);
+    let result = if record.existed {
+        std::fs::copy(dir.join(format!("{call_id}.bin")), &record.path).map(|_| ()).map_err(|e| format!("Could not restore {shown}: {e}"))
+    } else if record.path.exists() {
+        trash::delete(&record.path).map_err(|e| format!("Could not remove {shown}: {e}"))
+    } else {
+        Ok(())
+    };
+    Some(result.map(|_| record.path))
+}
+
+/// The file a checkpoint belongs to, without restoring it.
+pub fn checkpoint_path(dir: &Path, call_id: &str) -> Option<PathBuf> {
+    let meta = std::fs::read_to_string(dir.join(format!("{call_id}.json"))).ok()?;
+    serde_json::from_str::<Checkpoint>(&meta).ok().map(|c| c.path)
 }
 
 pub fn unified_diff(old: &str, new: &str) -> String {
@@ -608,6 +657,20 @@ mod tests {
         let out = run(&call("read", json!({"path": "Notes/Auth design.md"})), &dir, &Shell::detect(), &limits, &CancellationToken::new(), |_| {}).await;
         assert!(out.output.contains("[[Vault X]] is Notes/Services/Vault X.md"), "{}", out.output);
         assert!(out.output.contains("[[Missing]] has no note yet"), "{}", out.output);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn checkpoints_put_files_back() {
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "original").unwrap();
+        let limits = Limits { checkpoints: Some(dir.join("checkpoints")), ..Limits::default() };
+        let c = call("write", json!({"path": "a.txt", "content": "changed"}));
+        run(&c, &dir, &Shell::detect(), &limits, &CancellationToken::new(), |_| {}).await;
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
+        assert!(restore_checkpoint(&dir.join("checkpoints"), &c.id).unwrap().is_ok());
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

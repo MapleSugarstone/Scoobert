@@ -38,13 +38,14 @@ pub enum Icon {
     External,
     File,
     Key,
+    Undo,
 }
 
-const ALL: [Icon; 28] = [
+const ALL: [Icon; 29] = [
     Icon::Plus, Icon::Close, Icon::ChevronRight, Icon::ChevronDown, Icon::ArrowRight, Icon::ArrowLeft, Icon::Search,
     Icon::Folder, Icon::FolderOpen, Icon::Calendar, Icon::Expand, Icon::Shrink, Icon::More, Icon::Copy, Icon::Trash,
     Icon::Pencil, Icon::Stop, Icon::Image, Icon::Panel, Icon::Graph, Icon::Gear, Icon::Check, Icon::Download, Icon::Eye,
-    Icon::Refresh, Icon::External, Icon::File, Icon::Key,
+    Icon::Refresh, Icon::External, Icon::File, Icon::Key, Icon::Undo,
 ];
 
 fn body(icon: Icon) -> String {
@@ -77,6 +78,7 @@ fn body(icon: Icon) -> String {
         Icon::External => r#"<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>"#,
         Icon::File => r#"<path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5"/>"#,
         Icon::Key => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14.5 8.5l2 2"/>"#,
+        Icon::Undo => r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>"#,
     };
     s.to_string()
 }

@@ -26,7 +26,8 @@ pub struct ToolCard {
 }
 
 pub enum Entry {
-    User { text: String, notes: Vec<String>, images: usize, time: i64 },
+    /// `index` is the message's position in the conversation, which a rewind goes back to.
+    User { text: String, notes: Vec<String>, images: usize, time: i64, index: usize },
     Assistant { key: String, thinking: String, text: String, md: markdown::Content, tools: Vec<ToolCard>, error: Option<String>, stop: StopReason, time: i64 },
     Notice(String),
 }
@@ -65,6 +66,8 @@ pub struct Chat {
     /// The last task stopped before it finished, so the transcript offers Continue.
     pub interrupted: bool,
     counter: usize,
+    /// Messages added so far, so each user message knows its position.
+    seen: usize,
 }
 
 impl Chat {
@@ -90,6 +93,7 @@ impl Chat {
             pending: None,
             interrupted: s.interrupted,
             counter: 0,
+            seen: 0,
         };
         for (i, m) in s.messages.into_iter().enumerate() {
             if s.compacted_at == Some(i) {
@@ -105,13 +109,15 @@ impl Chat {
     }
 
     fn push(&mut self, m: AgentMessage) {
+        let index = self.seen;
+        self.seen += 1;
         match m {
             AgentMessage::User(u) => {
                 let notes = note_paths(&u.context);
                 if self.entries.is_empty() && self.title == "New conversation" {
                     self.title = crate::agent::conversation::quick_title(&u.text);
                 }
-                self.entries.push(Entry::User { text: u.text, notes, images: u.images.len(), time: u.time });
+                self.entries.push(Entry::User { text: u.text, notes, images: u.images.len(), time: u.time, index });
             }
             AgentMessage::Assistant(a) => self.push_assistant(a),
             AgentMessage::Tool(t) => {
@@ -234,7 +240,7 @@ impl Chat {
             items = items.push(self.entry(entry, md_settings));
         }
         if let Some(p) = &self.pending {
-            items = items.push(user_bubble(p, &[], 0));
+            items = items.push(user_bubble(p, &[], 0, None));
         }
         if let Some(s) = &self.stream {
             items = items.push(self.streaming(s, md_settings));
@@ -286,7 +292,7 @@ impl Chat {
 
     fn entry<'a>(&'a self, entry: &'a Entry, md_settings: markdown::Settings) -> Element<'a, Message> {
         match entry {
-            Entry::User { text, notes, images, time } => sent_at(user_bubble(text, notes, *images), *time),
+            Entry::User { text, notes, images, time, index } => sent_at(user_bubble(text, notes, *images, Some(*index)), *time),
             Entry::Notice(n) => row![
                 rule::horizontal(1).style(theme::divider),
                 text(n.clone()).size(12).style(theme::muted).width(Length::Shrink),
@@ -445,7 +451,7 @@ fn sent_at<'a>(content: Element<'a, Message>, time: i64) -> Element<'a, Message>
         .into()
 }
 
-fn user_bubble<'a>(message: &str, notes: &[String], images: usize) -> Element<'a, Message> {
+fn user_bubble<'a>(message: &str, notes: &[String], images: usize, index: Option<usize>) -> Element<'a, Message> {
     let mut col = column![text(message.to_string()).size(15)].spacing(8);
     let mut chips = row![].spacing(6);
     for n in notes {
@@ -459,7 +465,16 @@ fn user_bubble<'a>(message: &str, notes: &[String], images: usize) -> Element<'a
         col = col.push(chips.wrap());
     }
     let copy = button(icon(Icon::Copy, 14.0)).padding(4).style(theme::ghost).on_press(Message::Copy(message.to_string()));
-    container(row![col.width(Fill), copy].spacing(8)).padding([12, 16]).width(Fill).style(theme::bubble).into()
+    let mut actions = row![copy].spacing(2);
+    if let Some(index) = index {
+        let rewind = button(icon(Icon::Undo, 14.0)).padding(4).style(theme::ghost).on_press(Message::AskRewind(index, message.to_string()));
+        actions = actions.push(iced::widget::tooltip(
+            rewind,
+            container(text("Rewind to this message").size(12)).padding([4, 8]).style(theme::tooltip),
+            iced::widget::tooltip::Position::Top,
+        ));
+    }
+    container(row![col.width(Fill), actions].spacing(8)).padding([12, 16]).width(Fill).style(theme::bubble).into()
 }
 
 fn reply_actions<'a>(raw: &str) -> Element<'a, Message> {

@@ -123,6 +123,8 @@ enum Entry {
     Compaction { summary: String, kept_from: usize },
     /// The conversation moved to another folder, when a conversation without a project started one.
     Cwd { cwd: PathBuf },
+    /// Messages from `to` on were discarded. They stay in the file above this line.
+    Rewind { to: usize },
 }
 
 /// A summary that replaces every message before `kept_from` when Scoobert sends the conversation.
@@ -199,6 +201,7 @@ impl Conversation {
                 (Entry::Thinking { thinking }, Some(c)) => c.thinking = thinking,
                 (Entry::Compaction { summary, kept_from }, Some(c)) => c.compaction = Some(Compaction { summary, kept_from }),
                 (Entry::Cwd { cwd }, Some(c)) => c.cwd = cwd,
+                (Entry::Rewind { to }, Some(c)) => c.truncate(to),
                 _ => {}
             }
         }
@@ -270,6 +273,20 @@ impl Conversation {
         self.file = file;
         self.cwd = cwd.to_path_buf();
         if self.file.exists() { self.append(&Entry::Cwd { cwd: cwd.to_path_buf() }) } else { Ok(()) }
+    }
+
+    /// Discards the messages from `to` on, and a summary that covered them.
+    pub fn rewind(&mut self, to: usize) -> anyhow::Result<()> {
+        self.append(&Entry::Rewind { to })?;
+        self.truncate(to);
+        Ok(())
+    }
+
+    fn truncate(&mut self, to: usize) {
+        self.messages.truncate(to);
+        if self.compaction.as_ref().is_some_and(|c| c.kept_from >= to) {
+            self.compaction = None;
+        }
     }
 
     /// A compact transcript for another conversation to read: the messages, and one line per tool call.
@@ -439,7 +456,23 @@ pub fn is_session_file(file: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::quick_title;
+    use super::*;
+
+    #[test]
+    fn rewinds_survive_reloading() {
+        let dir = std::env::temp_dir().join(format!("scoobert-conv-{}", crate::util::random_hex(4)));
+        let mut conv = Conversation::new(&dir, "m", Thinking::Off);
+        conv.file = dir.join("c.jsonl");
+        for text in ["one", "two", "three"] {
+            conv.push(Message::User(UserMessage { text: text.into(), context: String::new(), images: Vec::new(), time: 0 })).unwrap();
+        }
+        conv.rewind(1).unwrap();
+        conv.push(Message::User(UserMessage { text: "four".into(), context: String::new(), images: Vec::new(), time: 0 })).unwrap();
+        let loaded = Conversation::load(&conv.file).unwrap();
+        let texts: Vec<String> = loaded.messages.iter().map(|m| match m { Message::User(u) => u.text.clone(), _ => String::new() }).collect();
+        assert_eq!(texts, vec!["one", "four"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn quick_titles_are_short_and_plain() {

@@ -452,6 +452,60 @@ impl Host {
         }
     }
 
+    /// Files the model changed from message `from` on, which a rewind can put back.
+    pub fn files_changed_after(&self, id: &str, from: usize) -> usize {
+        let Ok(live) = self.live(id) else { return 0 };
+        let conv = live.conv.lock().unwrap();
+        let dir = checkpoint_dir(id);
+        let paths: HashSet<PathBuf> = changing_calls(&conv.messages, from).filter_map(|c| tools::checkpoint_path(&dir, &c.id)).collect();
+        paths.len()
+    }
+
+    /// Goes back to message `to`: stops any running work, forgets that message and everything after it, and
+    /// with `restore_files` puts back the files the model changed since. Returns the conversation as it is now
+    /// and any files that could not be restored.
+    pub async fn rewind(self: &Arc<Self>, id: &str, to: usize, restore_files: bool) -> anyhow::Result<(Snapshot, Vec<String>)> {
+        let live = self.live(id)?;
+        self.abort(id);
+        // The run notices the stop between steps, so this waits for it to finish before changing the history.
+        for _ in 0..100 {
+            if !live.running.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        if live.running.load(Ordering::SeqCst) {
+            bail!("Scoobert is still stopping. Try again in a moment.");
+        }
+        let _guard = live.background.lock().await;
+        let mut problems = Vec::new();
+        {
+            let mut conv = live.conv.lock().unwrap();
+            if to > conv.messages.len() {
+                bail!("That message is no longer in the conversation.");
+            }
+            if restore_files {
+                // The earliest saved version of each file is its state before the discarded part began.
+                let dir = checkpoint_dir(id);
+                let mut done: HashSet<PathBuf> = HashSet::new();
+                let calls: Vec<ToolCall> = changing_calls(&conv.messages, to).cloned().collect();
+                for call in calls {
+                    let Some(path) = tools::checkpoint_path(&dir, &call.id) else { continue };
+                    if done.insert(path) && let Some(Err(e)) = tools::restore_checkpoint(&dir, &call.id) {
+                        problems.push(e);
+                    }
+                }
+            }
+            conv.rewind(to)?;
+        }
+        live.read_notes.lock().unwrap().clear();
+        live.allowed.lock().unwrap().clear();
+        if self.llama.slot_owner().as_deref() == Some(id) {
+            self.llama.set_slot_owner(None);
+        }
+        Ok((self.snapshot(&live, None), problems))
+    }
+
     /// Stops the reply, or the cache step that runs before it.
     pub fn abort(&self, id: &str) {
         let Ok(live) = self.live(id) else { return };
@@ -779,6 +833,7 @@ impl Host {
             max_output: self.max_tool_output(live),
             notes: Some(cwd.join(&self.settings().notes_folder)),
             web: self.settings().web_access,
+            checkpoints: Some(checkpoint_dir(id)),
         };
         let outcome = tools::run(call, cwd, &self.shell, &limits, cancel, move |tail| {
             let _ = events.send(Event::ToolOutput { conv: conv.clone(), call_id: call_id.clone(), tail });
@@ -1153,6 +1208,23 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
 /// tiny budget instead. A hosted model simply does not think.
 fn side_thinking(ep: &Endpoint, live: &Live) -> (Thinking, Option<u32>) {
     if ep.local { (live.conv.lock().unwrap().thinking, Some(SIDE_THINKING_TOKENS)) } else { (Thinking::Off, None) }
+}
+
+/// Where a conversation keeps the previous versions of files the model changed.
+fn checkpoint_dir(id: &str) -> PathBuf {
+    crate::paths::get().data.join("checkpoints").join(id)
+}
+
+/// Edit and write calls from message `from` on, oldest first.
+fn changing_calls(messages: &[Message], from: usize) -> impl Iterator<Item = &ToolCall> {
+    messages[from.min(messages.len())..]
+        .iter()
+        .filter_map(|m| match m {
+            Message::Assistant(a) => Some(a.tool_calls.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|c| tools::changes_files(&c.name))
 }
 
 /// Whether a conversation has no project: it works in the shared folder where new projects are created.
