@@ -1,0 +1,46 @@
+[package]
+name = "scoobert"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop coding assistant that runs local Qwen models or hosted models, with project notes"
+authors = ["Maple Sugarstone"]
+license = "MIT"
+publish = false
+
+[dependencies]
+iced = { version = "0.14", features = ["tokio", "markdown", "highlighter", "image", "svg", "canvas", "advanced"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "time", "sync"] }
+tokio-util = "0.7"
+futures = "0.3"
+reqwest = { version = "0.13", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+directories = "6"
+chrono = "0.4"
+regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+rfd = "0.17"
+trash = "5"
+notify = "8"
+keyring = "4"
+opener = { version = "0.8", features = ["reveal"] }
+similar = "2"
+rand = "0.9"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Foundation", "Win32_System_JobObjects", "Win32_Security"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

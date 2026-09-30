@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Scoobert
+Comment=Coding assistant that runs Qwen models on your computer
+Exec=scoobert
+Icon=scoobert
+Terminal=false
+Categories=Development;
+StartupWMClass=scoobert
