@@ -140,7 +140,7 @@ fn layout(g: &Graph) -> Vec<(f32, f32)> {
             (0.5 + 0.4 * a.cos(), 0.5 + 0.4 * a.sin())
         })
         .collect();
-    let k = (1.0 / n as f32).sqrt();
+    let k = (1.0_f32 / n as f32).sqrt();
     let mut temp = 0.1;
     for _ in 0..300 {
         let mut disp = vec![(0.0f32, 0.0f32); n];

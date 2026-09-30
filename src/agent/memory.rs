@@ -256,7 +256,7 @@ pub fn attach(vault: &Vault, folder: &str, message: &str, already: &mut BTreeSet
     let avg = docs.iter().map(|d| d.len).sum::<f64>() / n;
     let idf = |t: &str| {
         let df = docs.iter().filter(|d| d.tf.contains_key(t)).count() as f64;
-        (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+        (1.0_f64 + (n - df + 0.5) / (df + 0.5)).ln()
     };
     let (k1, b) = (1.2, 0.75);
     let mut scored: Vec<(f64, &Doc)> = docs
