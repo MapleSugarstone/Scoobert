@@ -873,14 +873,19 @@ impl Host {
     }
 
     /// Continues a summary from its draft. A chat request cannot start the reply with given text while thinking is
-    /// on, so this sends the rendered prompt with the draft appended to the completion endpoint.
+    /// on, so this sends the rendered prompt with the draft already written to the completion endpoint.
     async fn continue_summary(&self, body: &Value, draft: &str, max_tokens: u32, cancel: &CancellationToken, on_text: impl FnMut(&str)) -> anyhow::Result<()> {
-        let mut prompt = self.llama.render(body).await?;
-        // The draft is the answer, so a thinking block the template opened is closed before it, as the model would.
-        if prompt.ends_with("<think>\n") {
-            prompt.push_str("\n</think>\n\n");
+        // The model's own template writes the draft as its reply, followed by a marker. Cutting at the marker gives
+        // the prompt in whatever format the model uses. A later user message keeps the server from treating the
+        // reply as a prefill, which it refuses while thinking is on.
+        const MARK: &str = "\u{E000}scoobert-draft-end\u{E000}";
+        let mut payload = body.clone();
+        if let Some(messages) = payload["messages"].as_array_mut() {
+            messages.push(serde_json::json!({ "role": "assistant", "content": format!("{draft}{MARK}") }));
+            messages.push(serde_json::json!({ "role": "user", "content": "Continue." }));
         }
-        prompt.push_str(draft);
+        let rendered = self.llama.render(&payload).await?;
+        let prompt = &rendered[..rendered.find(MARK).context("The chat template left out the summary draft")?];
         let used = (draft.len() as f64 / CHARS_PER_TOKEN) as u32;
         self.llama.complete(&prompt, max_tokens.saturating_sub(used).max(64), cancel, on_text).await
     }

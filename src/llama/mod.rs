@@ -227,6 +227,9 @@ impl LlamaServer {
         if let Some(mmproj) = &model.mmproj {
             args.extend(["--mmproj".into(), path_arg(mmproj)]);
         }
+        if let Some(template) = reasoning_keeping_template(model) {
+            args.extend(["--chat-template-file".into(), path_arg(&template)]);
+        }
         #[rustfmt::skip]
         args.extend([
             "-c", &ctx.to_string(),
@@ -614,6 +617,27 @@ fn free_port(preferred: u16) -> u16 {
         .and_then(|l| l.local_addr())
         .map(|a| a.port())
         .unwrap_or(preferred)
+}
+
+/// Qwen 3.5 templates drop the reasoning of every earlier turn once a new user message arrives. The server's cache
+/// still holds that reasoning, so each message re-read the whole previous turn. This returns a copy of the model's
+/// template that keeps it, as later Qwen templates do with `preserve_thinking`, or None when no change is needed.
+fn reasoning_keeping_template(model: &LocalModel) -> Option<PathBuf> {
+    const CONDITION: &str = "loop.index0 > ns.last_query_index";
+    let dir = paths::get().cache.join("templates");
+    let safe: String = model.name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    let file = dir.join(format!("{safe}.jinja"));
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    if file.is_file() && modified(&file) >= modified(&model.path) {
+        return Some(file);
+    }
+    let template = gguf::chat_template(&model.path)?;
+    if !template.contains(CONDITION) || template.contains("preserve_thinking") {
+        return None;
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::write(&file, template.replace(CONDITION, "true")).ok()?;
+    Some(file)
 }
 
 /// A server left behind by a crash or a forced close still holds the port and several GB of memory.

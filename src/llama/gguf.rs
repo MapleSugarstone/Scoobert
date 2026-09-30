@@ -117,6 +117,32 @@ pub fn read_metadata(file: &Path) -> anyhow::Result<HashMap<String, Value>> {
     Ok(meta)
 }
 
+/// The chat template stored in the model file. It follows the tokenizer tables, so more of the file is read.
+pub fn chat_template(file: &Path) -> Option<String> {
+    const TEMPLATE_BYTES: u64 = 48 * 1024 * 1024;
+    let mut buf = Vec::new();
+    std::fs::File::open(file).ok()?.take(TEMPLATE_BYTES).read_to_end(&mut buf).ok()?;
+    if !buf.starts_with(b"GGUF") {
+        return None;
+    }
+    let mut r = Reader { buf: &buf, pos: 4 };
+    r.u32().ok()?;
+    r.u64().ok()?;
+    let count = r.u64().ok()?;
+    for _ in 0..count {
+        let key = r.string().ok()?;
+        let kind = r.u32().ok()?;
+        let value = r.value(kind).ok()?;
+        if key == "tokenizer.chat_template" {
+            return match value {
+                Value::Str(s) => Some(s),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 fn architecture_complete(meta: &HashMap<String, Value>) -> bool {
     match meta.get("general.architecture") {
         Some(Value::Str(arch)) => meta.contains_key(&format!("{arch}.block_count")),

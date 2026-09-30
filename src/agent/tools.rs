@@ -333,6 +333,9 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
         tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Could not create {}: {e}", paths::display(dir)))?;
     }
     let append = call.arguments.get("append").is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"));
+    if append && content.is_empty() {
+        return Err("Nothing was added, because content was empty. Put the text to add in content.".into());
+    }
     let new = match (&old, append) {
         (Some(existing), true) if !existing.is_empty() && !existing.ends_with('\n') => format!("{existing}\n{content}"),
         (Some(existing), true) => format!("{existing}{content}"),
