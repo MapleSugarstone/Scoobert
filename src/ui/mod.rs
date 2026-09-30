@@ -36,9 +36,10 @@ use icons::{Icon, icon};
 const SIDEBAR_WIDTH: f32 = 290.0;
 const COMPOSER_ID: &str = "composer";
 const RENAME_ID: &str = "rename";
+const PROJECT_SEARCH_ID: &str = "project-search";
 
 pub fn run() -> iced::Result {
-    let saved = State::load().window.map(|(w, h)| Size::new(w, h)).unwrap_or(Size::new(1320.0, 860.0));
+    let saved = State::load().window.map(|(w, h)| Size::new(w, h)).unwrap_or(Size::new(1310.0, 730.0));
     let (size, position) = place_window(saved);
     iced::application(App::new, App::update, App::view)
         .window(window::Settings {
@@ -47,6 +48,10 @@ pub fn run() -> iced::Result {
             min_size: Some(Size::new(760.0, 480.0)),
             icon: window::icon::from_file_data(include_bytes!("../../assets/icon.png"), None).ok(),
             exit_on_close_request: false,
+            // The top bar holds the window buttons, so the system title bar is not drawn.
+            decorations: false,
+            #[cfg(windows)]
+            platform_specific: window::settings::PlatformSpecific { undecorated_shadow: true, ..Default::default() },
             // Matches the .desktop file, so Linux desktops show the right icon and group the window.
             #[cfg(target_os = "linux")]
             platform_specific: window::settings::PlatformSpecific { application_id: "scoobert".into(), ..Default::default() },
@@ -115,6 +120,14 @@ pub enum Message {
     ShutdownDone(window::Id),
     /// Closes the app the same way the window's close button does.
     Quit,
+    /// A press on an empty part of the top bar: a drag moves the window, and a second press soon after maximizes it.
+    TitlePressed,
+    WindowMenu,
+    Minimize,
+    ToggleMaximize,
+    Maximized(bool),
+    ResizeFrom(window::Direction),
+    CloseHover(bool),
     Tick,
     Escape,
     Noop,
@@ -126,6 +139,12 @@ pub enum Message {
     RevealProject(PathBuf),
     Sessions(PathBuf, Vec<Summary>),
     NewConversation,
+    /// Starts a conversation with no project.
+    NewChat,
+    SearchProjects(String),
+    SearchIndex(Vec<(Option<PathBuf>, Summary)>),
+    /// Opens a conversation from the search results, in its project or in Chats when the project is None.
+    OpenIn(Option<PathBuf>, PathBuf),
     OpenConversation(PathBuf),
     Opened(Result<Box<Snapshot>, String>),
     StartRename(PathBuf, String),
@@ -185,9 +204,16 @@ pub struct App {
     scale: f32,
     window: Option<window::Id>,
     window_size: Option<Size>,
+    maximized: bool,
+    /// When the top bar was last pressed, to tell a double click from two drags.
+    title_pressed: Option<Instant>,
+    close_hover: bool,
     server: ServerStatus,
     models: Vec<ModelOption>,
     sessions: Vec<Summary>,
+    search: String,
+    /// Every conversation in Chats and the projects, loaded when a search starts.
+    search_index: Option<Vec<(Option<PathBuf>, Summary)>>,
     renaming: Option<(PathBuf, String)>,
     chat: Option<Chat>,
     composer: text_editor::Content,
@@ -234,7 +260,7 @@ impl App {
         let state = State::load();
         let shared = Arc::new(RwLock::new(state.settings.clone()));
         let logo = image::Handle::from_bytes(include_bytes!("../../assets/logo.png").as_slice());
-        let notes = notes::Pane::new(state.notes_open);
+        let notes = notes::Pane::new(!state.notes_closed);
         let mut app = App {
             state,
             shared,
@@ -246,9 +272,14 @@ impl App {
             scale: 1.0,
             window: None,
             window_size: None,
+            maximized: false,
+            title_pressed: None,
+            close_hover: false,
             server: ServerStatus::Stopped,
             models: Vec::new(),
             sessions: Vec::new(),
+            search: String::new(),
+            search_index: None,
             renaming: None,
             chat: None,
             composer: text_editor::Content::new(),
@@ -383,17 +414,23 @@ impl App {
 
     /// Switches to a project, or to no project when path is None, and reopens its last conversation.
     fn select_project(&mut self, path: Option<PathBuf>) -> Task<Message> {
-        self.state.current_project = path.clone();
-        self.save();
-        self.chat = None;
-        self.sessions.clear();
         let last = match &path {
             Some(p) => self.state.project(p).and_then(|p| p.last_session.clone()),
             None => self.state.general_last_session.clone(),
         };
-        let last = last.filter(|f| f.exists());
+        self.switch_to(path, last.filter(|f| f.exists()))
+    }
+
+    /// Switches to a project, or to no project when path is None, and opens `file` there or a new conversation.
+    fn switch_to(&mut self, path: Option<PathBuf>, file: Option<PathBuf>) -> Task<Message> {
+        self.search.clear();
+        self.search_index = None;
+        self.state.current_project = path.clone();
+        self.save();
+        self.chat = None;
+        self.sessions.clear();
         self.notes.set_project(path.map(|p| p.join(&self.state.settings.notes_folder)));
-        Task::batch([self.load_sessions(), self.open(last), self.notes.reload()])
+        Task::batch([self.load_sessions(), self.open(file), self.notes.reload()])
     }
 
     fn model_choices(&self) -> Vec<ModelChoice> {
@@ -434,7 +471,24 @@ impl App {
                 return window::scale_factor(id).map(Message::Scale);
             }
             Message::Scale(s) => self.scale = s,
-            Message::Resized(size) => self.window_size = Some(size),
+            Message::Resized(size) => {
+                self.window_size = Some(size);
+                if let Some(id) = self.window {
+                    return window::is_maximized(id).map(Message::Maximized);
+                }
+            }
+            Message::Maximized(on) => self.maximized = on,
+            Message::TitlePressed => {
+                let Some(id) = self.window else { return Task::none() };
+                let double = self.title_pressed.is_some_and(|t| t.elapsed() < Duration::from_millis(400));
+                self.title_pressed = (!double).then(Instant::now);
+                return if double { window::toggle_maximize(id) } else { window::drag(id) };
+            }
+            Message::WindowMenu => return self.window.map(window::show_system_menu).unwrap_or_else(Task::none),
+            Message::Minimize => return self.window.map(|id| window::minimize(id, true)).unwrap_or_else(Task::none),
+            Message::ToggleMaximize => return self.window.map(window::toggle_maximize).unwrap_or_else(Task::none),
+            Message::ResizeFrom(direction) => return self.window.map(|id| window::drag_resize(id, direction)).unwrap_or_else(Task::none),
+            Message::CloseHover(on) => self.close_hover = on,
             Message::CloseRequested(id) => {
                 if let Some(size) = self.window_size {
                     self.state.window = Some((size.width, size.height));
@@ -471,6 +525,9 @@ impl App {
                     self.settings = None;
                 } else if self.renaming.is_some() {
                     self.renaming = None;
+                } else if !self.search.is_empty() {
+                    self.search.clear();
+                    self.search_index = None;
                 } else if self.chat.as_ref().is_some_and(|c| c.running) {
                     return self.update(Message::Stop);
                 }
@@ -495,11 +552,15 @@ impl App {
                 if self.current_project().as_ref() != Some(&path) {
                     return self.select_project(Some(path));
                 }
+                self.search.clear();
+                self.search_index = None;
             }
             Message::SelectNoProject => {
                 if self.current_project().is_some() {
                     return self.select_project(None);
                 }
+                self.search.clear();
+                self.search_index = None;
             }
             Message::RevealProject(path) => {
                 let _ = opener::reveal(&path);
@@ -510,6 +571,34 @@ impl App {
                 }
             }
             Message::NewConversation => return self.open(None),
+            Message::SearchProjects(query) => {
+                let starting = self.search.trim().is_empty() && !query.trim().is_empty();
+                self.search = query;
+                if self.search.trim().is_empty() {
+                    self.search_index = None;
+                } else if starting {
+                    return self.load_search_index();
+                }
+            }
+            Message::SearchIndex(index) => {
+                if !self.search.trim().is_empty() {
+                    self.search_index = Some(index);
+                }
+            }
+            Message::OpenIn(place, file) => {
+                if self.current_project() == place {
+                    self.search.clear();
+                    self.search_index = None;
+                    return self.open(Some(file));
+                }
+                return self.switch_to(place, Some(file));
+            }
+            Message::NewChat => {
+                if self.current_project().is_none() {
+                    return self.open(None);
+                }
+                return self.switch_to(None, None);
+            }
             Message::OpenConversation(file) => return self.open(Some(file)),
             Message::Opened(Ok(snap)) => {
                 let file = snap.file.clone();
@@ -739,7 +828,7 @@ impl App {
             Message::Notes(msg) => {
                 let project = self.current_project();
                 let task = self.notes.update(msg, project.as_deref());
-                self.state.notes_open = self.notes.open;
+                self.state.notes_closed = !self.notes.open;
                 return task;
             }
             Message::Settings(msg) => {
@@ -1003,13 +1092,13 @@ impl App {
             self.setup.view(&self.state).map(Message::Setup)
         } else {
             let mut main = row![self.sidebar(), rule::vertical(1).style(theme::divider), self.main_area(&theme)];
-            if self.notes.open && self.current_project().is_some() {
+            if self.notes.open {
                 main = main.push(rule::vertical(1).style(theme::divider));
                 main = main.push(self.notes.view(&theme));
             }
             main.height(Fill).into()
         };
-        let mut layout = column![self.topbar(), rule::horizontal(1).style(theme::divider)];
+        let mut layout = column![];
         if let Some(release) = &self.update_notice {
             let mut bar = row![text(format!("Scoobert {} is available.", release.version)).size(13)].spacing(8).align_y(Alignment::Center);
             match self.update_progress {
@@ -1050,7 +1139,13 @@ impl App {
                     .padding(24),
             );
         }
-        layers.into()
+        // Dialogs cover the area below the top bar, so the window can still be moved and closed.
+        let title_bar = mouse_area(self.topbar()).on_press(Message::TitlePressed).on_right_press(Message::WindowMenu);
+        let framed = container(column![title_bar, rule::horizontal(1).style(theme::divider), layers]).width(Fill).height(Fill).style(theme::app);
+        if self.maximized {
+            return framed.into();
+        }
+        stack![framed, resize_edges()].into()
     }
 
     fn logo(&self, target: f32) -> Element<'_, Message> {
@@ -1064,13 +1159,6 @@ impl App {
         let brand = container(row![self.logo(36.0), text("Scoobert").size(19).font(fonts::ui_semibold())].spacing(10).align_y(Alignment::Center))
             .width(SIDEBAR_WIDTH)
             .padding([0, 16]);
-        let mut crumbs = row![].spacing(8).align_y(Alignment::Center);
-        let place = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| "New chat".into());
-        crumbs = crumbs.push(text(place).size(14).font(fonts::ui_semibold()));
-        if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty()) {
-            crumbs = crumbs.push(text("/").size(14).style(theme::muted));
-            crumbs = crumbs.push(text(clip(&c.title, 70)).size(14).style(theme::muted).wrapping(text::Wrapping::None));
-        }
         let choices = self.model_choices();
         let selected = self.current_model().map(|m| ModelChoice {
             name: m.name.clone(),
@@ -1101,18 +1189,30 @@ impl App {
             button(row![icon(Icon::Panel, 16.0), text("Notes").size(13)].spacing(6).align_y(Alignment::Center))
                 .padding([6, 12])
                 .style(notes_style)
-                // Notes belong to a project, so the pane has nothing to show without one.
-                .on_press_maybe(self.current_project().is_some().then_some(Message::Notes(notes::Msg::TogglePane))),
+                .on_press(Message::Notes(notes::Msg::TogglePane)),
         );
-        row![brand, container(crumbs).width(Fill).clip(true), right.padding([0, 16])].height(56).align_y(Alignment::Center).into()
+        let caption = |i: Icon, m: Message| button(center(icon(i, 16.0))).width(46).height(36).padding(0).style(theme::caption).on_press(m);
+        let close_glyph: Element<'_, Message> = if self.close_hover { icons::tinted(Icon::Close, 16.0, |_| iced::Color::WHITE).into() } else { icon(Icon::Close, 16.0).into() };
+        let close = mouse_area(button(center(close_glyph)).width(46).height(36).padding(0).style(theme::caption_close).on_press(Message::Quit))
+            .on_enter(Message::CloseHover(true))
+            .on_exit(Message::CloseHover(false));
+        let controls = row![
+            caption(Icon::Minimize, Message::Minimize),
+            caption(if self.maximized { Icon::Restore } else { Icon::Maximize }, Message::ToggleMaximize),
+            close,
+        ];
+        row![brand, space::horizontal(), right.padding([0, 16]), container(controls).height(Fill).align_y(Alignment::Start)]
+            .height(56)
+            .align_y(Alignment::Center)
+            .into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let new_button = button(row![icon(Icon::Plus, 16.0), text("New conversation").size(14)].spacing(8).align_y(Alignment::Center))
+        let new_button = button(row![icon(Icon::Plus, 16.0), text("New chat").size(14)].spacing(8).align_y(Alignment::Center))
             .width(Fill)
             .padding([8, 14])
             .style(theme::secondary)
-            .on_press(Message::NewConversation);
+            .on_press(Message::NewChat);
         let header = row![
             text("Projects").size(13).style(theme::muted),
             space::horizontal(),
@@ -1125,28 +1225,32 @@ impl App {
         .align_y(Alignment::Center)
         .padding([0, 4]);
 
+        let search = text_input("Search projects", &self.search)
+            .id(PROJECT_SEARCH_ID)
+            .on_input(Message::SearchProjects)
+            .size(13)
+            .padding([6, 10])
+            .style(theme::input);
         let current = self.current_project();
-        let mut list = Column::new().spacing(2);
+        let mut list = Column::new().spacing(2).push(header);
+        if !self.search.trim().is_empty() {
+            list = list.push(self.search_results());
+            return self.sidebar_frame(new_button.into(), search.into(), list);
+        }
+        // Chats is listed first, as a project without a folder.
         let general = current.is_none();
         list = list.push(
-            button(
-                row![icon(Icon::File, 15.0), text("New chat").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() })]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-            )
-            .width(Fill)
-            .padding([6, 4])
-            .style(theme::row_button)
-            .on_press(Message::SelectNoProject),
+            button(text("Chats").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() }))
+                .width(Fill)
+                .padding([6, 4])
+                .style(theme::row_button)
+                .on_press(Message::SelectNoProject),
         );
         if general {
+            list = list.push(self.new_conversation_row());
             list = list.extend(self.sessions.iter().map(|s| self.session_row(s)));
-            if self.sessions.is_empty() {
-                list = list.push(container(text("Ask anything. Scoobert starts a project when a task needs one.").size(12).style(theme::muted)).padding([4, 12]));
-            }
+            list = list.push(space().height(8));
         }
-        list = list.push(space().height(12));
-        list = list.push(header);
         for p in &self.state.projects {
             let is_current = current.as_ref() == Some(&p.path);
             let name = button(text(p.name()).size(14).font(if is_current { fonts::ui_bold() } else { fonts::ui() }))
@@ -1162,11 +1266,9 @@ impl App {
             .align_y(Alignment::Center);
             list = list.push(hover(name, container(actions).height(Fill).align_y(Alignment::Center)));
             if is_current {
+                list = list.push(self.new_conversation_row());
                 for s in &self.sessions {
                     list = list.push(self.session_row(s));
-                }
-                if self.sessions.is_empty() {
-                    list = list.push(container(text("No conversations yet").size(12).style(theme::muted)).padding([4, 12]));
                 }
                 list = list.push(space().height(8));
             }
@@ -1174,7 +1276,10 @@ impl App {
         if self.state.projects.is_empty() {
             list = list.push(container(text("Add an existing folder with the folder button, or let Scoobert start one.").size(12).style(theme::muted)).padding([4, 4]));
         }
+        self.sidebar_frame(new_button.into(), search.into(), list)
+    }
 
+    fn sidebar_frame<'a>(&'a self, new_button: Element<'a, Message>, search: Element<'a, Message>, list: Column<'a, Message>) -> Element<'a, Message> {
         let (dot, status): (fn(&theme::Tokens) -> iced::Color, String) = self.status_line();
         let footer = row![
             container(space()).width(8).height(8).style(theme::dot(dot)),
@@ -1188,7 +1293,7 @@ impl App {
 
         container(
             column![
-                container(new_button).padding([14, 14]),
+                container(column![new_button, search].spacing(10)).padding([14, 14]),
                 scrollable(list.padding([0, 10])).height(Fill).style(theme::scrollbar),
                 rule::horizontal(1).style(theme::divider),
                 footer,
@@ -1199,6 +1304,77 @@ impl App {
         .height(Fill)
         .style(theme::sidebar)
         .into()
+    }
+
+    /// The first row under the open project, selected while its new conversation is still empty.
+    fn new_conversation_row(&self) -> Element<'_, Message> {
+        let selected = self.chat.as_ref().is_some_and(|c| c.is_empty());
+        let label = row![icon(Icon::Plus, 14.0), text("New conversation").size(13)].spacing(8).align_y(Alignment::Center);
+        let item = button(label).width(Fill).padding([6, 10]).style(theme::list_item(selected)).on_press(Message::NewConversation);
+        let bar = container(space()).width(2).height(Fill).style(if selected { theme::accent_bar } else { |_: &Theme| container::Style::default() });
+        row![bar, item].height(32).into()
+    }
+
+    /// Lists every conversation in Chats and the projects, newest first, for the sidebar search.
+    fn load_search_index(&self) -> Task<Message> {
+        let mut places: Vec<Option<PathBuf>> = vec![None];
+        places.extend(self.state.projects.iter().map(|p| Some(p.path.clone())));
+        let root = crate::paths::projects_root();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut all: Vec<(Option<PathBuf>, Summary)> = places
+                        .into_iter()
+                        .flat_map(|place| {
+                            let dir = place.clone().unwrap_or_else(|| root.clone());
+                            Conversation::list(&dir).into_iter().map(move |s| (place.clone(), s))
+                        })
+                        .collect();
+                    all.sort_by(|a, b| b.1.modified.cmp(&a.1.modified));
+                    all
+                })
+                .await
+                .unwrap_or_default()
+            },
+            Message::SearchIndex,
+        )
+    }
+
+    /// Projects whose names match the search, then conversations whose titles match it.
+    fn search_results(&self) -> Element<'_, Message> {
+        let query = self.search.trim().to_lowercase();
+        let mut col = Column::new().spacing(2);
+        let mut found = false;
+        let place_row = |label: String, msg: Message| button(text(label).size(14)).width(Fill).padding([6, 4]).style(theme::row_button).on_press(msg);
+        if "chats".contains(&query) {
+            col = col.push(place_row("Chats".into(), Message::SelectNoProject));
+            found = true;
+        }
+        for p in self.state.projects.iter().filter(|p| p.name().to_lowercase().contains(&query)) {
+            col = col.push(place_row(p.name(), Message::SelectProject(p.path.clone())));
+            found = true;
+        }
+        let Some(index) = &self.search_index else {
+            return col.push(container(text("Searching conversations").size(12).style(theme::muted)).padding([6, 4])).into();
+        };
+        let hits: Vec<&(Option<PathBuf>, Summary)> = index.iter().filter(|(_, s)| s.title.to_lowercase().contains(&query)).take(50).collect();
+        if !hits.is_empty() {
+            col = col.push(container(text("Conversations").size(13).style(theme::muted)).padding(iced::Padding { top: 10.0, right: 4.0, bottom: 2.0, left: 4.0 }));
+            found = true;
+        }
+        for (place, s) in hits {
+            let project = place.as_deref().map(project_name).unwrap_or_else(|| "Chats".into());
+            let label = column![
+                container(text(clip(&s.title, 34)).size(13).wrapping(text::Wrapping::None)).width(Fill).clip(true),
+                row![text(project).size(12).style(theme::muted), space::horizontal(), text(ago(s.modified)).size(12).style(theme::muted)],
+            ]
+            .spacing(2);
+            col = col.push(button(label).width(Fill).padding([6, 10]).style(theme::list_item(false)).on_press(Message::OpenIn(place.clone(), s.file.clone())));
+        }
+        if !found {
+            col = col.push(container(text("No projects or conversations match.").size(12).style(theme::muted)).padding([6, 4]));
+        }
+        col.into()
     }
 
     fn session_row<'a>(&'a self, s: &'a Summary) -> Element<'a, Message> {
@@ -1416,6 +1592,36 @@ fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> 
         mouse_area(center(opaque(container(content).max_width(width).width(Fill).style(theme::modal))).padding(24).style(theme::backdrop))
             .on_press(Message::CloseModal),
     )
+}
+
+/// Thin strips along the window's edges and corners that resize it, since the window has no system frame.
+fn resize_edges<'a>() -> Element<'a, Message> {
+    use iced::mouse::Interaction;
+    use window::Direction;
+    const EDGE: f32 = 5.0;
+    let edge = |width: Length, height: Length, direction: Direction, cursor: Interaction| -> Element<'a, Message> {
+        mouse_area(space().width(width).height(height)).on_press(Message::ResizeFrom(direction)).interaction(cursor).into()
+    };
+    let (fixed, fill) = (Length::Fixed(EDGE), Length::Fill);
+    column![
+        row![
+            edge(fixed, fixed, Direction::NorthWest, Interaction::ResizingDiagonallyDown),
+            edge(fill, fixed, Direction::North, Interaction::ResizingVertically),
+            edge(fixed, fixed, Direction::NorthEast, Interaction::ResizingDiagonallyUp),
+        ],
+        row![
+            edge(fixed, fill, Direction::West, Interaction::ResizingHorizontally),
+            space().width(Fill).height(Fill),
+            edge(fixed, fill, Direction::East, Interaction::ResizingHorizontally),
+        ]
+        .height(Fill),
+        row![
+            edge(fixed, fixed, Direction::SouthWest, Interaction::ResizingDiagonallyUp),
+            edge(fill, fixed, Direction::South, Interaction::ResizingVertically),
+            edge(fixed, fixed, Direction::SouthEast, Interaction::ResizingDiagonallyDown),
+        ],
+    ]
+    .into()
 }
 
 fn confirm_dialog<'a>(c: &Confirm, rewind_files: bool) -> Element<'a, Message> {

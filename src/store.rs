@@ -194,7 +194,8 @@ pub struct State {
     /// The last conversation opened with no project selected.
     pub general_last_session: Option<PathBuf>,
     pub window: Option<(f32, f32)>,
-    pub notes_open: bool,
+    /// Stored as closed so the pane starts open for new users and for state saved before this field.
+    pub notes_closed: bool,
     pub update_checked_at: i64,
     pub setup_done: bool,
 }

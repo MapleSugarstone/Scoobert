@@ -437,6 +437,16 @@ impl Pane {
     }
 
     pub fn view(&self, theme: &Theme) -> Element<'_, Message> {
+        let width = if self.wide { 720 } else { 420 };
+        if self.root.is_none() {
+            let body = column![
+                text("Notes").size(14).font(fonts::ui_semibold()),
+                text("Notes belong to a project. Pick a project in the sidebar or ask Scoobert to start one, and its notes appear here.").size(13).style(theme::muted),
+            ]
+            .spacing(10)
+            .padding(20);
+            return container(body).width(width).height(Fill).style(theme::app).into();
+        }
         let tab = |label: &'static str, i: Icon, t: Tab| {
             let active = self.tab == t;
             let underline = container(space()).height(2).width(Fill).style(if active { theme::accent_bar } else { |_: &Theme| container::Style::default() });
@@ -487,7 +497,7 @@ impl Pane {
             col = col.push(container(text(e.clone()).size(12)).padding([6, 10]).width(Fill).style(theme::error_box));
         }
         col = col.push(body);
-        container(col.height(Fill)).width(if self.wide { 720 } else { 420 }).height(Fill).style(theme::app).into()
+        container(col.height(Fill)).width(width).height(Fill).style(theme::app).into()
     }
 
     fn tree(&self) -> Element<'_, Message> {

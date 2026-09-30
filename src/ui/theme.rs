@@ -285,6 +285,21 @@ pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
     button::Style { background: bg, text_color: fg, border: border::rounded(RADIUS), ..Default::default() }
 }
 
+/// A window button in the top bar, square so it meets the window edge.
+pub fn caption(theme: &Theme, status: button::Status) -> button::Style {
+    button::Style { border: border::rounded(0), ..ghost(theme, status) }
+}
+
+/// The close button turns red on hover, as it does in the system title bar.
+pub fn caption_close(theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered => Some(color!(0xc42b1c).into()),
+        button::Status::Pressed => Some(color!(0xa52618).into()),
+        _ => None,
+    };
+    button::Style { background, text_color: tokens(theme).muted, ..Default::default() }
+}
+
 /// Solid red, so Stop is easy to find while Scoobert works.
 pub fn stop(theme: &Theme, status: button::Status) -> button::Style {
     let base = if theme.extended_palette().is_dark { color!(0xd9534f) } else { color!(0xc93c37) };

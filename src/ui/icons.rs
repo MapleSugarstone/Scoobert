@@ -39,13 +39,17 @@ pub enum Icon {
     File,
     Key,
     Undo,
+    Minimize,
+    Maximize,
+    Restore,
 }
 
-const ALL: [Icon; 29] = [
+const ALL: [Icon; 32] = [
     Icon::Plus, Icon::Close, Icon::ChevronRight, Icon::ChevronDown, Icon::ArrowRight, Icon::ArrowLeft, Icon::Search,
     Icon::Folder, Icon::FolderOpen, Icon::Calendar, Icon::Expand, Icon::Shrink, Icon::More, Icon::Copy, Icon::Trash,
     Icon::Pencil, Icon::Stop, Icon::Image, Icon::Panel, Icon::Graph, Icon::Gear, Icon::Check, Icon::Download, Icon::Eye,
     Icon::Refresh, Icon::External, Icon::File, Icon::Key, Icon::Undo,
+    Icon::Minimize, Icon::Maximize, Icon::Restore,
 ];
 
 fn body(icon: Icon) -> String {
@@ -79,6 +83,9 @@ fn body(icon: Icon) -> String {
         Icon::File => r#"<path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5"/>"#,
         Icon::Key => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14.5 8.5l2 2"/>"#,
         Icon::Undo => r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>"#,
+        Icon::Minimize => r#"<path d="M6 12h12"/>"#,
+        Icon::Maximize => r#"<rect x="6" y="6" width="12" height="12" rx="1.5"/>"#,
+        Icon::Restore => r#"<rect x="5" y="8.5" width="10.5" height="10.5" rx="1.5"/><path d="M8.5 5.5H17a1.5 1.5 0 0 1 1.5 1.5v8.5"/>"#,
     };
     s.to_string()
 }
