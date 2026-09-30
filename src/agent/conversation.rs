@@ -124,7 +124,16 @@ enum Entry {
     Title { title: String },
     Model { model: String },
     Thinking { thinking: Thinking },
-    Compaction { summary: String, kept_from: usize },
+    Compaction {
+        summary: String,
+        kept_from: usize,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        environment: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        context: String,
+    },
+    /// The part of a summary written before the summary step was interrupted.
+    SummaryDraft { start: usize, kept_from: usize, text: String },
     /// The conversation moved to another folder, when a conversation without a project started one.
     Cwd { cwd: PathBuf },
     /// Messages from `to` on were discarded. They stay in the file above this line.
@@ -139,6 +148,18 @@ pub struct Compaction {
     /// How many messages the conversation had when the summary was made. Token counts from replies before that
     /// describe the longer conversation.
     pub at: usize,
+    /// The environment and session blocks sent with the summary, kept from when it was made so the message renders
+    /// the same on every request and the cached prompt stays valid. Empty in summaries made before they were kept.
+    pub environment: String,
+    pub context: String,
+}
+
+/// The start of a summary of the messages from start to kept_from, which the next attempt continues.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SummaryDraft {
+    pub start: usize,
+    pub kept_from: usize,
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +173,7 @@ pub struct Conversation {
     pub thinking: Thinking,
     pub messages: Vec<Message>,
     pub compaction: Option<Compaction>,
+    pub summary_draft: Option<SummaryDraft>,
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +201,7 @@ impl Conversation {
             thinking,
             messages: Vec::new(),
             compaction: None,
+            summary_draft: None,
         }
     }
 
@@ -200,13 +223,18 @@ impl Conversation {
                         thinking,
                         messages: Vec::new(),
                         compaction: None,
+                        summary_draft: None,
                     });
                 }
                 (Entry::Message { message }, Some(c)) => c.messages.push(message),
                 (Entry::Title { title }, Some(c)) => c.title = Some(title),
                 (Entry::Model { model }, Some(c)) => c.model = model,
                 (Entry::Thinking { thinking }, Some(c)) => c.thinking = thinking,
-                (Entry::Compaction { summary, kept_from }, Some(c)) => c.compaction = Some(Compaction { summary, kept_from, at: c.messages.len() }),
+                (Entry::Compaction { summary, kept_from, environment, context }, Some(c)) => {
+                    c.compaction = Some(Compaction { summary, kept_from, at: c.messages.len(), environment, context });
+                    c.summary_draft = None;
+                }
+                (Entry::SummaryDraft { start, kept_from, text }, Some(c)) => c.summary_draft = Some(SummaryDraft { start, kept_from, text }),
                 (Entry::Cwd { cwd }, Some(c)) => c.cwd = cwd,
                 (Entry::Rewind { to }, Some(c)) => c.truncate(to),
                 _ => {}
@@ -260,9 +288,16 @@ impl Conversation {
         if self.file.exists() { self.append(&Entry::Thinking { thinking }) } else { Ok(()) }
     }
 
-    pub fn set_compaction(&mut self, summary: String, kept_from: usize) -> anyhow::Result<()> {
-        self.append(&Entry::Compaction { summary: summary.clone(), kept_from })?;
-        self.compaction = Some(Compaction { summary, kept_from, at: self.messages.len() });
+    pub fn set_compaction(&mut self, summary: String, kept_from: usize, environment: String, context: String) -> anyhow::Result<()> {
+        self.append(&Entry::Compaction { summary: summary.clone(), kept_from, environment: environment.clone(), context: context.clone() })?;
+        self.compaction = Some(Compaction { summary, kept_from, at: self.messages.len(), environment, context });
+        self.summary_draft = None;
+        Ok(())
+    }
+
+    pub fn set_summary_draft(&mut self, draft: SummaryDraft) -> anyhow::Result<()> {
+        self.append(&Entry::SummaryDraft { start: draft.start, kept_from: draft.kept_from, text: draft.text.clone() })?;
+        self.summary_draft = Some(draft);
         Ok(())
     }
 
@@ -293,6 +328,9 @@ impl Conversation {
         self.messages.truncate(to);
         if self.compaction.as_ref().is_some_and(|c| c.kept_from >= to) {
             self.compaction = None;
+        }
+        if self.summary_draft.as_ref().is_some_and(|d| d.kept_from > to) {
+            self.summary_draft = None;
         }
     }
 

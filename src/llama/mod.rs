@@ -454,6 +454,49 @@ impl LlamaServer {
         }
     }
 
+    /// The prompt the server builds from a chat request, ending where the reply starts.
+    pub async fn render(&self, payload: &Value) -> anyhow::Result<String> {
+        let body = json!({ "messages": payload["messages"], "tools": payload["tools"], "chat_template_kwargs": payload["chat_template_kwargs"] });
+        let res = self.request("/apply-template", Some(&body), Duration::from_secs(60), None).await?;
+        res["prompt"].as_str().map(str::to_string).context("llama-server returned no prompt")
+    }
+
+    /// Streams a plain completion of `prompt`, passing each piece of text to `on_text`.
+    pub async fn complete(&self, prompt: &str, n_predict: u32, cancel: &CancellationToken, mut on_text: impl FnMut(&str)) -> anyhow::Result<()> {
+        use futures::StreamExt;
+        let body = json!({ "prompt": prompt, "n_predict": n_predict, "stream": true, "cache_prompt": true });
+        let send = self.http.post(format!("{}/completion", self.base_url())).bearer_auth(&self.api_key).json(&body).send();
+        let res = tokio::select! {
+            r = send => r?,
+            _ = cancel.cancelled() => return Err(Cancelled.into()),
+        };
+        if !res.status().is_success() {
+            bail!("llama-server /completion returned {}", res.status());
+        }
+        let mut stream = res.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            let chunk = tokio::select! {
+                c = stream.next() => c,
+                _ = cancel.cancelled() => return Err(Cancelled.into()),
+            };
+            let Some(chunk) = chunk else { return Ok(()) };
+            buf.extend_from_slice(&chunk?);
+            while let Some(end) = buf.iter().position(|&b| b == b'\n') {
+                let line: Vec<u8> = buf.drain(..=end).collect();
+                let line = String::from_utf8_lossy(&line);
+                let Some(data) = line.trim().strip_prefix("data:") else { continue };
+                let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue };
+                if let Some(text) = event["content"].as_str().filter(|t| !t.is_empty()) {
+                    on_text(text);
+                }
+                if event["stop"].as_bool() == Some(true) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     pub fn has_slot_file(&self, filename: &str) -> bool {
         paths::get().slots().join(filename).is_file()
     }

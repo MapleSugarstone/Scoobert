@@ -20,14 +20,14 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use conversation::{AssistantMessage, Conversation, Message, StopReason, ToolCall, ToolResult, UserMessage};
+use conversation::{AssistantMessage, Conversation, Message, StopReason, SummaryDraft, ToolCall, ToolResult, UserMessage};
 use providers::{Api, Provider};
 use stream::{ChatRequest, Delta, Endpoint};
 use tools::Shell;
 
 use crate::llama::{LlamaServer, LocalModel, ServerStatus, SharedSettings};
 use crate::store::{Approvals, HostedModel, Settings, Thinking};
-use crate::util::{is_cancelled, now_millis};
+use crate::util::{is_cancelled, now_millis, thousands};
 
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
 
@@ -799,9 +799,6 @@ impl Host {
         let Some(kept_from) = kept_from(&conv.messages, start, keep_chars) else {
             bail!("The last message is too long for {}'s context. Start a new conversation, or pick a model with a larger context in Settings.", ep.model);
         };
-        let used = crate::util::short_count(self.prompt_tokens(live));
-        let window = crate::util::short_count(self.context_window(target));
-        self.emit(Event::Activity { conv: id.into(), text: Some(format!("Summarizing earlier messages to make room. The next request needs about {used} of {window}...")) });
         let (system, view, _) = self.request_parts(live);
         // The view starts with the previous summary when there is one, and maps conversation indexes after it.
         let offset = if conv.compaction.is_some() { 1 } else { 0 };
@@ -809,23 +806,62 @@ impl Host {
         messages.push(Message::User(UserMessage { text: SUMMARY_PROMPT.into(), ..Default::default() }));
         let tools = self.tool_specs(live);
         let (thinking, thinking_budget) = side_thinking(ep, live);
-        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens: if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED } };
+        let max_tokens = if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED };
+        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens };
         let body = stream::payload(ep, &req);
-        let reply = stream::send(&self.http, ep, &body, cancel, |_| {}).await?;
-        if reply.stop == StopReason::Aborted {
-            return Err(crate::util::Cancelled.into());
+
+        // A local model continues the summary an interrupted attempt started, when it covers the same messages.
+        let draft = conv.summary_draft.clone().filter(|d| ep.local && d.start == start && d.kept_from == kept_from);
+        let label = if draft.is_some() { "Continuing the summary of earlier messages" } else { "Summarizing earlier messages to make room" };
+        self.emit(Event::Activity { conv: id.into(), text: Some(label.into()) });
+        let written = Mutex::new(draft.as_ref().map(|d| d.text.clone()).unwrap_or_default());
+        let pieces = AtomicU64::new(0);
+        let on_text = |t: &str| {
+            written.lock().unwrap().push_str(t);
+            let n = pieces.fetch_add(1, Ordering::SeqCst) + 1;
+            if n % 8 == 1 {
+                let words = written.lock().unwrap().split_whitespace().count();
+                self.emit(Event::Activity { conv: id.into(), text: Some(format!("{label}: {} words written", thousands(words as u64))) });
+            }
+        };
+        let result: anyhow::Result<()> = match &draft {
+            Some(d) => self.continue_summary(&body, &d.text, max_tokens, cancel, on_text).await,
+            None => {
+                let reply = stream::send(&self.http, ep, &body, cancel, |delta| match delta {
+                    Delta::Text(t) => on_text(&t),
+                    Delta::Progress { done, total, .. } if total > 0 => {
+                        self.emit(Event::Activity { conv: id.into(), text: Some(format!("{label}: read {} of {} tokens", thousands(done), thousands(total))) });
+                    }
+                    _ => {}
+                })
+                .await;
+                match reply {
+                    Ok(r) if r.stop == StopReason::Aborted => Err(crate::util::Cancelled.into()),
+                    Ok(r) if r.text.trim().is_empty() => Err(anyhow::anyhow!("The model could not summarize the conversation. {}", r.error.unwrap_or_default())),
+                    Ok(r) if r.stop == StopReason::Error => Err(anyhow::anyhow!("The summary stopped partway. {}", r.error.unwrap_or_default())),
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        let written = written.into_inner().unwrap();
+        if let Err(err) = result {
+            // What was written so far is kept, so the next attempt continues from it rather than starting over.
+            if ep.local && !written.trim().is_empty() {
+                let _ = live.conv.lock().unwrap().set_summary_draft(SummaryDraft { start, kept_from, text: written });
+            }
+            return Err(err);
         }
-        if reply.text.trim().is_empty() {
-            bail!("The model could not summarize the conversation. {}", reply.error.unwrap_or_default());
-        }
-        let mut summary = reply.text.trim().to_string();
+        let mut summary = written.trim().to_string();
         let folder = self.settings().notes_folder;
         let vault = crate::notes::Vault::new(conv.cwd.join(&folder));
         match memory::save_task_summary(&vault, &conv.display_title(), &summary) {
             Ok(rel) => summary.push_str(&format!("\n\nThis summary is also saved in {folder}/{rel}.")),
             Err(err) => eprintln!("[notes] {err:#}"),
         }
-        live.conv.lock().unwrap().set_compaction(summary, kept_from)?;
+        let environment = prompt::environment_block(&conv.cwd, &folder, &self.shell);
+        let session = prompt::session_block(&conv.cwd, &folder);
+        live.conv.lock().unwrap().set_compaction(summary, kept_from, environment, session)?;
         // Notes attached to the summarized messages are gone from the request, so they can be attached again.
         live.read_notes.lock().unwrap().clear();
         self.emit(Event::NotesChanged { cwd: conv.cwd.clone() });
@@ -836,17 +872,39 @@ impl Host {
         Ok(())
     }
 
+    /// Continues a summary from its draft. A chat request cannot start the reply with given text while thinking is
+    /// on, so this sends the rendered prompt with the draft appended to the completion endpoint.
+    async fn continue_summary(&self, body: &Value, draft: &str, max_tokens: u32, cancel: &CancellationToken, on_text: impl FnMut(&str)) -> anyhow::Result<()> {
+        let mut prompt = self.llama.render(body).await?;
+        // The draft is the answer, so a thinking block the template opened is closed before it, as the model would.
+        if prompt.ends_with("<think>\n") {
+            prompt.push_str("\n</think>\n\n");
+        }
+        prompt.push_str(draft);
+        let used = (draft.len() as f64 / CHARS_PER_TOKEN) as u32;
+        self.llama.complete(&prompt, max_tokens.saturating_sub(used).max(64), cancel, on_text).await
+    }
+
     /// The system prompt and the messages as the model sees them, with any summary in place of older messages.
     fn request_parts(&self, live: &Live) -> (String, Vec<Message>, Thinking) {
         let s = self.settings();
-        let c = live.conv.lock().unwrap();
+        let mut c = live.conv.lock().unwrap();
         let system = prompt::system_prompt(&s.notes_folder, self.shell.tool_name());
+        // A summary made before its details were kept gets them now, fixed for the rest of this session, so notes
+        // that change after a task do not change the first message and invalidate the cached prompt.
+        let cwd = c.cwd.clone();
+        if let Some(comp) = c.compaction.as_mut()
+            && comp.environment.is_empty()
+        {
+            comp.environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
+            comp.context = prompt::session_block(&cwd, &s.notes_folder);
+        }
         let messages = match &c.compaction {
             Some(comp) if comp.kept_from <= c.messages.len() => {
                 let mut out = vec![Message::User(UserMessage {
                     text: format!("<summary>\n{}\n</summary>", comp.summary.trim()),
-                    environment: prompt::environment_block(&c.cwd, &s.notes_folder, &self.shell),
-                    context: prompt::session_block(&c.cwd, &s.notes_folder),
+                    environment: comp.environment.clone(),
+                    context: comp.context.clone(),
                     images: Vec::new(),
                     time: 0,
                 })];

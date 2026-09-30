@@ -105,3 +105,16 @@ mod tests {
         assert_eq!(ago(now - 15 * DAY * 1000), "2 wk ago");
     }
 }
+
+/// A count with commas between groups of three digits, such as 12,345.
+pub fn thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}

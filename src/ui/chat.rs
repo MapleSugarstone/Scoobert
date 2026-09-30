@@ -14,7 +14,7 @@ use crate::agent::conversation::{AssistantMessage, Message as AgentMessage, Stop
 use crate::agent::stream::Delta;
 use crate::agent::{ConvId, Decision, Snapshot};
 use crate::store::Thinking;
-use crate::util::clip;
+use crate::util::{clip, thousands};
 
 pub const TRANSCRIPT_ID: &str = "transcript";
 const COMPACTED: &str = "Scoobert summarized the messages above to make room and continued from the summary. The summary is in the Tasks folder of the notes.";
@@ -590,18 +590,6 @@ fn diff_view<'a>(diff: &str) -> Element<'a, Message> {
 fn note_paths(context: &str) -> Vec<String> {
     let re = regex::Regex::new(r#"<note name="[^"]*" path="([^"]+)""#).unwrap();
     re.captures_iter(context).map(|c| c[1].to_string()).collect()
-}
-
-fn thousands(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::new();
-    for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
 }
 
 /// Renders code blocks with the app's colors and a Copy button.
