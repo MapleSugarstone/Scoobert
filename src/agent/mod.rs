@@ -333,6 +333,7 @@ impl Host {
     }
 
     fn snapshot(&self, live: &Live, notice: Option<String>) -> Snapshot {
+        let context = self.context_used(live);
         let c = live.conv.lock().unwrap();
         Snapshot {
             id: c.id.clone(),
@@ -342,7 +343,7 @@ impl Host {
             model: c.model.clone(),
             thinking: c.thinking,
             messages: c.messages.clone(),
-            context: c.context_tokens(),
+            context,
             running: live.running.load(Ordering::SeqCst),
             notice,
             compacted_at: c.compaction.as_ref().map(|comp| comp.kept_from),
@@ -566,10 +567,8 @@ impl Host {
             host.emit(Event::Activity { conv: conv_id.clone(), text: None });
             live.running.store(false, Ordering::SeqCst);
             *live.run_cancel.lock().unwrap() = None;
-            let (context, interrupted) = {
-                let c = live.conv.lock().unwrap();
-                (c.context_tokens(), needs_continue(&c.messages))
-            };
+            let context = host.context_used(&live);
+            let interrupted = needs_continue(&live.conv.lock().unwrap().messages);
             host.emit(Event::Settled { conv: conv_id.clone(), context, interrupted });
             if result.is_ok() {
                 host.after_run(live, conv_id);
@@ -760,11 +759,34 @@ impl Host {
     /// Whether the next request would leave too little room for the reply.
     fn too_long(&self, live: &Live, target: &Target) -> bool {
         let ctx = self.context_window(target);
-        let (system, messages, thinking) = self.request_parts(live);
-        let chars = system.len() + self.tool_specs(live).iter().map(|t| t.to_string().len()).sum::<usize>() + messages_chars(&messages);
-        let estimate = (chars as f64 / CHARS_PER_TOKEN) as u64;
+        let thinking = live.conv.lock().unwrap().thinking;
         let reserve = (thinking.budget() as u64 + 2048).min(ctx / 3);
-        estimate + reserve > ctx
+        self.prompt_tokens(live) + reserve > ctx
+    }
+
+    /// What the context meter shows: the size of the next request, which includes files read since the last reply.
+    /// An empty conversation shows nothing yet.
+    fn context_used(&self, live: &Live) -> u64 {
+        if live.conv.lock().unwrap().messages.is_empty() { 0 } else { self.prompt_tokens(live) }
+    }
+
+    /// Tokens the next request sends: the server's count after the last reply plus an estimate for the messages
+    /// since. The character estimate runs about a third high on code, so it covers the whole request only when no
+    /// reply has been counted since the last summary.
+    fn prompt_tokens(&self, live: &Live) -> u64 {
+        let estimate = |chars: usize| (chars as f64 / CHARS_PER_TOKEN) as u64;
+        let (system, messages, _) = self.request_parts(live);
+        let whole = estimate(system.len() + self.tool_specs(live).iter().map(|t| t.to_string().len()).sum::<usize>() + messages_chars(&messages));
+        let c = live.conv.lock().unwrap();
+        let since = c.compaction.as_ref().map_or(0, |k| k.at);
+        let counted = c.messages.iter().enumerate().rev().find_map(|(i, m)| match m {
+            Message::Assistant(a) => a.usage.map(|u| (i, u.input + u.output)),
+            _ => None,
+        });
+        match counted {
+            Some((i, tokens)) if i >= since => tokens + estimate(messages_chars(&c.messages[i + 1..])),
+            _ => whole,
+        }
     }
 
     /// Replaces older messages with a summary the model writes, so a long task can continue.
@@ -777,7 +799,9 @@ impl Host {
         let Some(kept_from) = kept_from(&conv.messages, start, keep_chars) else {
             bail!("The last message is too long for {}'s context. Start a new conversation, or pick a model with a larger context in Settings.", ep.model);
         };
-        self.emit(Event::Activity { conv: id.into(), text: Some("Summarizing earlier messages to make room...".into()) });
+        let used = crate::util::short_count(self.prompt_tokens(live));
+        let window = crate::util::short_count(self.context_window(target));
+        self.emit(Event::Activity { conv: id.into(), text: Some(format!("Summarizing earlier messages to make room. The next request needs about {used} of {window}...")) });
         let (system, view, _) = self.request_parts(live);
         // The view starts with the previous summary when there is one, and maps conversation indexes after it.
         let offset = if conv.compaction.is_some() { 1 } else { 0 };

@@ -136,6 +136,9 @@ enum Entry {
 pub struct Compaction {
     pub summary: String,
     pub kept_from: usize,
+    /// How many messages the conversation had when the summary was made. Token counts from replies before that
+    /// describe the longer conversation.
+    pub at: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -203,7 +206,7 @@ impl Conversation {
                 (Entry::Title { title }, Some(c)) => c.title = Some(title),
                 (Entry::Model { model }, Some(c)) => c.model = model,
                 (Entry::Thinking { thinking }, Some(c)) => c.thinking = thinking,
-                (Entry::Compaction { summary, kept_from }, Some(c)) => c.compaction = Some(Compaction { summary, kept_from }),
+                (Entry::Compaction { summary, kept_from }, Some(c)) => c.compaction = Some(Compaction { summary, kept_from, at: c.messages.len() }),
                 (Entry::Cwd { cwd }, Some(c)) => c.cwd = cwd,
                 (Entry::Rewind { to }, Some(c)) => c.truncate(to),
                 _ => {}
@@ -259,7 +262,7 @@ impl Conversation {
 
     pub fn set_compaction(&mut self, summary: String, kept_from: usize) -> anyhow::Result<()> {
         self.append(&Entry::Compaction { summary: summary.clone(), kept_from })?;
-        self.compaction = Some(Compaction { summary, kept_from });
+        self.compaction = Some(Compaction { summary, kept_from, at: self.messages.len() });
         Ok(())
     }
 
