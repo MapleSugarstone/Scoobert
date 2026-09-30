@@ -97,6 +97,8 @@ pub enum Message {
     Resized(Size),
     CloseRequested(window::Id),
     ShutdownDone(window::Id),
+    /// Closes the app the same way the window's close button does.
+    Quit,
     Tick,
     Escape,
     Noop,
@@ -104,6 +106,7 @@ pub enum Message {
     AddProject,
     ProjectPicked(Option<PathBuf>),
     SelectProject(PathBuf),
+    SelectNoProject,
     RevealProject(PathBuf),
     Sessions(PathBuf, Vec<Summary>),
     NewConversation,
@@ -117,6 +120,8 @@ pub enum Message {
 
     Composer(text_editor::Action),
     Send,
+    /// Resumes an interrupted task with a hidden note that explains what happened.
+    Continue,
     Stop,
     AttachImage,
     ImagesPicked(Vec<Image>),
@@ -130,6 +135,8 @@ pub enum Message {
     Link(String),
     Copy(String),
     SaveAsNote(String),
+    /// The answer to the offer to turn on web search before sending: true turns it on.
+    WebOffer(bool),
 
     Notes(notes::Msg),
     Settings(settings::Msg),
@@ -166,6 +173,8 @@ pub struct App {
     confirm: Option<Confirm>,
     toast: Option<(String, Instant)>,
     update_notice: Option<(String, String)>,
+    /// A message that looks like it needs the web is waiting while the user decides about web search.
+    web_offer: bool,
 }
 
 struct HostSeed(SharedSettings);
@@ -221,6 +230,7 @@ impl App {
             confirm: None,
             toast: None,
             update_notice: None,
+            web_offer: false,
         };
         let mut tasks = vec![system::theme().map(Message::Mode)];
         if crate::update::due(app.state.update_checked_at) {
@@ -235,6 +245,7 @@ impl App {
         match (&self.chat, self.current_project()) {
             (Some(c), Some(p)) if !c.is_empty() => format!("{} - {} - Scoobert", clip(&c.title, 60), project_name(&p)),
             (_, Some(p)) => format!("{} - Scoobert", project_name(&p)),
+            (Some(c), None) if !c.is_empty() => format!("{} - Scoobert", clip(&c.title, 60)),
             _ => "Scoobert".into(),
         }
     }
@@ -282,6 +293,26 @@ impl App {
         self.state.current_project.clone().filter(|p| self.state.project(p).is_some())
     }
 
+    /// The folder conversations work in: the selected project, or the shared folder when none is selected.
+    fn workspace(&self) -> PathBuf {
+        self.current_project().unwrap_or_else(crate::paths::projects_root)
+    }
+
+    /// Remembers the conversation to reopen for its project, or for no project.
+    fn remember_last(&mut self, cwd: &std::path::Path, file: PathBuf) {
+        if crate::agent::is_general(cwd) {
+            if self.state.general_last_session.as_ref() != Some(&file) {
+                self.state.general_last_session = Some(file);
+                self.save();
+            }
+        } else if let Some(p) = self.state.project_mut(cwd)
+            && p.last_session.as_ref() != Some(&file)
+        {
+            p.last_session = Some(file);
+            self.save();
+        }
+    }
+
     fn toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
     }
@@ -293,7 +324,7 @@ impl App {
     }
 
     fn load_sessions(&self) -> Task<Message> {
-        let Some(project) = self.current_project() else { return Task::none() };
+        let project = self.workspace();
         Task::perform(
             async move {
                 let dir = project.clone();
@@ -305,7 +336,11 @@ impl App {
     }
 
     fn open(&mut self, file: Option<PathBuf>) -> Task<Message> {
-        let (Some(host), Some(project)) = (self.host.clone(), self.current_project()) else { return Task::none() };
+        let Some(host) = self.host.clone() else { return Task::none() };
+        let project = self.workspace();
+        if self.current_project().is_none() {
+            let _ = std::fs::create_dir_all(&project);
+        }
         if file.is_some() && self.chat.as_ref().map(|c| &c.file) == file.as_ref() {
             return Task::none();
         }
@@ -315,13 +350,18 @@ impl App {
         )
     }
 
-    fn select_project(&mut self, path: PathBuf) -> Task<Message> {
-        self.state.current_project = Some(path.clone());
+    /// Switches to a project, or to no project when path is None, and reopens its last conversation.
+    fn select_project(&mut self, path: Option<PathBuf>) -> Task<Message> {
+        self.state.current_project = path.clone();
         self.save();
         self.chat = None;
         self.sessions.clear();
-        let last = self.state.project(&path).and_then(|p| p.last_session.clone()).filter(|f| f.exists());
-        self.notes.set_project(Some(path.join(&self.state.settings.notes_folder)));
+        let last = match &path {
+            Some(p) => self.state.project(p).and_then(|p| p.last_session.clone()),
+            None => self.state.general_last_session.clone(),
+        };
+        let last = last.filter(|f| f.exists());
+        self.notes.set_project(path.map(|p| p.join(&self.state.settings.notes_folder)));
         Task::batch([self.load_sessions(), self.open(last), self.notes.reload()])
     }
 
@@ -354,14 +394,7 @@ impl App {
                     self.state.setup_done = true;
                     self.save();
                 }
-                match self.current_project() {
-                    Some(p) => return self.select_project(p),
-                    None => {
-                        if let Some(first) = self.state.projects.first().map(|p| p.path.clone()) {
-                            return self.select_project(first);
-                        }
-                    }
-                }
+                return self.select_project(self.current_project());
             }
             Message::Host(event) => return self.on_host_event(event),
             Message::Mode(mode) => self.system_dark = mode != iced::theme::Mode::Light,
@@ -388,6 +421,12 @@ impl App {
                 ));
             }
             Message::ShutdownDone(id) => return window::close(id),
+            Message::Quit => {
+                if let Some(id) = self.window {
+                    return self.update(Message::CloseRequested(id));
+                }
+                return iced::exit();
+            }
             Message::Tick => {
                 if self.toast.as_ref().is_some_and(|(_, at)| at.elapsed() > Duration::from_secs(5)) {
                     self.toast = None;
@@ -417,28 +456,28 @@ impl App {
                     self.state.projects.push(crate::store::Project { path: path.clone(), last_session: None });
                     self.state.projects.sort_by_key(|p| project_name(&p.path).to_lowercase());
                 }
-                return self.select_project(path);
+                return self.select_project(Some(path));
             }
             Message::ProjectPicked(None) => {}
             Message::SelectProject(path) => {
                 if self.current_project().as_ref() != Some(&path) {
-                    return self.select_project(path);
+                    return self.select_project(Some(path));
+                }
+            }
+            Message::SelectNoProject => {
+                if self.current_project().is_some() {
+                    return self.select_project(None);
                 }
             }
             Message::RevealProject(path) => {
                 let _ = opener::reveal(&path);
             }
             Message::Sessions(project, list) => {
-                if self.current_project().as_ref() == Some(&project) {
+                if self.workspace() == project {
                     self.sessions = list;
                 }
             }
-            Message::NewConversation => {
-                if self.current_project().is_none() {
-                    return self.update(Message::AddProject);
-                }
-                return self.open(None);
-            }
+            Message::NewConversation => return self.open(None),
             Message::OpenConversation(file) => return self.open(Some(file)),
             Message::Opened(Ok(snap)) => {
                 let file = snap.file.clone();
@@ -446,11 +485,8 @@ impl App {
                     host.close_idle(&snap.id);
                 }
                 let project = snap.cwd.clone();
-                if file.exists()
-                    && let Some(p) = self.state.project_mut(&project)
-                {
-                    p.last_session = Some(file);
-                    self.save();
+                if file.exists() {
+                    self.remember_last(&project, file);
                 }
                 self.chat = Some(Chat::from_snapshot(*snap));
                 return Task::batch([operation::focus(COMPOSER_ID), operation::snap_to(chat::TRANSCRIPT_ID, RelativeOffset::START)]);
@@ -500,24 +536,38 @@ impl App {
                     }
                     Confirm::RemoveProject(path) => {
                         self.state.projects.retain(|p| p.path != path);
-                        if self.state.current_project.as_ref() == Some(&path) {
-                            self.state.current_project = None;
-                            self.chat = None;
-                            self.sessions.clear();
-                            self.notes.set_project(None);
-                        }
+                        let was_current = self.state.current_project.as_ref() == Some(&path);
                         self.save();
-                        if let Some(first) = self.state.projects.first().map(|p| p.path.clone())
-                            && self.state.current_project.is_none()
-                        {
-                            return self.select_project(first);
+                        if was_current {
+                            return self.select_project(None);
                         }
                     }
                 }
             }
 
             Message::Composer(action) => self.composer.perform(action),
-            Message::Send => return self.send(),
+            Message::Send => return self.send(true),
+            Message::Continue => {
+                let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut()) else { return Task::none() };
+                match host.prompt(&chat.id, "Continue".into(), Vec::new(), true) {
+                    Ok(()) => {
+                        chat.pending = Some("Continue".into());
+                        chat.running = true;
+                        chat.interrupted = false;
+                        chat.error = None;
+                        return operation::snap_to(chat::TRANSCRIPT_ID, RelativeOffset::START);
+                    }
+                    Err(e) => chat.error = Some(format!("{e:#}")),
+                }
+            }
+            Message::WebOffer(enable) => {
+                self.web_offer = false;
+                if enable {
+                    self.state.settings.web_access = true;
+                    self.save();
+                }
+                return self.send(false);
+            }
             Message::Stop => {
                 if let (Some(host), Some(chat)) = (&self.host, &mut self.chat) {
                     host.abort(&chat.id);
@@ -695,9 +745,14 @@ impl App {
         Task::none()
     }
 
-    fn send(&mut self) -> Task<Message> {
+    /// Sends the message. With web search off, a message that looks like it needs the web first offers to turn it on.
+    fn send(&mut self, offer_web: bool) -> Task<Message> {
         let text = self.composer.text().trim().to_string();
         if text.is_empty() && self.images.is_empty() {
+            return Task::none();
+        }
+        if offer_web && !self.state.settings.web_access && NEEDS_WEB.is_match(&text) {
+            self.web_offer = true;
             return Task::none();
         }
         let Some(host) = self.host.clone() else { return Task::none() };
@@ -709,10 +764,11 @@ impl App {
             return Task::none();
         }
         let images = std::mem::take(&mut self.images);
-        match host.prompt(&chat.id, text.clone(), images) {
+        match host.prompt(&chat.id, text.clone(), images, false) {
             Ok(()) => {
                 chat.pending = Some(text);
                 chat.running = true;
+                chat.interrupted = false;
                 chat.error = None;
                 chat.notice = None;
                 self.composer = text_editor::Content::new();
@@ -741,6 +797,22 @@ impl App {
                 self.toast(message.clone());
                 return Task::none();
             }
+            Event::ProjectStarted { conv, path, file } => {
+                // The conversation moved into its new project, so the sidebar and notes follow it there.
+                if self.state.project(path).is_none() {
+                    self.state.projects.push(crate::store::Project { path: path.clone(), last_session: Some(file.clone()) });
+                    self.state.projects.sort_by_key(|p| project_name(&p.path).to_lowercase());
+                }
+                self.state.current_project = Some(path.clone());
+                self.save();
+                if let Some(chat) = self.chat.as_mut().filter(|c| &c.id == conv) {
+                    chat.cwd = path.clone();
+                    chat.file = file.clone();
+                }
+                self.toast(format!("Started the project {}", project_name(path)));
+                self.notes.set_project(Some(path.join(&self.state.settings.notes_folder)));
+                return Task::batch([self.load_sessions(), self.notes.reload()]);
+            }
             Event::NotesSaved { notes, .. } => {
                 self.toast(format!("Saved to notes: {}", notes.join(", ")));
                 return self.notes.reload();
@@ -755,23 +827,23 @@ impl App {
             | Event::ToolOutput { conv, .. }
             | Event::Approval { conv, .. }
             | Event::Compacted { conv, .. }
+            | Event::Titled { conv, .. }
             | Event::Settled { conv, .. } => conv.clone(),
             Event::Error { conv: Some(conv), .. } => conv.clone(),
             _ => return Task::none(),
         };
         let settled = matches!(event, Event::Settled { .. });
+        // The conversation file exists from the user's message on, so the sidebar and the resume point follow
+        // it right away rather than when the task ends.
+        let saved = matches!(event, Event::Message { message: crate::agent::conversation::Message::User(_), .. } | Event::Titled { .. });
         let Some(chat) = self.chat.as_mut().filter(|c| c.id == conv) else {
             return if settled { self.load_sessions() } else { Task::none() };
         };
         chat.apply(event);
-        if settled {
+        if settled || saved {
             let (project, file) = (chat.cwd.clone(), chat.file.clone());
-            if file.exists()
-                && let Some(p) = self.state.project_mut(&project)
-                && p.last_session.as_ref() != Some(&file)
-            {
-                p.last_session = Some(file);
-                self.save();
+            if file.exists() {
+                self.remember_last(&project, file);
             }
             return self.load_sessions();
         }
@@ -846,12 +918,11 @@ impl App {
             .width(SIDEBAR_WIDTH)
             .padding([0, 16]);
         let mut crumbs = row![].spacing(8).align_y(Alignment::Center);
-        if let Some(p) = self.current_project() {
-            crumbs = crumbs.push(text(project_name(&p)).size(14).font(fonts::ui_semibold()));
-            if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty()) {
-                crumbs = crumbs.push(text("/").size(14).style(theme::muted));
-                crumbs = crumbs.push(text(clip(&c.title, 70)).size(14).style(theme::muted).wrapping(text::Wrapping::None));
-            }
+        let place = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| "No project".into());
+        crumbs = crumbs.push(text(place).size(14).font(fonts::ui_semibold()));
+        if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty()) {
+            crumbs = crumbs.push(text("/").size(14).style(theme::muted));
+            crumbs = crumbs.push(text(clip(&c.title, 70)).size(14).style(theme::muted).wrapping(text::Wrapping::None));
         }
         let choices = self.model_choices();
         let selected = self.current_model().map(|m| ModelChoice {
@@ -883,7 +954,8 @@ impl App {
             button(row![icon(Icon::Panel, 16.0), text("Notes").size(13)].spacing(6).align_y(Alignment::Center))
                 .padding([6, 12])
                 .style(notes_style)
-                .on_press(Message::Notes(notes::Msg::TogglePane)),
+                // Notes belong to a project, so the pane has nothing to show without one.
+                .on_press_maybe(self.current_project().is_some().then_some(Message::Notes(notes::Msg::TogglePane))),
         );
         row![brand, container(crumbs).width(Fill).clip(true), right.padding([0, 16])].height(56).align_y(Alignment::Center).into()
     }
@@ -908,6 +980,26 @@ impl App {
 
         let current = self.current_project();
         let mut list = Column::new().spacing(2);
+        let general = current.is_none();
+        list = list.push(
+            button(
+                row![icon(Icon::File, 15.0), text("No project").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() })]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+            )
+            .width(Fill)
+            .padding([6, 4])
+            .style(theme::row_button)
+            .on_press(Message::SelectNoProject),
+        );
+        if general {
+            list = list.extend(self.sessions.iter().map(|s| self.session_row(s)));
+            if self.sessions.is_empty() {
+                list = list.push(container(text("Ask anything. Scoobert starts a project when a task needs one.").size(12).style(theme::muted)).padding([4, 12]));
+            }
+        }
+        list = list.push(space().height(12));
+        list = list.push(header);
         for p in &self.state.projects {
             let is_current = current.as_ref() == Some(&p.path);
             let name = button(text(p.name()).size(14).font(if is_current { fonts::ui_bold() } else { fonts::ui() }))
@@ -933,14 +1025,7 @@ impl App {
             }
         }
         if self.state.projects.is_empty() {
-            list = list.push(
-                column![
-                    text("Add a project folder to start.").size(13).style(theme::muted),
-                    button(text("Add project").size(13)).padding([6, 12]).style(theme::secondary).on_press(Message::AddProject),
-                ]
-                .spacing(8)
-                .padding([8, 4]),
-            );
+            list = list.push(container(text("Add an existing folder with the folder button, or let Scoobert start one.").size(12).style(theme::muted)).padding([4, 4]));
         }
 
         let (dot, status): (fn(&theme::Tokens) -> iced::Color, String) = self.status_line();
@@ -956,7 +1041,7 @@ impl App {
 
         container(
             column![
-                column![new_button, space().height(10), header].padding([14, 14]),
+                container(new_button).padding([14, 14]),
                 scrollable(list.padding([0, 10])).height(Fill).style(theme::scrollbar),
                 rule::horizontal(1).style(theme::divider),
                 footer,
@@ -983,8 +1068,9 @@ impl App {
                 .style(theme::input)
                 .into();
         }
+        // The title gets the space the time leaves and is cut there, so the two never overlap.
         let label = row![
-            text(clip(&s.title, 40)).size(13).wrapping(text::Wrapping::None).width(Fill),
+            container(text(clip(&s.title, 30)).size(13).wrapping(text::Wrapping::None)).width(Fill).clip(true),
             text(ago(s.modified)).size(12).style(theme::muted).wrapping(text::Wrapping::None),
         ]
         .spacing(8)
@@ -1019,18 +1105,11 @@ impl App {
     }
 
     fn main_area(&self, theme: &Theme) -> Element<'_, Message> {
-        let Some(_project) = self.current_project() else {
-            return center(
-                column![
-                    self.logo(96.0),
-                    text("Choose a project folder to start.").size(16),
-                    text("Scoobert works on the files in that folder and keeps notes about it.").size(13).style(theme::muted),
-                    button(text("Add project").size(14)).padding([8, 16]).style(theme::primary).on_press(Message::AddProject),
-                ]
-                .spacing(12)
-                .align_x(Alignment::Center),
-            )
-            .into();
+        let general = self.current_project().is_none();
+        let intro = if general {
+            "Ask anything. When a task needs its own files, Scoobert starts a project folder for it, or you can pick a project on the left."
+        } else {
+            "Scoobert reads and edits files in this project, runs commands, and keeps notes as it works."
         };
         let transcript: Element<'_, Message> = match &self.chat {
             Some(c) if !c.is_empty() => c.view(chat::markdown_settings(theme)),
@@ -1038,7 +1117,7 @@ impl App {
                 column![
                     self.logo(96.0),
                     text("What should Scoobert work on?").size(18).font(fonts::ui_semibold()),
-                    text("Scoobert reads and edits files in this project, runs commands, and keeps notes as it works.").size(13).style(theme::muted),
+                    text(intro).size(13).style(theme::muted),
                 ]
                 .spacing(10)
                 .align_x(Alignment::Center),
@@ -1098,9 +1177,9 @@ impl App {
         }
         let vision = self.current_model().is_some_and(|m| m.vision);
         let action: Element<'_, Message> = if running {
-            button(row![icons::tinted(Icon::Stop, 14.0, |t| t.text), text("Stop").size(13)].spacing(6).align_y(Alignment::Center))
-                .padding([6, 14])
-                .style(theme::secondary)
+            button(row![icons::tinted(Icon::Stop, 15.0, |_| iced::Color::WHITE), text("Stop").size(14).font(fonts::ui_semibold())].spacing(6).align_y(Alignment::Center))
+                .padding([7, 18])
+                .style(theme::stop)
                 .on_press(Message::Stop)
                 .into()
         } else {
@@ -1125,6 +1204,25 @@ impl App {
         tools = tools.push(space::horizontal());
         tools = tools.push(action);
         let mut col = Column::new().spacing(10);
+        if self.web_offer {
+            col = col.push(
+                container(
+                    column![
+                        text("This sounds like it needs the web, and web search is off.").size(13).font(fonts::ui_semibold()),
+                        text("With it on, Scoobert searches DuckDuckGo and reads pages. Your searches leave your computer.").size(12).style(theme::muted),
+                        row![
+                            button(text("Turn on web search and send").size(13)).padding([5, 12]).style(theme::primary).on_press(Message::WebOffer(true)),
+                            button(text("Send without it").size(13)).padding([5, 12]).style(theme::secondary).on_press(Message::WebOffer(false)),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(6),
+                )
+                .padding(10)
+                .width(Fill)
+                .style(theme::banner),
+            );
+        }
         if !self.images.is_empty() {
             col = col.push(attachments);
         }
@@ -1151,6 +1249,16 @@ impl App {
         container(r).max_width(820).width(Fill).into()
     }
 }
+
+/// Requests that usually need the internet, which trigger the offer to turn on web search.
+static NEEDS_WEB: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(concat!(
+        r"(?i)\b(search|look)\s+(the\s+)?(web|internet|online)\b|\blook\s+(it|this|that|them|up)\b|\bgoogle\b|\bresearch\b",
+        r"|\b(on|from)\s+the\s+(web|internet)\b|\bonline\b|\blatest\s+(version|release|news|docs)\b|\bnews\s+(about|on)\b",
+        r"|\bhow\s+(do|are|did)\s+other\s+(people|projects|developers|apps)\b|\bwhat\s+do\s+people\s+(say|recommend|use)\b|\bbrowse\b|https?://",
+    ))
+    .unwrap()
+});
 
 fn project_name(p: &std::path::Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| crate::paths::display(p))

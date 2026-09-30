@@ -1,0 +1,7 @@
+This is a portable copy of Scoobert.
+
+To start it, open scoobert (scoobert.exe on Windows).
+
+Scoobert keeps everything it needs in this folder: settings and conversations in "data", and the AI models it downloads in "models". You can move the whole folder anywhere, including to a USB drive.
+
+To remove Scoobert, close it and delete this folder. The notes Scoobert writes live inside your own project folders and stay there.

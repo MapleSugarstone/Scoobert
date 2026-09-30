@@ -73,8 +73,8 @@ fn find_git_bash() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Tool definitions in the OpenAI function format.
-pub fn specs(shell: &Shell) -> Vec<Value> {
+/// Tool definitions in the OpenAI function format. A conversation without a project also gets new_project.
+pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
     let path = json!({ "type": "string", "description": "File path, relative to the project folder or absolute." });
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
         json!({ "type": "function", "function": {
@@ -97,7 +97,7 @@ pub fn specs(shell: &Shell) -> Vec<Value> {
             &["command"],
         ),
     };
-    vec![
+    let mut all = vec![
         tool(
             "read",
             "Read a text file. Returns up to 2000 lines. Use offset and limit for longer files. Read a note by its name in double brackets, such as [[Auth design]]; the result also lists the note's links and the notes that link to it.",
@@ -116,16 +116,44 @@ pub fn specs(shell: &Shell) -> Vec<Value> {
         ),
         tool(
             "write",
-            "Create a file or replace a whole file. Creates missing folders.",
-            json!({ "path": path, "content": { "type": "string" } }),
+            "Create a file or replace a whole file. Creates missing folders. Set append to true to add content to the end of an existing file, which is how to write a long file in parts.",
+            json!({ "path": path, "content": { "type": "string" }, "append": { "type": "boolean" } }),
             &["path", "content"],
         ),
         shell_tool,
-    ]
+    ];
+    if web {
+        all.push(tool(
+            "web_search",
+            "Search the web. Returns titles, addresses, and snippets. Use it only when the user asks you to look something up or research online.",
+            json!({ "query": { "type": "string" } }),
+            &["query"],
+        ));
+        all.push(tool(
+            "web_read",
+            "Read a web page as plain text. Give find to get only the passages about a topic, or offset to read on from a position.",
+            json!({
+                "url": { "type": "string" },
+                "find": { "type": "string", "description": "Words to look for on the page." },
+                "offset": { "type": "integer", "description": "Character position to read from." },
+            }),
+            &["url"],
+        ));
+    }
+    if no_project {
+        all.push(tool(
+            "new_project",
+            "Start a project folder for work that needs its own files, such as a program or a website. Relative paths then resolve inside it. Call it once, before creating the files.",
+            json!({ "name": { "type": "string", "description": "A short folder name, such as snake-game." } }),
+            &["name"],
+        ));
+    }
+    all
 }
 
+/// Tools that only read, so they never need approval.
 pub fn is_read_only(name: &str) -> bool {
-    name == "read"
+    matches!(name, "read" | "web_search" | "web_read")
 }
 
 pub fn changes_files(name: &str) -> bool {
@@ -196,11 +224,13 @@ pub struct Limits {
     pub max_output: usize,
     /// The project's notes folder, for reading notes by name and listing their links.
     pub notes: Option<PathBuf>,
+    /// Whether the user turned on web search.
+    pub web: bool,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { unattended: false, isolation: Isolation::Refuse, max_output: MAX_BYTES, notes: None }
+        Limits { unattended: false, isolation: Isolation::Refuse, max_output: MAX_BYTES, notes: None, web: false }
     }
 }
 
@@ -220,6 +250,18 @@ pub async fn run(
         "edit" => edit(call, cwd, limits.notes.as_deref()).await,
         "write" => write(call, cwd, limits.notes.as_deref()).await,
         "bash" | "powershell" => command(call, cwd, shell, limits, cancel, on_output).await,
+        "web_search" if limits.web => match super::web::search(arg(call, &["query", "q"]).unwrap_or_default()).await {
+            Ok(results) => Ok(Outcome::ok(super::web::format_results(arg(call, &["query", "q"]).unwrap_or_default(), &results))),
+            Err(e) => Err(format!("{e:#}")),
+        },
+        "web_read" if limits.web => match super::web::fetch(arg(call, &["url", "address", "link"]).unwrap_or_default()).await {
+            Ok(page) => {
+                let offset = arg_u64(call, "offset").unwrap_or(0) as usize;
+                Ok(Outcome::ok(super::web::format_page(&page, offset, arg(call, &["find", "search"]), limits.max_output)))
+            }
+            Err(e) => Err(format!("{e:#}")),
+        },
+        "web_search" | "web_read" => Err("Web search is turned off. Tell the user they can turn it on under Settings, then continue without it.".into()),
         other => Err(format!("There is no tool named {other}. Use read, edit, write, or {}.", shell.tool_name())),
     };
     result.unwrap_or_else(Outcome::err)
@@ -227,6 +269,9 @@ pub async fn run(
 
 async fn read(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
     let max_bytes = limits.max_output;
+    if let Some(id) = arg(call, &["path", "file"]).and_then(|p| p.trim().strip_prefix("conversation:")) {
+        return read_conversation(cwd, id.trim(), max_bytes);
+    }
     let path = target_path(cwd, call, limits.notes.as_deref()).ok_or("read needs a path.")?;
     let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Could not read {}: {e}", paths::display(&path)))?;
     if bytes.iter().take(8192).any(|&b| b == 0) {
@@ -269,6 +314,14 @@ async fn read(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     Ok(Outcome::ok(out))
 }
 
+/// Another conversation in this project, which the user asked about, as a compact transcript.
+fn read_conversation(cwd: &Path, id: &str, max_bytes: usize) -> Result<Outcome, String> {
+    let found = super::conversation::Conversation::list(cwd).into_iter().find(|s| !id.is_empty() && s.id.starts_with(id));
+    let summary = found.ok_or_else(|| format!("There is no conversation {id} in this project."))?;
+    let conv = super::conversation::Conversation::load(&summary.file).map_err(|e| format!("{e:#}"))?;
+    Ok(Outcome::ok(conv.transcript(max_bytes)))
+}
+
 async fn write(call: &ToolCall, cwd: &Path, notes: Option<&Path>) -> Result<Outcome, String> {
     let path = target_path(cwd, call, notes).ok_or("write needs a path.")?;
     let content = arg(call, &["content", "text", "contents"]).ok_or("write needs content.")?;
@@ -276,12 +329,23 @@ async fn write(call: &ToolCall, cwd: &Path, notes: Option<&Path>) -> Result<Outc
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Could not create {}: {e}", paths::display(dir)))?;
     }
-    tokio::fs::write(&path, content).await.map_err(|e| format!("Could not write {}: {e}", paths::display(&path)))?;
+    let append = call.arguments.get("append").is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"));
+    let new = match (&old, append) {
+        (Some(existing), true) if !existing.is_empty() && !existing.ends_with('\n') => format!("{existing}\n{content}"),
+        (Some(existing), true) => format!("{existing}{content}"),
+        _ => content.to_string(),
+    };
+    tokio::fs::write(&path, &new).await.map_err(|e| format!("Could not write {}: {e}", paths::display(&path)))?;
     let shown = paths::display(&path);
+    let verb = match (&old, append) {
+        (Some(_), true) => "Added to",
+        (Some(_), false) => "Replaced",
+        (None, _) => "Created",
+    };
     Ok(Outcome {
-        output: format!("{} {shown} ({} bytes).", if old.is_some() { "Replaced" } else { "Created" }, content.len()),
+        output: format!("{verb} {shown} (now {} bytes).", new.len()),
         is_error: false,
-        diff: Some(unified_diff(old.as_deref().unwrap_or(""), content)),
+        diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)),
     })
 }
 

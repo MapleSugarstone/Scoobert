@@ -6,10 +6,26 @@ Scoobert is a single native program written in Rust. It needs no browser engine 
 
 ## Download and install
 
-Download the file for your system from the [Releases](../../releases) page.
+Download one file for your system from the [Releases](../../releases) page.
 
-- **Windows:** run `Scoobert-Setup-<version>.exe`. Scoobert installs for your Windows account and adds shortcuts to the Desktop and the Start menu. Windows may warn that the installer comes from an unknown publisher, because it is not code-signed. Select **More info**, then **Run anyway**.
-- **Linux:** download `Scoobert-<version>-x86_64.AppImage`, make it executable (`chmod +x Scoobert-*.AppImage`), and run it. On Bazzite and other immutable systems, an AppImage manager such as Gear Lever can add it to the app menu. The `.tar.gz` holds the same program as a plain folder.
+### Windows
+
+1. Download `Scoobert-Setup-<version>.exe` and open it.
+2. If Windows says it protected your PC, select **More info**, then **Run anyway**. The warning appears because the installer is not code-signed.
+3. Select **Next**, keep the suggested folder or pick another with **Browse**, and select **Install**. You don't need an administrator password.
+4. Open Scoobert from the shortcut on your desktop or in the Start menu.
+
+To remove Scoobert, open **Settings** in Scoobert and select **Uninstall Scoobert**, or find Scoobert under **Installed apps** in Windows Settings. The uninstaller asks whether to also remove your conversations and the downloaded models. The notes in your projects always stay.
+
+**No-install option:** download `Scoobert-<version>-portable-windows.zip`, right-click it, select **Extract All**, and open `scoobert.exe` inside the folder. The portable copy keeps its settings, conversations, and models inside its own folder, so you can put it anywhere, even on a USB drive. To remove it, delete the folder.
+
+### Linux
+
+1. Download `Scoobert-<version>-x86_64.AppImage`.
+2. Right-click it, open **Properties**, and turn on **Allow executing file as program** (or run `chmod +x Scoobert-*.AppImage`).
+3. Double-click it. On Bazzite and other immutable systems, the Gear Lever app can add it to your app menu.
+
+To remove Scoobert, delete the AppImage file. The `.tar.gz` holds the same program as a portable folder that keeps its data inside it, like the Windows zip.
 
 On first launch, choose which models to download. Scoobert preselects the ones that fit your computer's memory.
 
@@ -43,7 +59,10 @@ Hosted models run on the provider's servers, so Scoobert sends them your prompts
 ## Features
 
 - **Local assistant:** Scoobert reads files, edits code, runs commands and tests, and fixes what fails, in the project folder you open. It needs no account or internet connection once a model is downloaded.
-- **Projects and conversations:** add any folder as a project. Scoobert reopens the last project and conversation when it starts.
+- **Start without a project:** Scoobert opens with **No project** selected, so you can ask it anything. When a task needs its own files, it starts a project folder in `Documents\Scoobert` (`~/Documents/Scoobert` on Linux) and moves the conversation into it. Switch between **No project** and your projects with one click in the sidebar.
+- **Projects and conversations:** add any folder as a project. Scoobert reopens the last project and conversation when it starts, and names each conversation after its first task.
+- **Past conversations on request:** Scoobert only looks at your other conversations when you ask about them ("what did we decide last time?"). Then it lists the project's conversations and reads the one that matters.
+- **Web research (off until you turn it on):** with **Let Scoobert search the web** on in Settings, Scoobert searches DuckDuckGo, skims the promising results, and reads the best pages in full. Pages built by JavaScript are rendered in the browser already on your computer (Edge on Windows, Chrome or Chromium on Linux) with a throwaway profile. When web search is off and you ask for something that needs it, Scoobert offers to turn it on first. No account or key is needed.
 - **Three approval modes:** **Ask before changes** shows every edit as a diff and every command before it runs. **Work unattended in the project** is for leaving a task running: edits inside the project run without asking, edits elsewhere are refused, and commands cannot use the internet (see [Unattended work](#unattended-work)). **Allow everything** runs anything without asking.
 - **Long tasks:** when a conversation fills the model's context, Scoobert has the model summarize the older messages and continues from the summary. Each summary is also saved in the project's `Notes/Tasks` folder, so you can read how a long task went.
 - **Notes as memory:** each project keeps Markdown notes in its `Notes` folder, linked with `[[wikilinks]]`, and Scoobert does the remembering itself rather than relying on the model:
@@ -106,13 +125,14 @@ Tasks that need new packages from the internet fail in this mode, so install a p
 | Models | `%USERPROFILE%\models` | `~/models` |
 | Notes | `Notes` inside each project | `Notes` inside each project |
 
-Uninstalling Scoobert keeps all of these, so a reinstall continues where you left off.
+The uninstaller always removes the saved prompt caches and asks about the settings, conversations, and downloaded models. A portable copy keeps all of these in its own folder (in `data` and `models`) instead.
 
 ## Security
 
 - Scoobert treats every project as untrusted. Files in a project are only ever read as data or instructions for the model, never run as code by Scoobert itself.
 - The local model server listens only on your computer and requires a random key that changes every time Scoobert starts, so web pages and other programs cannot use it.
 - Model downloads are pinned to a tested version and checked against their published checksums.
+- Web search is off until you turn it on. Web text reaches the model marked as information rather than instructions, and the page reader refuses addresses on your computer or local network.
 - Scoobert checks GitHub once a day for a newer release and shows a notice. It never downloads or installs updates itself.
 
 ## Build from source

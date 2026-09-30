@@ -26,8 +26,8 @@ pub struct ToolCard {
 }
 
 pub enum Entry {
-    User { text: String, notes: Vec<String>, images: usize },
-    Assistant { key: String, thinking: String, text: String, md: markdown::Content, tools: Vec<ToolCard>, error: Option<String>, stop: StopReason },
+    User { text: String, notes: Vec<String>, images: usize, time: i64 },
+    Assistant { key: String, thinking: String, text: String, md: markdown::Content, tools: Vec<ToolCard>, error: Option<String>, stop: StopReason, time: i64 },
     Notice(String),
 }
 
@@ -37,6 +37,9 @@ pub struct Streaming {
     pub text: String,
     pub md: markdown::Content,
     pub tool: Option<String>,
+    pub tool_chars: usize,
+    /// Tokens the local model has generated for this reply, including any it holds back until a step completes.
+    pub generated: u64,
 }
 
 pub struct Chat {
@@ -59,6 +62,8 @@ pub struct Chat {
     pub error: Option<String>,
     /// A message sent but not yet confirmed by the host, shown right away.
     pub pending: Option<String>,
+    /// The last task stopped before it finished, so the transcript offers Continue.
+    pub interrupted: bool,
     counter: usize,
 }
 
@@ -83,6 +88,7 @@ impl Chat {
             notice: s.notice,
             error: None,
             pending: None,
+            interrupted: s.interrupted,
             counter: 0,
         };
         for (i, m) in s.messages.into_iter().enumerate() {
@@ -103,9 +109,9 @@ impl Chat {
             AgentMessage::User(u) => {
                 let notes = note_paths(&u.context);
                 if self.entries.is_empty() && self.title == "New conversation" {
-                    self.title = clip(&u.text.split_whitespace().collect::<Vec<_>>().join(" "), 200);
+                    self.title = crate::agent::conversation::quick_title(&u.text);
                 }
-                self.entries.push(Entry::User { text: u.text, notes, images: u.images.len() });
+                self.entries.push(Entry::User { text: u.text, notes, images: u.images.len(), time: u.time });
             }
             AgentMessage::Assistant(a) => self.push_assistant(a),
             AgentMessage::Tool(t) => {
@@ -134,6 +140,7 @@ impl Chat {
             tools,
             error: a.error,
             stop: a.stop,
+            time: a.time,
         });
     }
 
@@ -155,8 +162,22 @@ impl Chat {
                         s.text.push_str(&t);
                         s.md.push_str(&t);
                     }
-                    Delta::ToolCall(name) => s.tool = Some(name),
-                    Delta::Progress { done, total } => self.progress = Some((done, total)),
+                    Delta::ToolCall(name) => {
+                        s.tool = Some(name);
+                        s.tool_chars = 0;
+                    }
+                    Delta::ToolInput(chars) => s.tool_chars = chars,
+                    Delta::Generated(n) => {
+                        s.generated = n;
+                        self.activity = None;
+                        self.progress = None;
+                    }
+                    Delta::Progress { done, total, prompt } => {
+                        self.progress = Some((done, total));
+                        if prompt > 0 {
+                            self.context = prompt;
+                        }
+                    }
                 }
             }
             E::Message { message, .. } => {
@@ -164,9 +185,13 @@ impl Chat {
                     self.pending = None;
                     self.error = None;
                 }
-                if matches!(message, AgentMessage::Assistant(_)) {
+                if let AgentMessage::Assistant(a) = &message {
                     self.stream = None;
                     self.progress = None;
+                    // The meter follows each step of a task, not only the end of it.
+                    if let Some(u) = a.usage {
+                        self.context = u.input + u.output;
+                    }
                 }
                 self.push(message);
             }
@@ -177,8 +202,9 @@ impl Chat {
                 self.live_output.insert(call_id, tail);
             }
             E::Approval { id, call, .. } => self.approvals.push((id, call)),
-            E::Settled { context, .. } => {
+            E::Settled { context, interrupted, .. } => {
                 self.running = false;
+                self.interrupted = interrupted;
                 self.stream = None;
                 self.activity = None;
                 self.progress = None;
@@ -190,6 +216,7 @@ impl Chat {
             }
             E::Error { message, .. } => self.error = Some(message),
             E::Compacted { .. } => self.entries.push(Entry::Notice(COMPACTED.into())),
+            E::Titled { title, .. } => self.title = title,
             _ => {}
         }
     }
@@ -217,8 +244,30 @@ impl Chat {
                 _ => a.clone(),
             };
             items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
-        } else if self.running && self.stream.is_none() && self.approvals.is_empty() && self.live_output.is_empty() {
-            items = items.push(row![working_dot(), text("Working...").size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
+        } else if self.running && self.approvals.is_empty() && self.live_output.is_empty() && self.stream.as_ref().is_none_or(|s| s.text.is_empty() && s.thinking.is_empty() && s.tool.is_none()) {
+            let generated = self.stream.as_ref().map(|s| s.generated).unwrap_or(0);
+            let label = if generated > 0 { format!("Working... {} tokens written so far", thousands(generated)) } else { "Working...".to_string() };
+            items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
+        }
+        if self.interrupted && !self.running && self.pending.is_none() {
+            items = items.push(
+                container(
+                    row![
+                        column![
+                            text("This task stopped before it finished.").size(14).font(fonts::ui_semibold()),
+                            text("Scoobert was closed or stopped partway through. Continue picks up from the last saved step.").size(12).style(theme::muted),
+                        ]
+                        .spacing(2)
+                        .width(Fill),
+                        button(text("Continue").size(13)).padding([6, 16]).style(theme::primary).on_press(Message::Continue),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+                )
+                .padding(12)
+                .width(Fill)
+                .style(theme::banner),
+            );
         }
         if let Some(e) = &self.error {
             items = items.push(container(text(e).size(13)).padding([10, 12]).width(Fill).style(theme::error_box));
@@ -233,7 +282,7 @@ impl Chat {
 
     fn entry<'a>(&'a self, entry: &'a Entry, md_settings: markdown::Settings) -> Element<'a, Message> {
         match entry {
-            Entry::User { text, notes, images } => user_bubble(text, notes, *images),
+            Entry::User { text, notes, images, time } => sent_at(user_bubble(text, notes, *images), *time),
             Entry::Notice(n) => row![
                 rule::horizontal(1).style(theme::divider),
                 text(n.clone()).size(12).style(theme::muted).width(Length::Shrink),
@@ -242,7 +291,7 @@ impl Chat {
             .spacing(10)
             .align_y(Alignment::Center)
             .into(),
-            Entry::Assistant { key, thinking, text: raw, md, tools, error, stop } => {
+            Entry::Assistant { key, thinking, text: raw, md, tools, error, stop, time } => {
                 let mut col = Column::new().spacing(10);
                 if !thinking.trim().is_empty() {
                     col = col.push(self.thinking_block(key, thinking));
@@ -265,7 +314,7 @@ impl Chat {
                 {
                     col = col.push(container(text(e).size(13)).padding([10, 12]).width(Fill).style(theme::error_box));
                 }
-                col.into()
+                sent_at(col.into(), *time)
             }
         }
     }
@@ -320,7 +369,13 @@ impl Chat {
         }
         if let Some(tool) = &s.tool {
             col = col.push(
-                row![working_dot(), text(format!("{} ...", verb(tool))).size(13).font(fonts::ui_semibold())]
+                row![
+                    working_dot(),
+                    text(format!("{} ...", verb(tool))).size(13).font(fonts::ui_semibold()),
+                    text(if s.tool_chars > 0 { format!("{} characters so far", thousands(s.tool_chars as u64)) } else { String::new() })
+                        .size(12)
+                        .style(theme::muted),
+                ]
                     .spacing(8)
                     .align_y(Alignment::Center),
             );
@@ -373,6 +428,17 @@ impl Chat {
         }
         col.into()
     }
+}
+
+/// Shows how long ago a message was sent, and its date and time, while the pointer rests on it.
+fn sent_at<'a>(content: Element<'a, Message>, time: i64) -> Element<'a, Message> {
+    if time <= 0 {
+        return content;
+    }
+    let tip = column![text(crate::util::ago_long(time)).size(12), text(crate::util::date_time(time)).size(11).style(theme::muted)].spacing(1);
+    iced::widget::tooltip(content, container(tip).padding([4, 8]).style(theme::tooltip), iced::widget::tooltip::Position::FollowCursor)
+        .delay(std::time::Duration::from_millis(700))
+        .into()
 }
 
 fn user_bubble<'a>(message: &str, notes: &[String], images: usize) -> Element<'a, Message> {
@@ -448,6 +514,9 @@ pub fn verb(tool: &str) -> String {
         "edit" => "Edit",
         "write" => "Write",
         "bash" | "powershell" => "Run",
+        "web_search" => "Search",
+        "web_read" => "Read page",
+        "new_project" => "Start project",
         other => other,
     }
     .to_string()
@@ -456,6 +525,12 @@ pub fn verb(tool: &str) -> String {
 fn target(call: &ToolCall) -> String {
     match call.name.as_str() {
         "bash" | "powershell" => call.arg("command").lines().next().unwrap_or_default().to_string(),
+        "web_search" => call.arg("query").to_string(),
+        "web_read" => match call.arguments.get("find").and_then(|v| v.as_str()) {
+            Some(find) => format!("{} (looking for {find})", call.arg("url")),
+            None => call.arg("url").to_string(),
+        },
+        "new_project" => call.arg("name").to_string(),
         _ => call.arg("path").to_string(),
     }
 }
@@ -494,7 +569,7 @@ fn diff_view<'a>(diff: &str) -> Element<'a, Message> {
 }
 
 fn note_paths(context: &str) -> Vec<String> {
-    let re = regex::Regex::new(r#"<note path="([^"]+)">"#).unwrap();
+    let re = regex::Regex::new(r#"<note name="[^"]*" path="([^"]+)""#).unwrap();
     re.captures_iter(context).map(|c| c[1].to_string()).collect()
 }
 

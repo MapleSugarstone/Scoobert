@@ -35,7 +35,8 @@ if (-not (Test-Path (Join-Path $out 'LICENSE*'))) {
 	Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ggml-org/llama.cpp/master/LICENSE' -OutFile (Join-Path $out 'LICENSE-llama.cpp')
 }
 # Records exactly which build was bundled, so a release can be traced back and compared.
-$version = (& (Join-Path $out 'llama-server.exe') --version 2>&1 | Select-String 'version:').Line.Trim()
+# cmd merges the server's stderr, which PowerShell would otherwise treat as a terminating error.
+$version = (cmd /c "`"$(Join-Path $out 'llama-server.exe')`" --version 2>&1" | Select-String 'version:').Line.Trim()
 $hashes = Get-ChildItem $out -File | Where-Object { $_.Extension -in '.exe', '.dll' } | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
 Set-Content -Path (Join-Path $out 'VERSION.txt') -Encoding ascii -Value (@("llama.cpp $version", $origin, '') + $hashes)
 $size = ($keep | Measure-Object Length -Sum).Sum / 1MB

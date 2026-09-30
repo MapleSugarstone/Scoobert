@@ -17,7 +17,8 @@ pub fn system_prompt(notes_folder: &str, shell_tool: &str) -> String {
     format!(
         "You are Scoobert, a coding assistant working in the user's project on their computer. When the user asks who or what you are, answer as Scoobert.
 
-You help with software tasks: reading and changing code, running commands, explaining code, and fixing bugs. Read files before you change them. Make the smallest change that does the task, and match the style of the code around it. Paths are relative to the project folder unless they are absolute. After you change code, run the project's build or tests when there is an obvious way to. Keep replies short, and show code only when the user asks for it or it explains a change. Ask before you do anything destructive or hard to undo, such as deleting files or pushing to a remote. Use {shell_tool} for searching and listing files.
+You help with software tasks: reading and changing code, running commands, explaining code, and fixing bugs. Read files before you change them. Make the smallest change that does the task, and match the style of the code around it. Paths are relative to the project folder unless they are absolute. After you change code, run the project's build or tests when there is an obvious way to. Keep replies short, and show code only when the user asks for it or it explains a change. Ask before you do anything destructive or hard to undo, such as deleting files or pushing to a remote. Use {shell_tool} for searching and listing files. Write a long file in parts of about 150 lines: create it with write, then add each next part with write and append set to true, so the work is saved as you go.
+When the user asks you to research or look something up online and the web tools are available, search with web_search, pick the most promising results, skim them with web_read and its find option, read the best ones in full, and say which pages your answer comes from. When a task needs the web and the web tools are not available, tell the user they can turn on web search in Settings.
 
 ## Project notes
 Each project keeps notes in its `{notes_folder}/` folder: Markdown files that link to each other with [[Note name]] wikilinks. They hold what the code cannot show, such as decisions and their reasons, conventions, and known problems.
@@ -33,6 +34,15 @@ The first user message of a conversation ends with an <environment> block that g
 /// Details for the end of the first user message: project folder, platform, tools, date, notes, recent work,
 /// and AGENTS.md.
 pub fn environment_block(cwd: &Path, notes_folder: &str, shell: &Shell) -> String {
+    if super::is_general(cwd) {
+        return format!(
+            "<environment>\nProject: none. Files for this conversation go in {}. When the task needs its own files, such as a program or a website, call new_project with a short folder name first.\nPlatform: {}\nInstalled tools: {}\nDate: {}\n</environment>",
+            paths::display(cwd),
+            shell.describe(),
+            installed_tools(shell),
+            chrono::Local::now().format("%Y-%m-%d"),
+        );
+    }
     let vault = Vault::new(cwd.join(notes_folder));
     let (index, recent) = if vault.exists() { (memory::index(&vault, notes_folder), memory::recent_work(&vault)) } else { ("- none yet".into(), String::new()) };
     let mut out = format!(

@@ -15,7 +15,7 @@ rm -rf "dist/$tarname"
 mkdir -p "dist/$tarname/llama"
 cp target/release/scoobert LICENSE "dist/$tarname/"
 cp -P vendor/llama/* "dist/$tarname/llama/"
-cp packaging/linux/scoobert.desktop assets/icon.png "dist/$tarname/"
+cp packaging/linux/scoobert.desktop assets/icon.png packaging/portable.txt "dist/$tarname/"
 tar -C dist -czf "dist/$tarname.tar.gz" "$tarname"
 
 # AppImage: the server goes in usr/lib/scoobert/llama, which Scoobert also checks.

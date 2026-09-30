@@ -25,6 +25,17 @@ try {
 	if ($LASTEXITCODE -ne 0) { throw 'makensis failed' }
 	$setup = Get-Item "dist\Scoobert-Setup-$version.exe"
 	Write-Output ("Built {0} ({1:N0} MB)" -f $setup.FullName, ($setup.Length / 1MB))
+
+	# The portable copy is the same files plus portable.txt, which keeps all data inside its folder.
+	$portable = Join-Path $root 'dist\portable\Scoobert'
+	Remove-Item -Recurse -Force (Join-Path $root 'dist\portable') -ErrorAction SilentlyContinue
+	New-Item -ItemType Directory -Force $portable | Out-Null
+	Copy-Item "$stage\*" $portable -Recurse
+	Copy-Item 'packaging\portable.txt' $portable
+	$zip = Join-Path $root "dist\Scoobert-$version-portable-windows.zip"
+	Remove-Item $zip -ErrorAction SilentlyContinue
+	Compress-Archive -Path $portable -DestinationPath $zip
+	Write-Output ("Built {0} ({1:N0} MB)" -f $zip, ((Get-Item $zip).Length / 1MB))
 } finally {
 	Pop-Location
 }

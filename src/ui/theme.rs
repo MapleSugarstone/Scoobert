@@ -285,6 +285,17 @@ pub fn ghost(theme: &Theme, status: button::Status) -> button::Style {
     button::Style { background: bg, text_color: fg, border: border::rounded(RADIUS), ..Default::default() }
 }
 
+/// Solid red, so Stop is easy to find while Scoobert works.
+pub fn stop(theme: &Theme, status: button::Status) -> button::Style {
+    let base = if theme.extended_palette().is_dark { color!(0xd9534f) } else { color!(0xc93c37) };
+    let bg = match status {
+        button::Status::Hovered => mix(base, Color::WHITE, 0.12),
+        button::Status::Pressed => mix(base, Color::BLACK, 0.15),
+        _ => base,
+    };
+    button::Style { background: Some(bg.into()), text_color: Color::WHITE, border: border::rounded(RADIUS), ..Default::default() }
+}
+
 pub fn danger(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     let mut s = secondary(theme, status);

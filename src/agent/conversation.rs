@@ -121,6 +121,8 @@ enum Entry {
     Model { model: String },
     Thinking { thinking: Thinking },
     Compaction { summary: String, kept_from: usize },
+    /// The conversation moved to another folder, when a conversation without a project started one.
+    Cwd { cwd: PathBuf },
 }
 
 /// A summary that replaces every message before `kept_from` when Scoobert sends the conversation.
@@ -196,6 +198,7 @@ impl Conversation {
                 (Entry::Model { model }, Some(c)) => c.model = model,
                 (Entry::Thinking { thinking }, Some(c)) => c.thinking = thinking,
                 (Entry::Compaction { summary, kept_from }, Some(c)) => c.compaction = Some(Compaction { summary, kept_from }),
+                (Entry::Cwd { cwd }, Some(c)) => c.cwd = cwd,
                 _ => {}
             }
         }
@@ -251,6 +254,59 @@ impl Conversation {
         self.append(&Entry::Compaction { summary: summary.clone(), kept_from })?;
         self.compaction = Some(Compaction { summary, kept_from });
         Ok(())
+    }
+
+    /// Moves the conversation to another folder: its file goes to that project's conversation folder, and
+    /// tools resolve paths against the new folder from now on.
+    pub fn move_to(&mut self, cwd: &Path) -> anyhow::Result<()> {
+        let name = self.file.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        let file = project_dir(cwd).join(name);
+        if self.file.exists() {
+            if let Some(dir) = file.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::rename(&self.file, &file)?;
+        }
+        self.file = file;
+        self.cwd = cwd.to_path_buf();
+        if self.file.exists() { self.append(&Entry::Cwd { cwd: cwd.to_path_buf() }) } else { Ok(()) }
+    }
+
+    /// A compact transcript for another conversation to read: the messages, and one line per tool call.
+    pub fn transcript(&self, max_chars: usize) -> String {
+        let date = chrono::DateTime::from_timestamp_millis(self.created).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()).unwrap_or_default();
+        let mut out = format!("# {} ({date})\n", self.display_title());
+        if let Some(c) = &self.compaction {
+            out.push_str(&format!("\nSummary of the earlier part:\n{}\n", c.summary.trim()));
+        }
+        let start = self.compaction.as_ref().map(|c| c.kept_from).unwrap_or(0);
+        for m in &self.messages[start.min(self.messages.len())..] {
+            match m {
+                Message::User(u) => out.push_str(&format!("\nUser: {}\n", u.text.trim())),
+                Message::Assistant(a) => {
+                    if !a.text.trim().is_empty() {
+                        out.push_str(&format!("\nScoobert: {}\n", a.text.trim()));
+                    }
+                    for c in &a.tool_calls {
+                        let target = c.arguments.get("path").or(c.arguments.get("command")).and_then(Value::as_str).unwrap_or_default();
+                        out.push_str(&format!("[{} {}]\n", c.name, crate::util::clip(target.lines().next().unwrap_or_default(), 120)));
+                    }
+                }
+                Message::Tool(t) if t.is_error => out.push_str(&format!("[{} failed: {}]\n", t.name, crate::util::clip(t.output.trim(), 160))),
+                Message::Tool(_) => {}
+            }
+        }
+        if out.chars().count() > max_chars {
+            // The end of a conversation holds its outcome, so the start is what gets cut.
+            let skip = out.chars().count() - max_chars;
+            let tail: String = out.chars().skip(skip).collect();
+            return format!("# {}\n[Earlier messages left out.]\n{tail}", self.display_title());
+        }
+        out
+    }
+
+    pub fn user_messages(&self) -> usize {
+        self.messages.iter().filter(|m| matches!(m, Message::User(_))).count()
     }
 
     pub fn has_user_message(&self) -> bool {
@@ -311,12 +367,48 @@ impl Conversation {
 
 pub fn first_user_text(messages: &[Message]) -> Option<String> {
     messages.iter().find_map(|m| match m {
-        Message::User(u) => {
-            let flat = u.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            Some(crate::util::clip(&flat, 200))
-        }
+        Message::User(u) => Some(quick_title(&u.text)),
         _ => None,
     })
+}
+
+/// A short title from the first message, used until the model names the conversation: the first sentence,
+/// without polite openings, cut at the first clause, at nine words, and at 50 characters between words.
+pub fn quick_title(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut s = flat.as_str();
+    if let Some(i) = [". ", "? ", "! "].iter().filter_map(|p| s.find(p)).min() {
+        s = &s[..i];
+    }
+    // Case-insensitive matching only for ASCII text, where lower-casing keeps every byte offset valid.
+    let fold = |t: &str| if t.is_ascii() { t.to_lowercase() } else { t.to_string() };
+    let lower = fold(s);
+    let openings = ["please ", "can you ", "could you ", "would you ", "i want you to ", "i'd like you to ", "i would like you to ", "help me ", "hey ", "hi ", "ok ", "okay ", "so "];
+    let mut start = 0;
+    while let Some(o) = openings.iter().find(|o| lower[start..].starts_with(*o)) {
+        start += o.len();
+    }
+    s = &s[start..];
+    let lower = fold(s);
+    if let Some(i) = [" that ", " which ", ", ", " because ", " so that ", " and then "].iter().filter_map(|p| lower.find(p)).filter(|&i| i > 12).min() {
+        s = &s[..i];
+    }
+    let mut title = String::new();
+    for word in s.split(' ').take(9) {
+        if !title.is_empty() && title.len() + 1 + word.len() > 50 {
+            break;
+        }
+        if !title.is_empty() {
+            title.push(' ');
+        }
+        title.push_str(word);
+    }
+    let title = title.trim_end_matches(['.', '?', '!', ',', ':', ';']).to_string();
+    let mut chars = title.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => "New conversation".into(),
+    }
 }
 
 /// A project's conversation folder: its name plus a hash of its full path, so two projects with the same
@@ -343,4 +435,18 @@ pub fn is_session_file(file: &Path) -> bool {
             (Ok(f), Ok(r)) => f.starts_with(r),
             _ => false,
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quick_title;
+
+    #[test]
+    fn quick_titles_are_short_and_plain() {
+        assert_eq!(quick_title("Add a logout function to auth.js that clears the session cookie."), "Add a logout function to auth.js");
+        assert_eq!(quick_title("Please build an RPG in TypeScript with sprites, a battle system, and saves"), "Build an RPG in TypeScript with sprites");
+        assert_eq!(quick_title("Make a small snake game in one HTML file"), "Make a small snake game in one HTML file");
+        assert_eq!(quick_title("hey can you fix the failing test? It broke yesterday"), "Fix the failing test");
+        assert_eq!(quick_title("   "), "New conversation");
+    }
 }

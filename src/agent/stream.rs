@@ -39,8 +39,12 @@ pub enum Delta {
     Text(String),
     /// A tool call started; the arguments are still streaming.
     ToolCall(String),
-    /// How much of the prompt llama-server has read.
-    Progress { done: u64, total: u64 },
+    /// Characters of tool-call arguments received so far, such as the content of a file being written.
+    ToolInput(usize),
+    /// Tokens the local model has generated so far for this reply.
+    Generated(u64),
+    /// How much of the prompt llama-server has read, and the whole prompt's size in tokens.
+    Progress { done: u64, total: u64, prompt: u64 },
 }
 
 /// The request body exactly as Scoobert sends it, which the prompt cache also renders.
@@ -364,7 +368,7 @@ impl Accumulator {
             let total = p["total"].as_u64().unwrap_or(0);
             let cached = p["cache"].as_u64().unwrap_or(0);
             let done = p["processed"].as_u64().unwrap_or(0);
-            on_delta(Delta::Progress { done: done.saturating_sub(cached), total: total.saturating_sub(cached) });
+            on_delta(Delta::Progress { done: done.saturating_sub(cached), total: total.saturating_sub(cached), prompt: total });
         }
         let Some(choice) = v["choices"].get(0) else { return Ok(()) };
         let d = &choice["delta"];
@@ -392,8 +396,9 @@ impl Accumulator {
                 call.name.push_str(name);
                 on_delta(Delta::ToolCall(call.name.clone()));
             }
-            if let Some(args) = tc["function"]["arguments"].as_str() {
+            if let Some(args) = tc["function"]["arguments"].as_str().filter(|a| !a.is_empty()) {
                 call.args.push_str(args);
+                on_delta(Delta::ToolInput(call.args.len()));
             }
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
@@ -445,6 +450,7 @@ impl Accumulator {
                         let index = v["index"].as_u64().unwrap_or(0);
                         if let Some(&(_, i)) = self.blocks.iter().find(|(b, _)| *b == index) {
                             self.calls[i].args.push_str(d["partial_json"].as_str().unwrap_or_default());
+                            on_delta(Delta::ToolInput(self.calls[i].args.len()));
                         }
                     }
                     _ => {}

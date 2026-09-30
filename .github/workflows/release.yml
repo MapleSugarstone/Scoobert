@@ -23,7 +23,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/Scoobert-Setup-*.exe
+          path: |
+            dist/Scoobert-Setup-*.exe
+            dist/Scoobert-*-portable-windows.zip
 
   linux:
     # The oldest supported Ubuntu keeps the binary compatible with older glibc versions.

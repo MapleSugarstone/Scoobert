@@ -131,6 +131,8 @@ pub struct Settings {
     pub notes_folder: String,
     pub activity_log: bool,
     pub remember_step: bool,
+    /// Offers the web_search and web_read tools.
+    pub web_access: bool,
     pub keep_alive_minutes: u32,
     pub models_dir: String,
     pub llama_server_path: String,
@@ -149,6 +151,7 @@ impl Default for Settings {
             notes_folder: "Notes".into(),
             activity_log: true,
             remember_step: true,
+            web_access: false,
             keep_alive_minutes: 30,
             models_dir: String::new(),
             llama_server_path: String::new(),
@@ -188,6 +191,8 @@ pub struct State {
     pub settings: Settings,
     pub projects: Vec<Project>,
     pub current_project: Option<PathBuf>,
+    /// The last conversation opened with no project selected.
+    pub general_last_session: Option<PathBuf>,
     pub window: Option<(f32, f32)>,
     pub notes_open: bool,
     pub update_checked_at: i64,
@@ -209,7 +214,8 @@ impl State {
 
     /// Carries over the project list and main settings from PiCode, the app Scoobert replaced, on first run.
     fn from_picode() -> Option<State> {
-        if std::env::var_os("SCOOBERT_HOME").is_some() {
+        // Test profiles and portable copies start fresh.
+        if std::env::var_os("SCOOBERT_HOME").is_some() || paths::portable_folder().is_some() {
             return None;
         }
         let file = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("PiCode").join("state.json");

@@ -238,7 +238,6 @@ impl LlamaServer {
             "--host", "127.0.0.1",
             "--port", &self.port.to_string(),
             "--no-webui",
-            "--no-slots",
             "--cors-origins", "http://127.0.0.1",
             "--no-cors-credentials",
         ].map(String::from));
@@ -431,6 +430,14 @@ impl LlamaServer {
             let _ = f.set_modified(SystemTime::now());
         }
         ok
+    }
+
+    /// Tokens the server has generated for the current reply, read from its slot state. The server holds back a
+    /// tool call until it is complete, so this is the only progress Scoobert can show while a file is written.
+    pub async fn generated_tokens(&self) -> Option<u64> {
+        let slots = self.request("/slots", None, Duration::from_secs(2), None).await.ok()?;
+        let slot = slots.as_array()?.first()?;
+        slot["next_token"][0]["n_decoded"].as_u64().or(slot["next_token"]["n_decoded"].as_u64()).or(slot["n_decoded"].as_u64())
     }
 
     pub fn http(&self) -> &reqwest::Client {

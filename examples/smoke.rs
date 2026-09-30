@@ -25,7 +25,7 @@ async fn main() {
     let snap = host.open(&project, file.as_deref()).expect("the conversation opens");
     println!("[open] {} {} messages, model {}", snap.file.display(), snap.messages.len(), snap.model);
     let start = Instant::now();
-    host.prompt(&snap.id, args[3].clone(), Vec::new()).expect("the prompt starts");
+    host.prompt(&snap.id, args[3].clone(), Vec::new(), false).expect("the prompt starts");
     let mut first_token = None;
     while let Some(event) = rx.recv().await {
         let t = start.elapsed().as_secs_f32();
@@ -34,7 +34,7 @@ async fn main() {
                 first_token.get_or_insert(t);
                 print!("{s}");
             }
-            Event::Delta { delta: Delta::Progress { done, total }, .. } => println!("[{t:.1}s] reading {done}/{total}"),
+            Event::Delta { delta: Delta::Progress { done, total, .. }, .. } => println!("[{t:.1}s] reading {done}/{total}"),
             Event::Message { message, .. } => println!("\n[{t:.1}s] message {}", serde_json::to_string(&message).unwrap_or_default().chars().take(400).collect::<String>()),
             Event::Settled { context, .. } => {
                 println!("\n[{t:.1}s] settled, context {context} tokens, first token at {:.1}s", first_token.unwrap_or(0.0));

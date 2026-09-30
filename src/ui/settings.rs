@@ -106,6 +106,7 @@ pub enum Msg {
     CommitNotesFolder,
     ActivityLog(bool),
     RememberStep(bool),
+    WebAccess(bool),
     KeepAlive(KeepAlive),
     ModelsDir(String),
     CommitModelsDir,
@@ -133,6 +134,8 @@ pub enum Msg {
     AddCustom,
     RemoveCustom(String),
     OpenUrl(String),
+    Uninstall,
+    ShowFile(PathBuf),
     Close,
 }
 
@@ -207,6 +210,10 @@ impl Panel {
             }
             Msg::RememberStep(on) => {
                 s.remember_step = on;
+                return (Task::none(), Effect::Saved);
+            }
+            Msg::WebAccess(on) => {
+                s.web_access = on;
                 return (Task::none(), Effect::Saved);
             }
             Msg::KeepAlive(k) => {
@@ -342,6 +349,17 @@ impl Panel {
                 return (Task::none(), Effect::ModelsChanged);
             }
             Msg::OpenUrl(url) => return (Task::done(Message::OpenUrl(url)), Effect::None),
+            Msg::Uninstall => {
+                if let Some(uninstaller) = crate::paths::uninstaller() {
+                    match std::process::Command::new(&uninstaller).spawn() {
+                        Ok(_) => return (Task::done(Message::Quit), Effect::None),
+                        Err(e) => return (Task::none(), Effect::Toast(format!("Could not start the uninstaller: {e}"))),
+                    }
+                }
+            }
+            Msg::ShowFile(path) => {
+                let _ = opener::reveal(path);
+            }
             Msg::Close => return (Task::done(Message::CloseModal), Effect::None),
         }
         (Task::none(), Effect::None)
@@ -413,10 +431,17 @@ impl Panel {
             switch_row("Log finished tasks in today's note", "Adds what changed to the Daily folder after a task that edited files.", s.activity_log, Msg::ActivityLog),
             switch_row(
                 "Ask the model what to remember",
-                "After a task, a local model lists up to three facts for the related note. This takes about a minute on a laptop CPU.",
+                "After a task that changed several files or stated a preference, the model picks up to three facts, and Scoobert files them in the notes. With a local model this takes about a minute.",
                 s.remember_step,
                 Msg::RememberStep
             ),
+            switch_row(
+                "Let Scoobert search the web with DuckDuckGo",
+                "Off until you turn it on. When you ask it to research something, it searches DuckDuckGo and reads pages. Searches and page addresses leave your computer, even with a local model.",
+                s.web_access,
+                Msg::WebAccess
+            ),
+            removal(),
         ]
         .spacing(18)
         .into()
@@ -536,7 +561,7 @@ impl Panel {
             .spacing(8)
             .align_y(Alignment::Center),
             custom_progress(ctx.download),
-            subheading("Where models live"),
+            subheading("Where models are stored"),
             row![
                 text_input(&crate::paths::display(&crate::paths::get().default_models_dir()), &self.models_dir)
                     .on_input(Msg::ModelsDir)
@@ -738,6 +763,25 @@ fn custom_progress<'a>(download: &'a Option<Download>) -> Element<'a, Msg> {
     .spacing(8)
     .align_y(Alignment::Center)
     .into()
+}
+
+/// How to remove this copy of Scoobert: its uninstaller, its folder when portable, or its AppImage file.
+fn removal<'a>() -> Element<'a, Msg> {
+    let (help, button_label, msg): (String, &str, Msg) = if crate::paths::uninstaller().is_some() {
+        (
+            "Removes Scoobert from this computer. You choose whether to also remove your conversations and downloaded models. Project notes always stay.".into(),
+            "Uninstall Scoobert",
+            Msg::Uninstall,
+        )
+    } else if let Some(folder) = crate::paths::portable_folder() {
+        ("This is a portable copy. To remove it, close Scoobert and delete its folder.".into(), "Show the folder", Msg::ShowFile(folder))
+    } else if let Some(appimage) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
+        ("To remove Scoobert, close it and delete its AppImage file.".into(), "Show the file", Msg::ShowFile(appimage))
+    } else {
+        return space().into();
+    };
+    let control = button(text(button_label).size(13)).padding([6, 12]).style(theme::secondary).on_press(msg);
+    column![field("Remove Scoobert", None, control.into()), text(help).size(12).style(theme::muted)].spacing(4).into()
 }
 
 fn icons_ok<'a>() -> Element<'a, Msg> {

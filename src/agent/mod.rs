@@ -8,6 +8,7 @@ pub mod providers;
 pub mod sandbox;
 pub mod stream;
 pub mod tools;
+pub mod web;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -49,9 +50,14 @@ pub enum Event {
     ToolStarted { conv: ConvId, call: ToolCall },
     ToolOutput { conv: ConvId, call_id: String, tail: String },
     Approval { conv: ConvId, id: u64, call: ToolCall },
-    Settled { conv: ConvId, context: u64 },
+    /// The run ended. `interrupted` is true when the task did not finish, so the window can offer Continue.
+    Settled { conv: ConvId, context: u64, interrupted: bool },
     /// Messages before `kept_from` were replaced by a summary.
     Compacted { conv: ConvId, kept_from: usize },
+    /// A conversation without a project started one and moved into it.
+    ProjectStarted { conv: ConvId, path: PathBuf, file: PathBuf },
+    /// The model named the conversation.
+    Titled { conv: ConvId, title: String },
     /// Facts from a finished task were saved to these notes.
     NotesSaved { conv: ConvId, notes: Vec<String> },
     Error { conv: Option<ConvId>, message: String },
@@ -72,6 +78,8 @@ pub struct Snapshot {
     pub notice: Option<String>,
     /// Where a summary replaced the older messages, if one did.
     pub compacted_at: Option<usize>,
+    /// The last task stopped before it finished, after a crash, a close, or Stop.
+    pub interrupted: bool,
 }
 
 /// An entry in the model menu.
@@ -129,9 +137,11 @@ enum Verdict {
     Deny(String),
 }
 
-const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so the messages above will be replaced by your summary. Write what you need to continue the work without them, as short bullet points under these headings: ## Goal, ## Done (files changed and why, with exact paths), ## Decisions (with reasons), ## Next, ## Open problems. Reply in plain text without tools.";
+const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Write what you need to continue the work without the older ones, as short bullet points under these headings: ## Goal, ## Done (files changed and why, with exact paths), ## Decisions (with reasons), ## Next, ## Open problems. Reply in plain text without tools.";
 /// Facts from the note step are three labeled lines of up to 160 characters.
 const REMEMBER_MAX_TOKENS: u32 = 160;
+const TITLE_PROMPT: &str = "Scoobert title step. Reply with a short title for this conversation: 3 to 6 words that name the task, with no quotes and no period. Reply in plain text without tools.";
+const TITLE_MAX_TOKENS: u32 = 24;
 /// Summary length caps. A laptop CPU writes one to four tokens per second, so local summaries stay short.
 const SUMMARY_MAX_TOKENS_LOCAL: u32 = 700;
 const SUMMARY_MAX_TOKENS_HOSTED: u32 = 1500;
@@ -140,6 +150,10 @@ const KEEP_SHARE: f64 = 0.35;
 /// Characters per token when estimating, set low so the estimate errs toward summarizing early.
 const CHARS_PER_TOKEN: f64 = 3.2;
 const MAX_RETRIES: u32 = 3;
+/// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
+const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Check what is already done first, because a file may be only partly written.</interrupted>";
+/// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
+const INTERRUPTED: &str = "<interrupted>The user stopped your previous reply before it finished. Follow this message. Do not resume the stopped work unless this message asks you to.</interrupted>";
 
 static REASONING_LOCAL: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"(?i)qwen3|qwq|deepseek-r1|thinking|gpt-oss|magistral").unwrap());
@@ -325,6 +339,7 @@ impl Host {
             running: live.running.load(Ordering::SeqCst),
             notice,
             compacted_at: c.compaction.as_ref().map(|comp| comp.kept_from),
+            interrupted: !live.running.load(Ordering::SeqCst) && needs_continue(&c.messages),
         }
     }
 
@@ -447,7 +462,8 @@ impl Host {
     }
 
     /// Sends a message and runs the conversation until the model stops calling tools.
-    pub fn prompt(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>) -> anyhow::Result<()> {
+    /// Sends a message. `resume` sends the hidden note that asks the model to finish an interrupted task.
+    pub fn prompt(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool) -> anyhow::Result<()> {
         let live = self.live(id)?;
         if live.running.swap(true, Ordering::SeqCst) {
             bail!("Scoobert is still working on the last message.");
@@ -460,7 +476,7 @@ impl Host {
         let host = self.clone();
         let conv_id = id.to_string();
         self.rt.spawn(async move {
-            let result = host.run(&live, &conv_id, text, images, &cancel).await;
+            let result = host.run(&live, &conv_id, text, images, resume, &cancel).await;
             if let Err(err) = &result
                 && !is_cancelled(err)
             {
@@ -469,8 +485,11 @@ impl Host {
             host.emit(Event::Activity { conv: conv_id.clone(), text: None });
             live.running.store(false, Ordering::SeqCst);
             *live.run_cancel.lock().unwrap() = None;
-            let context = live.conv.lock().unwrap().context_tokens();
-            host.emit(Event::Settled { conv: conv_id.clone(), context });
+            let (context, interrupted) = {
+                let c = live.conv.lock().unwrap();
+                (c.context_tokens(), needs_continue(&c.messages))
+            };
+            host.emit(Event::Settled { conv: conv_id.clone(), context, interrupted });
             if result.is_ok() {
                 host.after_run(live, conv_id);
             }
@@ -478,11 +497,12 @@ impl Host {
         Ok(())
     }
 
-    async fn run(self: &Arc<Self>, live: &Arc<Live>, id: &str, text: String, images: Vec<conversation::Image>, cancel: &CancellationToken) -> anyhow::Result<()> {
+    async fn run(self: &Arc<Self>, live: &Arc<Live>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let s = self.settings();
-        let (cwd, first, model_name) = {
-            let c = live.conv.lock().unwrap();
-            (c.cwd.clone(), !c.has_user_message(), c.model.clone())
+        let (cwd, first, model_name, interrupted) = {
+            let mut c = live.conv.lock().unwrap();
+            answer_dangling_calls(&mut c)?;
+            (c.cwd.clone(), !c.has_user_message(), c.model.clone(), was_stopped(&c.messages))
         };
         let notes = {
             let mut read = live.read_notes.lock().unwrap();
@@ -490,6 +510,13 @@ impl Host {
         };
         *live.run_notes.lock().unwrap() = notes.related.clone();
         let mut context = notes.text;
+        if let Some(list) = past_conversations(&cwd, id, &text) {
+            context = if context.is_empty() { list } else { format!("{context}\n\n{list}") };
+        }
+        if resume || interrupted {
+            let note = if resume { RESUME } else { INTERRUPTED };
+            context = [note, &context].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+        }
         if first {
             let env = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
             context = if context.is_empty() { env } else { format!("{context}\n\n{env}") };
@@ -528,12 +555,12 @@ impl Host {
         loop {
             let len = live.conv.lock().unwrap().messages.len();
             if compacted_at != Some(len) && self.too_long(live, &target) {
-                self.compact(live, id, &target, &ep, cancel).await?;
+                self.compact(live, id, &target, &ep, true, cancel).await?;
                 compacted_at = Some(len);
             }
             self.emit(Event::Activity { conv: id.into(), text: Some("Reading...".into()) });
             let (system, messages, thinking) = self.request_parts(live);
-            let tools = tools::specs(&self.shell);
+            let tools = self.tool_specs(live);
             let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, max_tokens: self.max_tokens(&target) };
             let mut body = stream::payload(&ep, &req);
             if ep.local {
@@ -546,7 +573,7 @@ impl Host {
                 Err(err) if !compacted_for_error && compacted_at != Some(len) && context_overflow(&format!("{err:#}")) => {
                     // The estimate was short; summarize now and send the request again.
                     compacted_for_error = true;
-                    self.compact(live, id, &target, &ep, cancel).await?;
+                    self.compact(live, id, &target, &ep, false, cancel).await?;
                     compacted_at = Some(len);
                     continue;
                 }
@@ -569,6 +596,8 @@ impl Host {
                 return Ok(());
             }
             for call in calls {
+                // A new project moves the conversation, so each call reads the current folder.
+                let cwd = live.conv.lock().unwrap().cwd.clone();
                 let result = if cancel.is_cancelled() {
                     ToolResult { call_id: call.id.clone(), name: call.name.clone(), output: "The user stopped Scoobert before this ran.".into(), is_error: true, diff: None, time: now_millis() }
                 } else {
@@ -591,6 +620,22 @@ impl Host {
             if let Target::Local(model) = target {
                 self.llama.ensure(model).await?;
             }
+            // The server holds back a tool call until it is complete, so a ticker reports how far the reply has got.
+            let ticker = CancellationToken::new();
+            if ep.local {
+                let (llama, events, conv, stop) = (self.llama.clone(), self.events.clone(), id.to_string(), ticker.clone());
+                self.rt.spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = stop.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {}
+                        }
+                        if let Some(n) = llama.generated_tokens().await.filter(|&n| n > 0) {
+                            let _ = events.send(Event::Delta { conv: conv.clone(), delta: Delta::Generated(n) });
+                        }
+                    }
+                });
+            }
             let conv = id.to_string();
             let events = self.events.clone();
             let mut started = false;
@@ -602,6 +647,7 @@ impl Host {
                 let _ = events.send(Event::Delta { conv: conv.clone(), delta });
             })
             .await;
+            ticker.cancel();
             let retry = match &result {
                 Err(err) => !is_cancelled(err) && transient(&format!("{err:#}")),
                 // A connection that dropped before anything arrived is worth another try.
@@ -631,14 +677,16 @@ impl Host {
     fn too_long(&self, live: &Live, target: &Target) -> bool {
         let ctx = self.context_window(target);
         let (system, messages, thinking) = self.request_parts(live);
-        let chars = system.len() + tools::specs(&self.shell).iter().map(|t| t.to_string().len()).sum::<usize>() + messages_chars(&messages);
+        let chars = system.len() + self.tool_specs(live).iter().map(|t| t.to_string().len()).sum::<usize>() + messages_chars(&messages);
         let estimate = (chars as f64 / CHARS_PER_TOKEN) as u64;
         let reserve = (thinking.budget() as u64 + 2048).min(ctx / 3);
         estimate + reserve > ctx
     }
 
     /// Replaces older messages with a summary the model writes, so a long task can continue.
-    async fn compact(self: &Arc<Self>, live: &Arc<Live>, id: &str, target: &Target, ep: &Endpoint, cancel: &CancellationToken) -> anyhow::Result<()> {
+    /// `extend` asks with the whole conversation, which a local model has cached, so only the question is read.
+    /// It is false after the server rejected the conversation as too long, when only the older part fits.
+    async fn compact(self: &Arc<Self>, live: &Arc<Live>, id: &str, target: &Target, ep: &Endpoint, extend: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let conv = live.conv.lock().unwrap().clone();
         let start = conv.compaction.as_ref().map(|c| c.kept_from).unwrap_or(0);
         let keep_chars = (self.context_window(target) as f64 * KEEP_SHARE * CHARS_PER_TOKEN) as usize;
@@ -649,9 +697,9 @@ impl Host {
         let (system, view, _) = self.request_parts(live);
         // The view starts with the previous summary when there is one, and maps conversation indexes after it.
         let offset = if conv.compaction.is_some() { 1 } else { 0 };
-        let mut messages: Vec<Message> = view[..offset + (kept_from - start)].to_vec();
+        let mut messages: Vec<Message> = if extend { view } else { view[..offset + (kept_from - start)].to_vec() };
         messages.push(Message::User(UserMessage { text: SUMMARY_PROMPT.into(), context: String::new(), images: Vec::new(), time: 0 }));
-        let tools = tools::specs(&self.shell);
+        let tools = self.tool_specs(live);
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking: Thinking::Off, max_tokens: if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED } };
         let body = stream::payload(ep, &req);
         let reply = stream::send(&self.http, ep, &body, cancel, |_| {}).await?;
@@ -697,7 +745,7 @@ impl Host {
             }
             _ => c.messages.clone(),
         };
-        (system, messages, c.thinking)
+        (system, shorten_saved_writes(messages), c.thinking)
     }
 
     async fn run_tool(&self, live: &Live, id: &str, cwd: &Path, call: &ToolCall, cancel: &CancellationToken) -> ToolResult {
@@ -709,6 +757,9 @@ impl Host {
             diff,
             time: now_millis(),
         };
+        if call.name == "new_project" {
+            return self.start_project(live, id, call);
+        }
         match self.approve(live, id, cwd, call, cancel).await {
             Verdict::Deny(reason) => return make(reason, true, None),
             Verdict::Always => {
@@ -724,6 +775,7 @@ impl Host {
             isolation: self.isolation.clone(),
             max_output: self.max_tool_output(live),
             notes: Some(cwd.join(&self.settings().notes_folder)),
+            web: self.settings().web_access,
         };
         let outcome = tools::run(call, cwd, &self.shell, &limits, cancel, move |tail| {
             let _ = events.send(Event::ToolOutput { conv: conv.clone(), call_id: call_id.clone(), tail });
@@ -768,6 +820,39 @@ impl Host {
             Decision::Always => Verdict::Always,
             Decision::Deny => Verdict::Deny("The user declined this tool call. Ask them how to proceed.".into()),
         }
+    }
+
+    fn tool_specs(&self, live: &Live) -> Vec<Value> {
+        let cwd = live.conv.lock().unwrap().cwd.clone();
+        tools::specs(&self.shell, is_general(&cwd), self.settings().web_access)
+    }
+
+    /// Creates a project folder for a conversation that has none and moves the conversation into it.
+    fn start_project(&self, live: &Live, id: &str, call: &ToolCall) -> ToolResult {
+        let make = |output: String, is_error: bool| ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error, diff: None, time: now_millis() };
+        let current = live.conv.lock().unwrap().cwd.clone();
+        if !is_general(&current) {
+            return make("A project is already open, so keep working in it.".into(), true);
+        }
+        let name = crate::notes::sanitize_name(call.arg("name"));
+        let root = crate::paths::projects_root();
+        let mut path = root.join(&name);
+        // A folder that already has files belongs to something else, so the new one gets a number.
+        let mut n = 2;
+        while path.read_dir().map(|mut d| d.next().is_some()).unwrap_or(false) {
+            path = root.join(format!("{name} {n}"));
+            n += 1;
+        }
+        if let Err(e) = std::fs::create_dir_all(&path) {
+            return make(format!("Could not create {}: {e}", crate::paths::display(&path)), true);
+        }
+        let moved = live.conv.lock().unwrap().move_to(&path);
+        if let Err(e) = moved {
+            return make(format!("Could not move the conversation: {e:#}"), true);
+        }
+        let file = live.conv.lock().unwrap().file.clone();
+        self.emit(Event::ProjectStarted { conv: id.to_string(), path: path.clone(), file });
+        make(format!("Started the project folder {}. Relative paths now resolve inside it.", crate::paths::display(&path)), false)
     }
 
     /// Tool output that fits in about a quarter of the model's context.
@@ -845,7 +930,7 @@ impl Host {
         if messages.iter().any(|m| matches!(m, Message::User(u) if !u.images.is_empty())) {
             return Ok(());
         }
-        let tools = tools::specs(&self.shell);
+        let tools = self.tool_specs(live);
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, max_tokens: self.max_tokens(&target) };
         let body = stream::payload(&ep, &req);
         let prefix = self.llama.shared_prefix(&body).await?;
@@ -883,16 +968,38 @@ impl Host {
                 eprintln!("[cache] {err:#}");
             }
             *live.cache_cancel.lock().unwrap() = None;
+            let hosted = matches!(host.target(&conv.model), Ok(Target::Hosted(..)));
+            // After the first task, the model names the conversation. It reads only the question, because the
+            // conversation before it is cached, and a title the user set is never replaced.
+            if (local || hosted) && conv.title.is_none() && conv.user_messages() == 1 {
+                let cancel = CancellationToken::new();
+                *live.note_cancel.lock().unwrap() = Some(cancel.clone());
+                match host.ask(&live, TITLE_PROMPT, TITLE_MAX_TOKENS, &cancel).await {
+                    Ok(answer) => {
+                        if let Some(title) = clean_title(&answer) {
+                            let saved = live.conv.lock().unwrap().set_title(&title);
+                            if saved.is_ok() {
+                                host.emit(Event::Titled { conv: id.clone(), title });
+                            }
+                        }
+                    }
+                    Err(err) if !is_cancelled(&err) => eprintln!("[title] {err:#}"),
+                    Err(_) => {}
+                }
+                *live.note_cancel.lock().unwrap() = None;
+                if local {
+                    host.llama.set_slot_owner(None);
+                }
+            }
             let related = live.run_notes.lock().unwrap().clone();
             let Some(task) = finished_task(&conv, &s.notes_folder, related) else { return };
             let mut facts = Vec::new();
-            let hosted = matches!(host.target(&conv.model), Ok(Target::Hosted(..)));
             if (local || hosted) && s.remember_step && memory::worth_noting(&task) {
                 host.emit(Event::Activity { conv: id.clone(), text: Some("Taking notes...".into()) });
                 let cancel = CancellationToken::new();
                 *live.note_cancel.lock().unwrap() = Some(cancel.clone());
-                match host.ask_what_to_remember(&live, &cancel).await {
-                    Ok(found) => facts = found,
+                match host.ask(&live, memory::REMEMBER_PROMPT, REMEMBER_MAX_TOKENS, &cancel).await {
+                    Ok(answer) => facts = memory::parse_facts(&answer),
                     Err(err) if !is_cancelled(&err) => eprintln!("[notes] {err:#}"),
                     Err(_) => {}
                 }
@@ -916,23 +1023,24 @@ impl Host {
         });
     }
 
-    /// Asks for up to three facts to keep. The request extends the cached conversation, so only the question
-    /// is read, and the answer is short because each token takes about a second on a CPU.
-    async fn ask_what_to_remember(&self, live: &Live, cancel: &CancellationToken) -> anyhow::Result<Vec<memory::Fact>> {
+    /// Asks one short question at the end of the conversation, with thinking off. The request extends the cached
+    /// conversation, so only the question is read, and the answer is short because each token takes about a
+    /// second on a CPU.
+    async fn ask(&self, live: &Live, question: &str, max_tokens: u32, cancel: &CancellationToken) -> anyhow::Result<String> {
         let conv = live.conv.lock().unwrap().clone();
         let target = self.target(&conv.model)?;
         let ep = self.endpoint(&target);
         let (system, mut messages, _) = self.request_parts(live);
-        messages.push(Message::User(UserMessage { text: memory::REMEMBER_PROMPT.into(), context: String::new(), images: Vec::new(), time: 0 }));
-        let tools = tools::specs(&self.shell);
-        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking: Thinking::Off, max_tokens: REMEMBER_MAX_TOKENS };
+        messages.push(Message::User(UserMessage { text: question.into(), context: String::new(), images: Vec::new(), time: 0 }));
+        let tools = self.tool_specs(live);
+        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking: Thinking::Off, max_tokens };
         let body = stream::payload(&ep, &req);
         let _busy = ep.local.then(|| self.llama.busy());
         let reply = stream::send(&self.http, &ep, &body, cancel, |_| {}).await?;
         if reply.stop == StopReason::Aborted {
             return Err(crate::util::Cancelled.into());
         }
-        Ok(memory::parse_facts(&reply.text))
+        Ok(reply.text)
     }
 
     pub async fn shutdown(&self) {
@@ -990,6 +1098,133 @@ fn finished_task(conv: &Conversation, notes_folder: &str, related: Vec<String>) 
         changed,
         related,
     })
+}
+
+/// The model's title answer, cleaned of labels, quotes, and trailing punctuation, when it is usable.
+fn clean_title(answer: &str) -> Option<String> {
+    let line = answer.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.trim_start_matches(['#', '*', ' ']);
+    let line = line.strip_prefix("Title:").or_else(|| line.strip_prefix("title:")).unwrap_or(line);
+    let (quotes, stops) = (['"', '\'', '*', '`'], ['.', '!', ':']);
+    let title = line.trim().trim_end_matches(stops).trim_matches(quotes).trim_end_matches(stops).trim();
+    let words = title.split_whitespace().count();
+    (words >= 1 && words <= 10 && title.chars().count() <= 80).then(|| title.to_string())
+}
+
+/// Long file contents the model already saved are replaced by a line saying where they went. The file is on disk
+/// for the model to read again, and keeping every written file in the prompt would fill a small context fast.
+fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
+    const LONG: usize = 1500;
+    let saved: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            Message::Tool(t) if !t.is_error => Some(t.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    for m in &mut messages {
+        let Message::Assistant(a) = m else { continue };
+        for call in &mut a.tool_calls {
+            if !saved.contains(&call.id) {
+                continue;
+            }
+            let path = call.arg("path").to_string();
+            let Some(args) = call.arguments.as_object_mut() else { continue };
+            for key in ["content", "new_text", "old_text"] {
+                let Some(len) = args.get(key).and_then(Value::as_str).map(|s| s.chars().count()).filter(|&n| n > LONG) else { continue };
+                let note = if key == "content" {
+                    format!("[{len} characters written to {path}. Read the file to see them.]")
+                } else {
+                    format!("[{len} characters, now in {path}.]")
+                };
+                args.insert(key.into(), note.into());
+            }
+        }
+    }
+    messages
+}
+
+/// Whether a conversation has no project: it works in the shared folder where new projects are created.
+pub fn is_general(cwd: &Path) -> bool {
+    cwd == crate::paths::projects_root()
+}
+
+static PAST: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b(other|previous|past|earlier|last|older|another)\s+(conversations?|chats?|sessions?)\b|\b(conversations?|chats?|sessions?)\s+(about|where|when|from)\b|\bwhat did (we|you|i) (do|say|talk|discuss|decide|try)\b|\bconversation:[0-9a-f]{4,}").unwrap()
+});
+
+/// A list of the project's other conversations, attached only when the message asks about past conversations,
+/// so the model never reads them otherwise.
+fn past_conversations(cwd: &Path, current: &str, message: &str) -> Option<String> {
+    if !PAST.is_match(message) {
+        return None;
+    }
+    let list: Vec<String> = Conversation::list(cwd)
+        .into_iter()
+        .filter(|s| s.id != current)
+        .take(15)
+        .map(|s| {
+            let date = chrono::DateTime::from_timestamp_millis(s.modified).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()).unwrap_or_default();
+            format!("- {} ({date}): read conversation:{}", s.title, &s.id[..s.id.len().min(8)])
+        })
+        .collect();
+    if list.is_empty() {
+        return Some("<past_conversations>There are no other conversations in this project.</past_conversations>".into());
+    }
+    Some(format!("<past_conversations>
+The user asked about earlier conversations. Read one with the read tool, such as read conversation:<id>.
+{}
+</past_conversations>", list.join("\n")))
+}
+
+/// Whether the conversation ends in the middle of a task: a message with no reply, a tool result the model has
+/// not answered, or a reply that was stopped, failed, or still had tool calls to make.
+pub fn needs_continue(messages: &[Message]) -> bool {
+    match messages.last() {
+        None => false,
+        Some(Message::User(_)) | Some(Message::Tool(_)) => true,
+        Some(Message::Assistant(a)) => a.stop != StopReason::Stop || !a.tool_calls.is_empty(),
+    }
+}
+
+/// Adds a result for each tool call that never ran because Scoobert closed first. Providers reject a conversation
+/// with a tool call and no result.
+fn answer_dangling_calls(conv: &mut Conversation) -> anyhow::Result<()> {
+    let Some(last) = conv.messages.iter().rposition(|m| matches!(m, Message::Assistant(a) if !a.tool_calls.is_empty())) else {
+        return Ok(());
+    };
+    let Message::Assistant(a) = &conv.messages[last] else { return Ok(()) };
+    let answered: HashSet<String> = conv.messages[last + 1..]
+        .iter()
+        .filter_map(|m| match m {
+            Message::Tool(t) => Some(t.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let missing: Vec<ToolCall> = a.tool_calls.iter().filter(|c| !answered.contains(&c.id)).cloned().collect();
+    if missing.is_empty() || conv.messages[last + 1..].iter().any(|m| matches!(m, Message::User(_))) {
+        return Ok(());
+    }
+    for c in missing {
+        conv.push(Message::Tool(ToolResult {
+            call_id: c.id,
+            name: c.name,
+            output: "Scoobert closed before this ran.".into(),
+            is_error: true,
+            diff: None,
+            time: now_millis(),
+        }))?;
+    }
+    Ok(())
+}
+
+/// Whether the last run ended because the user pressed Stop.
+fn was_stopped(messages: &[Message]) -> bool {
+    match messages.last() {
+        Some(Message::Assistant(a)) => a.stop == StopReason::Aborted,
+        Some(Message::Tool(t)) => t.is_error && (t.output.starts_with("The user stopped") || t.output.ends_with("[The user stopped the command.]")),
+        _ => false,
+    }
 }
 
 /// Where the kept part of a conversation starts when older messages are summarized: the newest messages that fit
@@ -1076,7 +1311,43 @@ fn dunce_canonical(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::conversation::{AssistantMessage, Message, ToolCall, ToolResult, UserMessage};
-    use super::kept_from;
+    use super::conversation::StopReason;
+    use super::{clean_title, kept_from, needs_continue};
+
+    #[test]
+    fn shortens_long_saved_writes_only() {
+        let big = "x".repeat(3000);
+        let write = |id: &str| ToolCall { id: id.into(), name: "write".into(), arguments: serde_json::json!({ "path": "a.ts", "content": big }) };
+        let messages = vec![
+            Message::Assistant(AssistantMessage { tool_calls: vec![write("ok"), write("failed")], ..Default::default() }),
+            Message::Tool(ToolResult { call_id: "ok".into(), name: "write".into(), output: "Created".into(), is_error: false, diff: None, time: 0 }),
+            Message::Tool(ToolResult { call_id: "failed".into(), name: "write".into(), output: "Could not write".into(), is_error: true, diff: None, time: 0 }),
+        ];
+        let out = super::shorten_saved_writes(messages);
+        let Message::Assistant(a) = &out[0] else { panic!() };
+        assert_eq!(a.tool_calls[0].arg("content"), "[3000 characters written to a.ts. Read the file to see them.]");
+        assert_eq!(a.tool_calls[1].arg("content").len(), 3000);
+    }
+
+    #[test]
+    fn spots_unfinished_tasks() {
+        let done = Message::Assistant(AssistantMessage { text: "Done.".into(), stop: StopReason::Stop, ..Default::default() });
+        let stopped = Message::Assistant(AssistantMessage { text: "Half".into(), stop: StopReason::Aborted, ..Default::default() });
+        assert!(!needs_continue(&[]));
+        assert!(!needs_continue(&[user(10), done.clone()]));
+        assert!(needs_continue(&[user(10)]));
+        assert!(needs_continue(&[user(10), call(5)]));
+        assert!(needs_continue(&[user(10), call(5), result(5)]));
+        assert!(needs_continue(&[user(10), stopped]));
+    }
+
+    #[test]
+    fn cleans_model_titles() {
+        assert_eq!(clean_title("Title: \"RPG sprite system\".\n").as_deref(), Some("RPG sprite system"));
+        assert_eq!(clean_title("**Secure auth cookies**").as_deref(), Some("Secure auth cookies"));
+        assert_eq!(clean_title(""), None);
+        assert_eq!(clean_title(&"word ".repeat(20)), None);
+    }
 
     fn user(n: usize) -> Message {
         Message::User(UserMessage { text: "u".repeat(n), context: String::new(), images: Vec::new(), time: 0 })
