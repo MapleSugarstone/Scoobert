@@ -71,7 +71,7 @@ Hosted models run on the provider's servers, so Scoobert sends them your prompts
   - The model reads any note by name (`[[Auth design]]`), and each note it reads shows where its links lead and which notes link back, so it can follow a chain of links.
   - After a task, Scoobert logs it in that day's note and asks the model for up to three facts labeled as a decision, a convention, or a problem. Scoobert checks them, drops repeats, and files them in the related note or in `Decisions.md`, `Conventions.md`, or `Problems.md`, then shows what it saved.
 - **Notes pane:** read and edit notes beside the conversation. The pane shows which notes link to the open note, searches their text, and draws a graph of the links. You can save any reply as a note. The notes are plain Markdown files, so any Markdown note app can open the same folder.
-- **Saved prompt cache:** Scoobert saves each conversation's processed prompt to disk, so returning to a long conversation takes seconds instead of the minutes a CPU needs to reread it.
+- **Saved prompt cache:** Scoobert saves each conversation's processed prompt to disk, so returning to a long conversation takes seconds instead of the minutes a CPU needs to reread it. It also saves the prompt every new conversation starts with, for Chats and for each project, so a new conversation reads little more than your message. The first time Scoobert runs, and after an update, it loads your default model and builds these saved prompts in the background. The sidebar shows **Preparing** while it works.
 - **Images:** attach screenshots when the model supports images.
 
 ## Use Scoobert
@@ -113,6 +113,7 @@ Tasks that need new packages from the internet fail in this mode, so install a p
 | Ask the model what to remember | After a task, a local model lists up to three facts for the related note. |
 | Context, per model | How many tokens of conversation a local model holds. Larger contexts need more memory. |
 | Unload the model after | How long an idle model keeps its memory. |
+| Load the model when Scoobert starts | Loads your default model at startup, so the first reply does not wait for it. Off by default, because the model then holds its memory from the start. |
 | Where models live | The folder Scoobert looks in for GGUF models. |
 
 ## Where Scoobert keeps data

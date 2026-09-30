@@ -20,11 +20,15 @@ pub struct Image {
     pub data: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct UserMessage {
     /// What the user typed.
     pub text: String,
-    /// Notes and environment details Scoobert attached, sent after the text and hidden in the transcript.
+    /// The project details that open a conversation, sent before the text so the saved prompt cache can cover
+    /// them. Hidden in the transcript.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub environment: String,
+    /// Notes and details Scoobert attached, sent after the text and hidden in the transcript.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub context: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -34,7 +38,7 @@ pub struct UserMessage {
 
 impl UserMessage {
     pub fn full_text(&self) -> String {
-        if self.context.is_empty() { self.text.clone() } else { format!("{}\n\n{}", self.text, self.context) }
+        [self.environment.as_str(), self.text.as_str(), self.context.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n")
     }
 }
 
@@ -464,10 +468,10 @@ mod tests {
         let mut conv = Conversation::new(&dir, "m", Thinking::Off);
         conv.file = dir.join("c.jsonl");
         for text in ["one", "two", "three"] {
-            conv.push(Message::User(UserMessage { text: text.into(), context: String::new(), images: Vec::new(), time: 0 })).unwrap();
+            conv.push(Message::User(UserMessage { text: text.into(), ..Default::default() })).unwrap();
         }
         conv.rewind(1).unwrap();
-        conv.push(Message::User(UserMessage { text: "four".into(), context: String::new(), images: Vec::new(), time: 0 })).unwrap();
+        conv.push(Message::User(UserMessage { text: "four".into(), ..Default::default() })).unwrap();
         let loaded = Conversation::load(&conv.file).unwrap();
         let texts: Vec<String> = loaded.messages.iter().map(|m| match m { Message::User(u) => u.text.clone(), _ => String::new() }).collect();
         assert_eq!(texts, vec!["one", "four"]);

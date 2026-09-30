@@ -134,6 +134,8 @@ pub struct Settings {
     /// Offers the web_search and web_read tools.
     pub web_access: bool,
     pub keep_alive_minutes: u32,
+    /// Loads the default model when Scoobert starts, instead of when the user starts typing.
+    pub preload_model: bool,
     pub models_dir: String,
     pub llama_server_path: String,
     pub hosted_models: Vec<HostedModel>,
@@ -153,6 +155,7 @@ impl Default for Settings {
             remember_step: true,
             web_access: false,
             keep_alive_minutes: 30,
+            preload_model: false,
             models_dir: String::new(),
             llama_server_path: String::new(),
             hosted_models: Vec::new(),
@@ -197,6 +200,8 @@ pub struct State {
     /// Stored as closed so the pane starts open for new users and for state saved before this field.
     pub notes_closed: bool,
     pub update_checked_at: i64,
+    /// The version whose saved prompts were built for the default model. A new version rebuilds them once.
+    pub prepared_version: String,
     pub setup_done: bool,
 }
 

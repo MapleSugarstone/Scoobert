@@ -230,6 +230,8 @@ pub struct App {
     update_progress: Option<(u64, u64)>,
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
+    /// The model whose saved prompts are being built ahead of time.
+    preparing: Option<String>,
     /// The conversation whose model and cached prompt were last loaded because the user started typing.
     warmed: Option<String>,
     /// Whether a rewind also puts back the files the model changed.
@@ -298,6 +300,7 @@ impl App {
             web_offer: false,
             rewind_files: true,
             warmed: None,
+            preparing: None,
         };
         let mut tasks = vec![system::theme().map(Message::Mode)];
         if crate::update::due(app.state.update_checked_at) {
@@ -363,6 +366,26 @@ impl App {
     /// The folder conversations work in: the selected project, or the shared folder when none is selected.
     fn workspace(&self) -> PathBuf {
         self.current_project().unwrap_or_else(crate::paths::projects_root)
+    }
+
+    /// Loads the default model and builds its saved prompts for Chats and the open project: once after setup, once
+    /// after each update changes the prompt, and at every start when the user turned that on. A model that does not
+    /// fit in free memory is left for later.
+    fn prepare_default_model(&mut self) {
+        let Some(host) = &self.host else { return };
+        if !self.state.setup_done || self.setup.download.is_some() || !self.setup.queue.is_empty() {
+            return;
+        }
+        let version = env!("CARGO_PKG_VERSION");
+        if self.state.prepared_version == version && !self.state.settings.preload_model {
+            return;
+        }
+        let mut places = vec![crate::paths::projects_root()];
+        places.extend(self.current_project());
+        if host.preload(&self.state.settings.model, places) {
+            self.state.prepared_version = version.to_string();
+            self.save();
+        }
     }
 
     /// Remembers the conversation to reopen for its project, or for no project.
@@ -467,6 +490,7 @@ impl App {
                     self.state.setup_done = true;
                     self.save();
                 }
+                self.prepare_default_model();
                 return self.select_project(self.current_project());
             }
             Message::Host(event) => return self.on_host_event(event),
@@ -981,6 +1005,7 @@ impl App {
             settings::Effect::ModelsChanged => {
                 self.save();
                 self.refresh_models();
+                self.prepare_default_model();
             }
             settings::Effect::Toast(t) => {
                 self.save();
@@ -1041,6 +1066,10 @@ impl App {
         match &event {
             Event::Server(status) => {
                 self.server = status.clone();
+                return Task::none();
+            }
+            Event::Preparing(model) => {
+                self.preparing = model.clone();
                 return Task::none();
             }
             Event::NotesChanged { cwd } => {
@@ -1343,10 +1372,20 @@ impl App {
 
     fn sidebar_frame<'a>(&'a self, new_button: Element<'a, Message>, search: Element<'a, Message>, list: Column<'a, Message>) -> Element<'a, Message> {
         let (dot, status): (fn(&theme::Tokens) -> iced::Color, String) = self.status_line();
+        // The status is cut to fit beside the gear, since a model name can be long.
+        let status: Element<'_, Message> = container(text(clip(&status, 32)).size(13).style(theme::muted).wrapping(text::Wrapping::None)).width(Fill).clip(true).into();
+        let status: Element<'_, Message> = match &self.preparing {
+            Some(_) => tooltip(
+                status,
+                container(text("Building a saved prompt so new conversations start quickly. This happens once per model.").size(12).width(260)).padding([4, 8]).style(theme::tooltip),
+                tooltip::Position::Top,
+            )
+            .into(),
+            None => status,
+        };
         let footer = row![
             container(space()).width(8).height(8).style(theme::dot(dot)),
-            text(status).size(13).style(theme::muted).wrapping(text::Wrapping::None),
-            space::horizontal(),
+            status,
             button(icon(Icon::Gear, 18.0)).padding(4).style(theme::ghost).on_press(Message::OpenSettings(settings::Section::General)),
         ]
         .spacing(8)
@@ -1471,6 +1510,9 @@ impl App {
             && !m.provider.is_empty()
         {
             return (|t| t.ok, format!("Using {}", m.provider));
+        }
+        if let Some(m) = &self.preparing {
+            return (|t| t.warn, format!("Preparing {m}"));
         }
         match &self.server {
             ServerStatus::Stopped => (|t| t.muted, "Model not loaded".into()),

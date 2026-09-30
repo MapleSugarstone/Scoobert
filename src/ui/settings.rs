@@ -108,6 +108,7 @@ pub enum Msg {
     RememberStep(bool),
     WebAccess(bool),
     KeepAlive(KeepAlive),
+    PreloadModel(bool),
     ModelsDir(String),
     CommitModelsDir,
     BrowseModelsDir,
@@ -215,6 +216,10 @@ impl Panel {
             }
             Msg::WebAccess(on) => {
                 s.web_access = on;
+                return (Task::none(), Effect::Saved);
+            }
+            Msg::PreloadModel(on) => {
+                s.preload_model = on;
                 return (Task::none(), Effect::Saved);
             }
             Msg::KeepAlive(k) => {
@@ -586,6 +591,12 @@ impl Panel {
                     .style(theme::select)
                     .menu_style(theme::menu)
                     .into(),
+            ),
+            switch_row(
+                "Load the model when Scoobert starts",
+                "The first reply starts sooner, but the model holds its memory from the start until it has been idle for the time above.",
+                s.preload_model,
+                Msg::PreloadModel
             ),
             field(
                 "llama-server program",

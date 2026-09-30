@@ -62,6 +62,8 @@ pub enum Event {
     NotesSaved { conv: ConvId, notes: Vec<String> },
     Error { conv: Option<ConvId>, message: String },
     NotesChanged { cwd: PathBuf },
+    /// Scoobert is building a saved prompt for this model ahead of time. None means it finished or stopped.
+    Preparing(Option<String>),
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +126,8 @@ pub struct Host {
     pub shell: Shell,
     events: mpsc::UnboundedSender<Event>,
     convs: Mutex<HashMap<ConvId, Arc<Live>>>,
+    /// Stops the saved prompts being built ahead of time.
+    bake_cancel: Mutex<Option<CancellationToken>>,
     approvals: Mutex<HashMap<u64, (ConvId, oneshot::Sender<Decision>)>>,
     next_approval: AtomicU64,
     keys: Mutex<HashMap<String, Option<String>>>,
@@ -178,6 +182,7 @@ impl Host {
             shell,
             events,
             convs: Mutex::new(HashMap::new()),
+            bake_cancel: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
             next_approval: AtomicU64::new(1),
             keys: Mutex::new(HashMap::new()),
@@ -402,6 +407,7 @@ impl Host {
         if live.running.load(Ordering::SeqCst) {
             return;
         }
+        self.stop_baking();
         let host = self.clone();
         self.rt.spawn(async move {
             let Ok(_guard) = live.background.try_lock() else { return };
@@ -542,6 +548,7 @@ impl Host {
         if live.running.swap(true, Ordering::SeqCst) {
             bail!("Scoobert is still working on the last message.");
         }
+        self.stop_baking();
         let cancel = CancellationToken::new();
         *live.run_cancel.lock().unwrap() = Some(cancel.clone());
         if let Some(t) = live.note_cancel.lock().unwrap().as_ref() {
@@ -591,11 +598,14 @@ impl Host {
             let note = if resume { RESUME } else { INTERRUPTED };
             context = [note, &context].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
         }
+        let mut environment = String::new();
         if first {
-            let env = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
-            context = if context.is_empty() { env } else { format!("{context}\n\n{env}") };
+            environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
+            let session = prompt::session_block(&cwd, &s.notes_folder);
+            context = if context.is_empty() { session } else { format!("{context}\n\n{session}") };
         }
-        let user = Message::User(UserMessage { text, context, images, time: now_millis() });
+        // Surrounding whitespace would change how the start of the text tokenizes and miss the saved cache.
+        let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, time: now_millis() });
         live.conv.lock().unwrap().push(user.clone())?;
         self.emit(Event::Message { conv: id.to_string(), message: user });
 
@@ -772,7 +782,7 @@ impl Host {
         // The view starts with the previous summary when there is one, and maps conversation indexes after it.
         let offset = if conv.compaction.is_some() { 1 } else { 0 };
         let mut messages: Vec<Message> = if extend { view } else { view[..offset + (kept_from - start)].to_vec() };
-        messages.push(Message::User(UserMessage { text: SUMMARY_PROMPT.into(), context: String::new(), images: Vec::new(), time: 0 }));
+        messages.push(Message::User(UserMessage { text: SUMMARY_PROMPT.into(), ..Default::default() }));
         let tools = self.tool_specs(live);
         let (thinking, thinking_budget) = side_thinking(ep, live);
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens: if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED } };
@@ -811,7 +821,8 @@ impl Host {
             Some(comp) if comp.kept_from <= c.messages.len() => {
                 let mut out = vec![Message::User(UserMessage {
                     text: format!("<summary>\n{}\n</summary>", comp.summary.trim()),
-                    context: prompt::environment_block(&c.cwd, &s.notes_folder, &self.shell),
+                    environment: prompt::environment_block(&c.cwd, &s.notes_folder, &self.shell),
+                    context: prompt::session_block(&c.cwd, &s.notes_folder),
                     images: Vec::new(),
                     time: 0,
                 })];
@@ -1001,24 +1012,27 @@ impl Host {
             return Ok(());
         }
         let target = Target::Local(model);
-        let ep = self.endpoint(&target);
-        let (system, mut messages, thinking) = self.request_parts(live);
-        if shared {
-            messages.clear();
-        } else if exclude_last {
-            messages.pop();
-        }
-        if messages.iter().any(|m| matches!(m, Message::User(u) if !u.images.is_empty())) {
-            return Ok(());
-        }
-        let tools = self.tool_specs(live);
-        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
-        let body = stream::payload(&ep, &req);
-        let prefix = self.llama.shared_prefix(&body).await?;
-        let name = if shared {
-            self.llama.slot_file("shared", &LlamaServer::hash(&prefix))
+        let (prefix, name) = if shared {
+            // The first message's own environment block, so the prefix matches what the request sends.
+            let environment = match conv.messages.first() {
+                Some(Message::User(u)) if !u.environment.is_empty() => u.environment.clone(),
+                _ => prompt::environment_block(&conv.cwd, &self.settings().notes_folder, &self.shell),
+            };
+            let prefix = self.opening_prefix(&target, &conv.cwd, conv.thinking, &environment).await?;
+            let name = self.llama.slot_file("shared", &LlamaServer::hash(&prefix));
+            (prefix, name)
         } else {
-            self.llama.slot_file("chat", &conv.id)
+            let (system, mut messages, thinking) = self.request_parts(live);
+            if exclude_last {
+                messages.pop();
+            }
+            if messages.iter().any(|m| matches!(m, Message::User(u) if !u.images.is_empty())) {
+                return Ok(());
+            }
+            let tools = self.tool_specs(live);
+            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
+            let prefix = self.llama.shared_prefix(&stream::payload(&self.endpoint(&target), &req), "").await?;
+            (prefix, self.llama.slot_file("chat", &conv.id))
         };
         if shared && self.llama.restore(&name).await {
             self.llama.set_slot_owner(Some(conv.id.clone()));
@@ -1029,6 +1043,102 @@ impl Host {
         self.llama.save(&name).await?;
         self.llama.set_slot_owner(Some(conv.id.clone()));
         Ok(())
+    }
+
+    /// The prompt every new conversation in `cwd` starts with: instructions, tools, and the environment block that
+    /// opens its first message.
+    async fn opening_prefix(&self, target: &Target, cwd: &Path, thinking: Thinking, environment: &str) -> anyhow::Result<String> {
+        let s = self.settings();
+        let system = prompt::system_prompt(&s.notes_folder, self.shell.tool_name());
+        let tools = tools::specs(&self.shell, is_general(cwd), s.web_access);
+        let req = ChatRequest { system: &system, messages: &[], tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(target) };
+        self.llama.shared_prefix(&stream::payload(&self.endpoint(target), &req), &format!("{environment}\n\n")).await
+    }
+
+    // ---- baking: saved prompts built ahead of time ----
+
+    /// Replaces any baking in progress with a fresh token, and returns it.
+    fn bake_token(&self) -> CancellationToken {
+        let token = CancellationToken::new();
+        if let Some(old) = self.bake_cancel.lock().unwrap().replace(token.clone()) {
+            old.cancel();
+        }
+        token
+    }
+
+    /// Stops building saved prompts, because the user is about to need the model.
+    fn stop_baking(&self) {
+        if let Some(t) = self.bake_cancel.lock().unwrap().take() {
+            t.cancel();
+        }
+    }
+
+    /// Loads `model` and builds the saved prompts that new conversations in `places` start from, in the background.
+    /// Returns false when the model is not on this computer or does not fit in free memory.
+    pub fn preload(self: &Arc<Self>, model: &str, places: Vec<PathBuf>) -> bool {
+        let Ok(Target::Local(m)) = self.target(model) else { return false };
+        let loaded = self.llama.loaded_model().as_deref() == Some(&m.name);
+        if !loaded && self.llama.memory_needed(&m, self.llama.context_for(&m)) > crate::sys::available_memory() {
+            return false;
+        }
+        let (host, cancel) = (self.clone(), self.bake_token());
+        self.rt.spawn(async move {
+            if host.llama.ensure(&m).await.is_ok() {
+                host.bake_all(&m, &places, &cancel).await;
+            }
+        });
+        true
+    }
+
+    /// Builds the saved prompts for new conversations in `places` with the loaded model, once nothing is using it.
+    pub fn bake_soon(self: &Arc<Self>, model: &str, places: Vec<PathBuf>) {
+        let Ok(Target::Local(m)) = self.target(model) else { return };
+        let (host, cancel) = (self.clone(), self.bake_token());
+        self.rt.spawn(async move { host.bake_all(&m, &places, &cancel).await });
+    }
+
+    async fn bake_all(&self, model: &LocalModel, places: &[PathBuf], cancel: &CancellationToken) {
+        let mut done = HashSet::new();
+        for place in places {
+            if cancel.is_cancelled() {
+                break;
+            }
+            if !done.insert(place.clone()) {
+                continue;
+            }
+            if let Err(err) = self.bake(place, model, cancel).await
+                && !is_cancelled(&err)
+            {
+                eprintln!("[bake] {err:#}");
+            }
+        }
+    }
+
+    /// Builds and saves the prompt new conversations in `cwd` start from, unless it is saved already. Does nothing
+    /// while a conversation is using the server or when another model is loaded.
+    async fn bake(&self, cwd: &Path, model: &LocalModel, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let busy = self.llama.in_use() || self.convs.lock().unwrap().values().any(|l| l.running.load(Ordering::SeqCst));
+        if busy || self.llama.loaded_model().as_deref() != Some(&model.name) {
+            return Ok(());
+        }
+        let s = self.settings();
+        let target = Target::Local(model.clone());
+        let environment = prompt::environment_block(cwd, &s.notes_folder, &self.shell);
+        let prefix = self.opening_prefix(&target, cwd, s.thinking, &environment).await?;
+        let name = self.llama.slot_file("shared", &LlamaServer::hash(&prefix));
+        if self.llama.has_slot_file(&name) {
+            return Ok(());
+        }
+        self.emit(Event::Preparing(Some(model.name.clone())));
+        let _busy = self.llama.busy();
+        let result = match self.llama.fill(&prefix, cancel).await {
+            Ok(()) => self.llama.save(&name).await,
+            Err(e) => Err(e),
+        };
+        // The slot now holds this prompt, so the next conversation restores its own.
+        self.llama.set_slot_owner(None);
+        self.emit(Event::Preparing(None));
+        result
     }
 
     // ---- after a run ----
@@ -1072,8 +1182,17 @@ impl Host {
                     host.llama.set_slot_owner(None);
                 }
             }
+            // The model is loaded and idle now, so this is when saved prompts for new conversations get built.
+            let bake = || {
+                if local {
+                    host.bake_soon(&conv.model, vec![conv.cwd.clone(), crate::paths::projects_root()]);
+                }
+            };
             let related = live.run_notes.lock().unwrap().clone();
-            let Some(task) = finished_task(&conv, &s.notes_folder, related) else { return };
+            let Some(task) = finished_task(&conv, &s.notes_folder, related) else {
+                bake();
+                return;
+            };
             let mut facts = Vec::new();
             if (local || hosted) && s.remember_step && memory::worth_noting(&task) {
                 host.emit(Event::Activity { conv: id.clone(), text: Some("Taking notes...".into()) });
@@ -1101,6 +1220,7 @@ impl Host {
                 }
                 Err(err) => eprintln!("[notes] {err:#}"),
             }
+            bake();
         });
     }
 
@@ -1112,7 +1232,7 @@ impl Host {
         let target = self.target(&conv.model)?;
         let ep = self.endpoint(&target);
         let (system, mut messages, _) = self.request_parts(live);
-        messages.push(Message::User(UserMessage { text: question.into(), context: String::new(), images: Vec::new(), time: 0 }));
+        messages.push(Message::User(UserMessage { text: question.into(), ..Default::default() }));
         let tools = self.tool_specs(live);
         let (thinking, thinking_budget) = side_thinking(&ep, live);
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens };
@@ -1133,6 +1253,7 @@ impl Host {
             .values()
             .flat_map(|l| [&l.run_cancel, &l.cache_cancel, &l.note_cancel].into_iter().filter_map(|t| t.lock().unwrap().clone()).collect::<Vec<_>>())
             .collect();
+        self.stop_baking();
         for t in tokens {
             t.cancel();
         }
@@ -1458,7 +1579,7 @@ mod tests {
     }
 
     fn user(n: usize) -> Message {
-        Message::User(UserMessage { text: "u".repeat(n), context: String::new(), images: Vec::new(), time: 0 })
+        Message::User(UserMessage { text: "u".repeat(n), ..Default::default() })
     }
     fn call(n: usize) -> Message {
         let call = ToolCall { id: "c".into(), name: "read".into(), arguments: serde_json::json!({ "path": "x".repeat(n) }) };

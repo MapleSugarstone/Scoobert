@@ -412,11 +412,12 @@ impl LlamaServer {
         sha256_hex(text)[..12].to_string()
     }
 
-    /// The rendered prompt every next request of a conversation starts with, whatever the user writes next.
-    pub async fn shared_prefix(&self, payload: &Value) -> anyhow::Result<String> {
+    /// The rendered prompt every next request of a conversation starts with, whatever the user writes next. `lead`
+    /// opens the next user message, such as a new conversation's environment block.
+    pub async fn shared_prefix(&self, payload: &Value, lead: &str) -> anyhow::Result<String> {
         let render = |text: &str| {
             let mut messages = payload["messages"].as_array().cloned().unwrap_or_default();
-            messages.push(json!({ "role": "user", "content": text }));
+            messages.push(json!({ "role": "user", "content": format!("{lead}{text}") }));
             json!({ "messages": messages, "tools": payload["tools"], "chat_template_kwargs": payload["chat_template_kwargs"] })
         };
         let a = self.request("/apply-template", Some(&render("A")), Duration::from_secs(60), None).await?;
@@ -427,11 +428,39 @@ impl LlamaServer {
             n -= 1;
         }
         let common = &a[..n];
+        // A prefix that ends inside the user's message is kept only when it tokenizes as the start of the full
+        // prompt, since text on either side of the cut could merge into one token.
+        if !lead.is_empty() && common.ends_with(lead) && self.tokenizes_as_start(common, a).await {
+            return Ok(common.to_string());
+        }
         // Cutting before a special token keeps the prefix tokenized the same way as the full prompt.
         Ok(match common.rfind("<|") {
             Some(cut) if cut > 0 => common[..cut].to_string(),
             _ => common.to_string(),
         })
+    }
+
+    async fn tokenizes_as_start(&self, prefix: &str, full: &str) -> bool {
+        let tokens = |text: &str| json!({ "content": text, "add_special": true, "parse_special": true });
+        let (Ok(p), Ok(f)) = (
+            self.request("/tokenize", Some(&tokens(prefix)), Duration::from_secs(60), None).await,
+            self.request("/tokenize", Some(&tokens(full)), Duration::from_secs(60), None).await,
+        ) else {
+            return false;
+        };
+        match (p["tokens"].as_array(), f["tokens"].as_array()) {
+            (Some(p), Some(f)) => !p.is_empty() && f.starts_with(p),
+            _ => false,
+        }
+    }
+
+    pub fn has_slot_file(&self, filename: &str) -> bool {
+        paths::get().slots().join(filename).is_file()
+    }
+
+    /// Whether a request that needs the server is running.
+    pub fn in_use(&self) -> bool {
+        self.busy.load(Ordering::SeqCst) > 0
     }
 
     pub async fn fill(&self, prefix: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
