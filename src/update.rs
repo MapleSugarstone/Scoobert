@@ -1,6 +1,12 @@
-//! Checks GitHub once a day for a newer release. It only tells the user; it never installs anything.
+//! Checks GitHub once a day for a newer release, and when the user asks, downloads it, checks it against the
+//! checksum GitHub publishes, and installs it.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use anyhow::{Context, bail};
+use futures::StreamExt;
+use tokio::io::AsyncWriteExt;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -17,25 +23,139 @@ pub fn due(last_checked: i64) -> bool {
     repository().is_some() && crate::util::now_millis() - last_checked > DAY_MS
 }
 
-/// Returns the newer version and its release page, or `None` when this build is current.
-pub async fn check() -> Option<(String, String)> {
-    let repo = repository()?;
-    let client = reqwest::Client::builder().user_agent(concat!("Scoobert/", env!("CARGO_PKG_VERSION"))).build().ok()?;
-    let res = client
+#[derive(Debug, Clone, PartialEq)]
+pub struct Release {
+    pub version: String,
+    pub page: String,
+    /// The file this copy of Scoobert can install itself from, when there is one.
+    pub asset: Option<Asset>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Asset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
+    pub sha256: Option<String>,
+}
+
+/// How this copy of Scoobert was installed, which decides whether it can update itself.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Kind {
+    WindowsInstaller,
+    AppImage(PathBuf),
+}
+
+pub fn install_kind() -> Option<Kind> {
+    if cfg!(windows) && crate::paths::uninstaller().is_some() {
+        return Some(Kind::WindowsInstaller);
+    }
+    std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file()).map(Kind::AppImage)
+}
+
+fn client() -> Option<reqwest::Client> {
+    reqwest::Client::builder().user_agent(concat!("Scoobert/", env!("CARGO_PKG_VERSION"))).build().ok()
+}
+
+/// The newest release when it is newer than this build.
+pub async fn check() -> anyhow::Result<Option<Release>> {
+    let repo = repository().context("This build of Scoobert has no release page to check.")?;
+    let res = client()
+        .context("Could not start the update check.")?
         .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .ok()?;
-    let body: serde_json::Value = res.json().await.ok()?;
-    let tag = body["tag_name"].as_str()?.trim_start_matches('v').to_string();
-    let url = body["html_url"].as_str().filter(|u| u.starts_with("https://github.com/"))?.to_string();
-    is_newer(&tag, env!("CARGO_PKG_VERSION")).then_some((tag, url))
+        .context("Could not reach GitHub.")?;
+    // GitHub answers 404 until the first release is published.
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !res.status().is_success() {
+        bail!("GitHub returned {} for the update check.", res.status());
+    }
+    let body: serde_json::Value = res.json().await.context("GitHub sent a release description Scoobert could not read.")?;
+    let version = body["tag_name"].as_str().context("The latest release has no version.")?.trim_start_matches('v').to_string();
+    let page = body["html_url"].as_str().filter(|u| u.starts_with("https://github.com/")).context("The latest release has no page.")?.to_string();
+    if !is_newer(&version, env!("CARGO_PKG_VERSION")) {
+        return Ok(None);
+    }
+    let wanted = |name: &str| match install_kind() {
+        Some(Kind::WindowsInstaller) => name == format!("Scoobert-Setup-{version}.exe"),
+        Some(Kind::AppImage(_)) => name.ends_with("-x86_64.AppImage"),
+        None => false,
+    };
+    let asset = body["assets"].as_array().into_iter().flatten().find_map(|a| {
+        let name = a["name"].as_str()?;
+        let url = a["browser_download_url"].as_str().filter(|u| u.starts_with("https://github.com/"))?;
+        wanted(name).then(|| Asset {
+            name: name.to_string(),
+            url: url.to_string(),
+            size: a["size"].as_u64().unwrap_or(0),
+            sha256: a["digest"].as_str().and_then(|d| d.strip_prefix("sha256:")).map(str::to_lowercase),
+        })
+    });
+    Ok(Some(Release { version, page, asset }))
 }
 
 fn is_newer(candidate: &str, current: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> { v.split(['.', '-']).take(3).map(|p| p.parse().unwrap_or(0)).collect() };
     parse(candidate) > parse(current)
+}
+
+/// Downloads the update, reporting bytes done and total, and checks it against GitHub's checksum.
+pub async fn download(asset: &Asset, kind: &Kind, on_progress: impl Fn(u64, u64)) -> anyhow::Result<PathBuf> {
+    let target = match kind {
+        Kind::WindowsInstaller => std::env::temp_dir().join(&asset.name),
+        // Next to the running AppImage, so the finished file can replace it with a rename.
+        Kind::AppImage(current) => current.with_extension("AppImage.new"),
+    };
+    let res = client().context("Could not start the download")?.get(&asset.url).send().await?;
+    if !res.status().is_success() {
+        bail!("GitHub returned {} for the update.", res.status());
+    }
+    let total = res.content_length().unwrap_or(asset.size);
+    let mut file = tokio::fs::File::create(&target).await.with_context(|| format!("Could not write {}", target.display()))?;
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    let mut done = 0u64;
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        sha2::Digest::update(&mut hasher, &chunk);
+        file.write_all(&chunk).await?;
+        done += chunk.len() as u64;
+        on_progress(done, total);
+    }
+    file.flush().await?;
+    drop(file);
+    let actual = hex::encode(sha2::Digest::finalize(hasher));
+    if let Some(expected) = &asset.sha256
+        && *expected != actual
+    {
+        let _ = tokio::fs::remove_file(&target).await;
+        bail!("The update did not match its published checksum and was deleted. Try again later.");
+    }
+    Ok(target)
+}
+
+/// Starts the new version. The Windows installer updates in place without its wizard and reopens Scoobert; an
+/// AppImage replaces the running file and starts. The caller then closes this copy.
+pub fn install(file: &Path, kind: &Kind) -> anyhow::Result<()> {
+    match kind {
+        Kind::WindowsInstaller => {
+            std::process::Command::new(file).args(["/S", "/relaunch"]).spawn().context("Could not start the installer")?;
+        }
+        Kind::AppImage(current) => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755))?;
+            }
+            std::fs::rename(file, current).context("Could not replace the AppImage")?;
+            std::process::Command::new(current).spawn().context("Could not start the new version")?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

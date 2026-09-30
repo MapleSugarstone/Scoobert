@@ -28,6 +28,7 @@ use crate::agent::conversation::{Conversation, Image, Summary};
 use crate::agent::{Decision, Event, Host, ModelOption, Snapshot};
 use crate::llama::{ServerStatus, SharedSettings};
 use crate::store::{Approvals, State, ThemeChoice, Thinking};
+use crate::update::Release;
 use crate::util::{ago, clip, short_count};
 use chat::Chat;
 use icons::{Icon, icon};
@@ -37,10 +38,12 @@ const COMPOSER_ID: &str = "composer";
 const RENAME_ID: &str = "rename";
 
 pub fn run() -> iced::Result {
-    let size = State::load().window.map(|(w, h)| Size::new(w.max(760.0), h.max(480.0))).unwrap_or(Size::new(1320.0, 860.0));
+    let saved = State::load().window.map(|(w, h)| Size::new(w, h)).unwrap_or(Size::new(1320.0, 860.0));
+    let (size, position) = place_window(saved);
     iced::application(App::new, App::update, App::view)
         .window(window::Settings {
             size,
+            position,
             min_size: Some(Size::new(760.0, 480.0)),
             icon: window::icon::from_file_data(include_bytes!("../../assets/icon.png"), None).ok(),
             exit_on_close_request: false,
@@ -49,7 +52,6 @@ pub fn run() -> iced::Result {
             platform_specific: window::settings::PlatformSpecific { application_id: "scoobert".into(), ..Default::default() },
             ..window::Settings::default()
         })
-        .centered()
         .exit_on_close_request(false)
         .settings(iced::Settings { default_text_size: 14.into(), ..iced::Settings::default() })
         .default_font(fonts::ui())
@@ -57,6 +59,16 @@ pub fn run() -> iced::Result {
         .theme(App::theme)
         .subscription(App::subscription)
         .run()
+}
+
+/// Shrinks the window to fit above the taskbar and centers it there. The size excludes the title bar and borders.
+fn place_window(size: Size) -> (Size, window::Position) {
+    let fit = |s: Size| Size::new(s.width.max(760.0), s.height.max(480.0));
+    let Some((x, y, width, height)) = crate::sys::work_area() else { return (fit(size), window::Position::Centered) };
+    let (frame_w, frame_h) = (16.0, 40.0);
+    let size = fit(Size::new(size.width.min(width - frame_w), size.height.min(height - frame_h)));
+    let corner = iced::Point::new(x + ((width - size.width - frame_w) / 2.0).max(0.0), y + ((height - size.height - frame_h) / 2.0).max(0.0));
+    (size, window::Position::Specific(corner))
 }
 
 #[derive(Clone)]
@@ -87,6 +99,8 @@ pub enum Confirm {
     RemoveProject(PathBuf),
     /// Go back to the user message at `index`, with `files` files the model changed after it.
     Rewind { index: usize, text: String, files: usize },
+    /// Install an update while a task is running.
+    InstallUpdate,
 }
 
 #[derive(Debug, Clone)]
@@ -150,7 +164,13 @@ pub enum Message {
     CloseModal,
 
     Toast(String),
-    Update(Option<(String, String)>),
+    Update(Option<Release>),
+    CheckUpdates,
+    Checked(Result<Option<Release>, String>),
+    InstallUpdate,
+    UpdateProgress(u64, u64),
+    UpdateReady(Result<PathBuf, String>),
+    UpdateLaunched(Result<(), String>),
     OpenUrl(String),
 }
 
@@ -177,7 +197,9 @@ pub struct App {
     setup: setup::Setup,
     confirm: Option<Confirm>,
     toast: Option<(String, Instant)>,
-    update_notice: Option<(String, String)>,
+    update_notice: Option<Release>,
+    /// Bytes downloaded and the total while an update downloads.
+    update_progress: Option<(u64, u64)>,
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
     /// Whether a rewind also puts back the files the model changed.
@@ -237,6 +259,7 @@ impl App {
             confirm: None,
             toast: None,
             update_notice: None,
+            update_progress: None,
             web_offer: false,
             rewind_files: true,
         };
@@ -244,7 +267,7 @@ impl App {
         if crate::update::due(app.state.update_checked_at) {
             app.state.update_checked_at = crate::util::now_millis();
             app.save();
-            tasks.push(Task::perform(crate::update::check(), Message::Update));
+            tasks.push(Task::perform(crate::update::check(), |r| Message::Update(r.ok().flatten())));
         }
         (app, Task::batch(tasks))
     }
@@ -419,7 +442,8 @@ impl App {
                 let flush = self.notes.flush();
                 self.save();
                 let host = self.host.clone();
-                return flush.chain(Task::perform(
+                // The window goes away at once while the model server stops behind it.
+                return window::set_mode(id, window::Mode::Hidden).chain(flush).chain(Task::perform(
                     async move {
                         if let Some(h) = host {
                             h.shutdown().await;
@@ -574,6 +598,7 @@ impl App {
                             return self.select_project(None);
                         }
                     }
+                    Confirm::InstallUpdate => return self.start_update(),
                 }
             }
 
@@ -740,6 +765,57 @@ impl App {
 
             Message::Toast(t) => self.toast(t),
             Message::Update(notice) => self.update_notice = notice,
+            Message::CheckUpdates => {
+                self.state.update_checked_at = crate::util::now_millis();
+                self.save();
+                return Task::perform(crate::update::check(), |r| Message::Checked(r.map_err(|e| format!("{e:#}"))));
+            }
+            Message::Checked(Ok(Some(release))) => {
+                // The banner offers the update, and the settings panel would cover it.
+                self.settings = None;
+                self.update_notice = Some(release);
+            }
+            Message::Checked(Ok(None)) => self.toast(format!("Scoobert {} is the newest version.", env!("CARGO_PKG_VERSION"))),
+            Message::Checked(Err(e)) => self.toast(e),
+            Message::InstallUpdate => {
+                if self.chat.as_ref().is_some_and(|c| c.running) {
+                    self.confirm = Some(Confirm::InstallUpdate);
+                } else {
+                    return self.start_update();
+                }
+            }
+            Message::UpdateProgress(done, total) => self.update_progress = Some((done, total)),
+            Message::UpdateReady(Ok(file)) => {
+                let Some(kind) = crate::update::install_kind() else { return Task::none() };
+                if let Some((_, total)) = self.update_progress {
+                    self.update_progress = Some((total, total));
+                }
+                if let Some(size) = self.window_size {
+                    self.state.window = Some((size.width, size.height));
+                }
+                let flush = self.notes.flush();
+                self.save();
+                let host = self.host.clone();
+                // The model server and running tasks stop first so the installer can replace their files.
+                return flush.chain(Task::perform(
+                    async move {
+                        if let Some(h) = host {
+                            h.shutdown().await;
+                        }
+                        crate::update::install(&file, &kind).map_err(|e| format!("{e:#}"))
+                    },
+                    Message::UpdateLaunched,
+                ));
+            }
+            Message::UpdateReady(Err(e)) => {
+                self.update_progress = None;
+                self.toast(e);
+            }
+            Message::UpdateLaunched(Ok(())) => return self.window.map(window::close).unwrap_or_else(iced::exit),
+            Message::UpdateLaunched(Err(e)) => {
+                self.update_progress = None;
+                self.toast(format!("Could not install the update. {e}"));
+            }
             Message::OpenUrl(url) => {
                 if url.starts_with("https://") {
                     let _ = opener::open(url);
@@ -747,6 +823,43 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// Downloads the release the banner offers and reports its progress to the banner.
+    fn start_update(&mut self) -> Task<Message> {
+        let (Some(asset), Some(kind)) = (self.update_notice.as_ref().and_then(|r| r.asset.clone()), crate::update::install_kind()) else {
+            return Task::none();
+        };
+        self.update_progress = Some((0, asset.size));
+        let stream = iced::stream::channel(16, async move |mut out: iced::futures::channel::mpsc::Sender<Message>| {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+            let job = tokio::spawn(async move {
+                crate::update::download(&asset, &kind, |done, total| {
+                    let _ = tx.send((done, total));
+                })
+                .await
+            });
+            let mut job = std::pin::pin!(job);
+            let mut shown = u64::MAX;
+            let result = loop {
+                tokio::select! {
+                    Some((done, total)) = rx.recv() => {
+                        let percent = done * 100 / total.max(1);
+                        if percent != shown {
+                            shown = percent;
+                            let _ = out.send(Message::UpdateProgress(done, total)).await;
+                        }
+                    }
+                    r = &mut job => break r,
+                }
+            };
+            let result = match result {
+                Ok(r) => r.map_err(|e| format!("{e:#}")),
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = out.send(Message::UpdateReady(result)).await;
+        });
+        Task::run(stream, std::convert::identity)
     }
 
     /// Applies what a settings or setup change requires elsewhere in the app.
@@ -897,21 +1010,23 @@ impl App {
             main.height(Fill).into()
         };
         let mut layout = column![self.topbar(), rule::horizontal(1).style(theme::divider)];
-        if let Some((version, url)) = &self.update_notice {
-            layout = layout.push(
-                container(
-                    row![
-                        text(format!("Scoobert {version} is available.")).size(13),
-                        button(text("Open the release page").size(13)).style(theme::link).on_press(Message::OpenUrl(url.clone())),
-                        space::horizontal(),
-                        button(icon(Icon::Close, 14.0)).style(theme::ghost).on_press(Message::Update(None)),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .padding([6, 16])
-                .style(theme::banner),
-            );
+        if let Some(release) = &self.update_notice {
+            let mut bar = row![text(format!("Scoobert {} is available.", release.version)).size(13)].spacing(8).align_y(Alignment::Center);
+            match self.update_progress {
+                Some((done, total)) if total > 0 && done >= total => bar = bar.push(text("Installing. Scoobert restarts by itself.").size(13).style(theme::muted)),
+                Some((done, total)) if total > 0 => bar = bar.push(text(format!("Downloading, {}%", done * 100 / total)).size(13).style(theme::muted)),
+                Some(_) => bar = bar.push(text("Downloading").size(13).style(theme::muted)),
+                None => {
+                    // Only a copy that can replace itself gets an asset.
+                    if release.asset.is_some() {
+                        bar = bar.push(button(text("Download and install").size(13)).padding([4, 12]).style(theme::primary).on_press(Message::InstallUpdate));
+                    }
+                    bar = bar.push(button(text("Open the release page").size(13)).style(theme::link).on_press(Message::OpenUrl(release.page.clone())));
+                    bar = bar.push(space::horizontal());
+                    bar = bar.push(button(icon(Icon::Close, 14.0)).style(theme::ghost).on_press(Message::Update(None)));
+                }
+            }
+            layout = layout.push(container(bar).width(Fill).padding([6, 16]).style(theme::banner));
         }
         layout = layout.push(body);
         let base = container(layout).width(Fill).height(Fill).style(theme::app);
@@ -1329,6 +1444,11 @@ fn confirm_dialog<'a>(c: &Confirm, rewind_files: bool) -> Element<'a, Message> {
     let (title, body, action) = match c {
         Confirm::DeleteConversation(_) => ("Delete this conversation?", "The conversation file moves to the trash, so you can restore it from there.", "Delete"),
         Confirm::RemoveProject(_) => ("Remove this project from the list?", "Scoobert forgets the folder but keeps its files, notes, and conversations.", "Remove"),
+        Confirm::InstallUpdate => (
+            "Update while Scoobert is working?",
+            "Scoobert downloads the update, then stops the task and restarts to install it. Select Continue afterward to pick the task up again.",
+            "Update",
+        ),
         Confirm::Rewind { .. } => unreachable!("handled above"),
     };
     column![

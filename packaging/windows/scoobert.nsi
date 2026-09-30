@@ -60,10 +60,37 @@ Function CheckFolder
   Delete "$INSTDIR\.scoobert-write-test"
 FunctionEnd
 
+; An update started from inside Scoobert passes /relaunch, so Scoobert opens again after the silent install.
+Function .onInstSuccess
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/relaunch" $R1
+  ${IfNot} ${Errors}
+    Exec '"$INSTDIR\scoobert.exe"'
+  ${EndIf}
+FunctionEnd
+
 Section "Scoobert"
-  ; A running copy locks its files, so it is asked to close first.
+  ; A running copy locks its files, so it is asked to close and ended if it is still open after 10 seconds.
   nsExec::Exec 'taskkill /IM scoobert.exe'
-  Sleep 1500
+  StrCpy $1 0
+  ${DoWhile} ${FileExists} "$INSTDIR\scoobert.exe"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\scoobert.exe" a
+    ${IfNot} ${Errors}
+      FileClose $0
+      ${Break}
+    ${EndIf}
+    IntOp $1 $1 + 1
+    ${If} $1 = 20
+      nsExec::Exec `powershell -NoProfile -Command "Get-Process scoobert -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force"`
+    ${ElseIf} $1 >= 30
+      ${Break}
+    ${EndIf}
+    Sleep 500
+  ${Loop}
+  ; A model server left behind by a crash or a forced close locks the llama folder.
+  nsExec::Exec `powershell -NoProfile -Command "Get-Process llama-server -ErrorAction SilentlyContinue | Where-Object { $$_.Path -like '$INSTDIR\*' } | Stop-Process -Force"`
   SetOutPath "$INSTDIR"
   File /r "${SOURCE}\*.*"
   Delete "$INSTDIR\portable.txt"

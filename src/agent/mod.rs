@@ -1113,7 +1113,9 @@ impl Host {
         for t in tokens {
             t.cancel();
         }
-        self.llama.stop().await;
+        if tokio::time::timeout(std::time::Duration::from_secs(4), self.llama.stop()).await.is_err() {
+            self.llama.kill_now();
+        }
     }
 }
 

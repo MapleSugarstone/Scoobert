@@ -62,6 +62,8 @@ pub struct LlamaServer {
     proc: tokio::sync::Mutex<Option<Running>>,
     shared: Mutex<Shared>,
     busy: AtomicUsize,
+    /// A load holds `proc` until the model is ready, so `stop` cancels this first.
+    loading: Mutex<CancellationToken>,
     on_status: Box<dyn Fn(ServerStatus) + Send + Sync>,
 }
 
@@ -88,6 +90,7 @@ impl LlamaServer {
             proc: tokio::sync::Mutex::new(None),
             shared: Mutex::new(Shared { model: None, slot_owner: None, last_use: Instant::now() }),
             busy: AtomicUsize::new(0),
+            loading: Mutex::new(CancellationToken::new()),
             on_status: Box::new(on_status),
         });
         let _ = std::fs::create_dir_all(paths::get().slots());
@@ -179,7 +182,11 @@ impl LlamaServer {
     /// Starts the server with `model` unless it is already running it.
     pub async fn ensure(self: &Arc<Self>, model: &LocalModel) -> anyhow::Result<()> {
         self.touch();
+        let cancel = self.loading.lock().unwrap().clone();
         let mut proc = self.proc.lock().await;
+        if cancel.is_cancelled() {
+            return Err(Cancelled.into());
+        }
         if let Some(running) = proc.as_mut() {
             let alive = matches!(running.child.try_wait(), Ok(None));
             if alive && running.model.path == model.path {
@@ -187,14 +194,16 @@ impl LlamaServer {
             }
         }
         self.stop_locked(&mut proc).await;
-        let result = self.start_locked(&mut proc, model).await;
-        if let Err(err) = &result {
+        let result = self.start_locked(&mut proc, model, &cancel).await;
+        if let Err(err) = &result
+            && !crate::util::is_cancelled(err)
+        {
             (self.on_status)(ServerStatus::Error(err.to_string()));
         }
         result
     }
 
-    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel) -> anyhow::Result<()> {
+    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, cancel: &CancellationToken) -> anyhow::Result<()> {
         let Some(exe) = self.executable() else {
             bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
         };
@@ -276,14 +285,20 @@ impl LlamaServer {
 
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         while Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(400)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(400)) => {}
+                _ = cancel.cancelled() => {
+                    self.stop_locked(proc).await;
+                    return Err(Cancelled.into());
+                }
+            }
             let exited = proc.as_mut().map(|r| !matches!(r.child.try_wait(), Ok(None))).unwrap_or(true);
             if exited {
                 *proc = None;
                 self.shared.lock().unwrap().model = None;
                 bail!("llama-server stopped while loading {}.\n{}", model.name, log_errors());
             }
-            if let Ok(h) = self.request("/health", None, Duration::from_secs(2), None).await
+            if let Ok(h) = self.request("/health", None, Duration::from_secs(2), Some(cancel)).await
                 && h["status"] == "ok"
             {
                 (self.on_status)(ServerStatus::Ready(model.name.clone()));
@@ -296,8 +311,15 @@ impl LlamaServer {
     }
 
     pub async fn stop(&self) {
+        std::mem::replace(&mut *self.loading.lock().unwrap(), CancellationToken::new()).cancel();
         let mut proc = self.proc.lock().await;
         self.stop_locked(&mut proc).await;
+    }
+
+    /// Ends the server process without waiting for the lock, for when an orderly stop takes too long.
+    pub fn kill_now(&self) {
+        kill_from_pid_file();
+        (self.on_status)(ServerStatus::Stopped);
     }
 
     async fn stop_locked(&self, proc: &mut Option<Running>) {
@@ -518,14 +540,17 @@ fn free_port(preferred: u16) -> u16 {
 
 /// A server left behind by a crash or a forced close still holds the port and several GB of memory.
 fn kill_orphan() {
-    let file = paths::get().pid_file();
-    let Ok(text) = std::fs::read_to_string(&file) else { return };
-    let _ = std::fs::remove_file(&file);
-    if let Ok(pid) = text.trim().parse::<u32>()
-        && crate::sys::kill_if_named(pid, paths::llama_server_name())
-    {
+    if kill_from_pid_file() {
         std::thread::sleep(Duration::from_millis(1500));
     }
+}
+
+/// Kills the server named in the pid file, if that process is still llama-server.
+fn kill_from_pid_file() -> bool {
+    let file = paths::get().pid_file();
+    let Ok(text) = std::fs::read_to_string(&file) else { return false };
+    let _ = std::fs::remove_file(&file);
+    text.trim().parse::<u32>().is_ok_and(|pid| crate::sys::kill_if_named(pid, paths::llama_server_name()))
 }
 
 fn log_errors() -> String {

@@ -133,7 +133,7 @@ The uninstaller always removes the saved prompt caches and asks about the settin
 - The local model server listens only on your computer and requires a random key that changes every time Scoobert starts, so web pages and other programs cannot use it.
 - Model downloads are pinned to a tested version and checked against their published checksums.
 - Web search is off until you turn it on. Web text reaches the model marked as information rather than instructions, and the page reader refuses addresses on your computer or local network.
-- Scoobert checks GitHub once a day for a newer release and shows a notice. It never downloads or installs updates itself.
+- Scoobert checks GitHub once a day for a newer release and shows a notice. It downloads an update only when you select **Download and install**, and it deletes the download if it does not match the checksum GitHub publishes for it. You can also check from Settings with **Check for updates**. A portable copy only links to the release page.
 
 ## Build from source
 

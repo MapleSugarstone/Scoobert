@@ -135,6 +135,7 @@ pub enum Msg {
     RemoveCustom(String),
     OpenUrl(String),
     Uninstall,
+    CheckUpdates,
     ShowFile(PathBuf),
     Close,
 }
@@ -357,6 +358,7 @@ impl Panel {
                     }
                 }
             }
+            Msg::CheckUpdates => return (Task::done(Message::CheckUpdates), Effect::None),
             Msg::ShowFile(path) => {
                 let _ = opener::reveal(path);
             }
@@ -441,6 +443,7 @@ impl Panel {
                 s.web_access,
                 Msg::WebAccess
             ),
+            version(),
             removal(),
         ]
         .spacing(18)
@@ -763,6 +766,15 @@ fn custom_progress<'a>(download: &'a Option<Download>) -> Element<'a, Msg> {
     .spacing(8)
     .align_y(Alignment::Center)
     .into()
+}
+
+/// The running version, with a button that looks for a newer release when this build knows where releases are.
+fn version<'a>() -> Element<'a, Msg> {
+    let mut control = row![text(env!("CARGO_PKG_VERSION")).size(13).style(theme::muted)].spacing(12).align_y(Alignment::Center);
+    if crate::update::repository().is_some() {
+        control = control.push(button(text("Check for updates").size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::CheckUpdates));
+    }
+    field("Version", None, control.into())
 }
 
 /// How to remove this copy of Scoobert: its uninstaller, its folder when portable, or its AppImage file.

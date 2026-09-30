@@ -14,14 +14,31 @@ pub fn kill_if_named(pid: u32, name: &str) -> bool {
     imp::kill_if_named(pid, name)
 }
 
+/// The primary screen without the taskbar, as x, y, width, and height in logical pixels.
+pub fn work_area() -> Option<(f32, f32, f32, f32)> {
+    imp::work_area()
+}
+
 #[cfg(windows)]
 mod imp {
-    use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, RECT};
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     use windows_sys::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
         TerminateProcess,
     };
+    use windows_sys::Win32::UI::HiDpi::GetDpiForSystem;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
+
+    pub fn work_area() -> Option<(f32, f32, f32, f32)> {
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut r as *mut RECT).cast(), 0) } == 0 {
+            return None;
+        }
+        // Both calls answer in the same units whether or not the process is DPI aware yet.
+        let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
+        Some((r.left as f32 / scale, r.top as f32 / scale, (r.right - r.left) as f32 / scale, (r.bottom - r.top) as f32 / scale))
+    }
 
     pub fn memory() -> (u64, u64) {
         let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
@@ -51,6 +68,11 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
+    /// Linux desktops keep a new window inside the work area themselves.
+    pub fn work_area() -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+
     pub fn memory() -> (u64, u64) {
         let text = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
         let field = |key: &str| {
