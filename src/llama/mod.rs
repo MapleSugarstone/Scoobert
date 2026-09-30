@@ -46,6 +46,8 @@ pub enum ServerStatus {
 struct Running {
     child: tokio::process::Child,
     model: LocalModel,
+    /// False until the model finishes loading. A caller that stopped waiting partway leaves it false.
+    ready: bool,
 }
 
 struct Shared {
@@ -190,7 +192,17 @@ impl LlamaServer {
         if let Some(running) = proc.as_mut() {
             let alive = matches!(running.child.try_wait(), Ok(None));
             if alive && running.model.path == model.path {
-                return Ok(());
+                if running.ready {
+                    return Ok(());
+                }
+                // An earlier caller stopped waiting while this model loaded, so this one waits for it instead.
+                let result = self.wait_ready(&mut proc, model, &cancel).await;
+                if let Err(err) = &result
+                    && !crate::util::is_cancelled(err)
+                {
+                    (self.on_status)(ServerStatus::Error(err.to_string()));
+                }
+                return result;
             }
         }
         self.stop_locked(&mut proc).await;
@@ -284,14 +296,18 @@ impl LlamaServer {
         if let Some(pid) = child.id() {
             let _ = std::fs::write(paths::get().pid_file(), pid.to_string());
         }
-        *proc = Some(Running { child, model: model.clone() });
+        *proc = Some(Running { child, model: model.clone(), ready: false });
         {
             let mut shared = self.shared.lock().unwrap();
             shared.model = Some((model.clone(), ctx));
             shared.slot_owner = None;
         }
         (self.on_status)(ServerStatus::Loading(model.name.clone()));
+        self.wait_ready(proc, model, cancel).await
+    }
 
+    /// Waits for the server to finish loading model, and stops it when loading fails or is cancelled.
+    async fn wait_ready(&self, proc: &mut Option<Running>, model: &LocalModel, cancel: &CancellationToken) -> anyhow::Result<()> {
         let deadline = Instant::now() + HEALTH_TIMEOUT;
         while Instant::now() < deadline {
             tokio::select! {
@@ -310,6 +326,9 @@ impl LlamaServer {
             if let Ok(h) = self.request("/health", None, Duration::from_secs(2), Some(cancel)).await
                 && h["status"] == "ok"
             {
+                if let Some(r) = proc.as_mut() {
+                    r.ready = true;
+                }
                 (self.on_status)(ServerStatus::Ready(model.name.clone()));
                 self.touch();
                 return Ok(());
@@ -464,8 +483,9 @@ impl LlamaServer {
         res["prompt"].as_str().map(str::to_string).context("llama-server returned no prompt")
     }
 
-    /// Streams a plain completion of `prompt`, passing each piece of text to `on_text`.
-    pub async fn complete(&self, prompt: &str, n_predict: u32, cancel: &CancellationToken, mut on_text: impl FnMut(&str)) -> anyhow::Result<()> {
+    /// Streams a plain completion of `prompt`, passing each piece of text to `on_text`. Returns true when it stopped
+    /// at `n_predict` rather than finishing.
+    pub async fn complete(&self, prompt: &str, n_predict: u32, cancel: &CancellationToken, mut on_text: impl FnMut(&str)) -> anyhow::Result<bool> {
         use futures::StreamExt;
         let body = json!({ "prompt": prompt, "n_predict": n_predict, "stream": true, "cache_prompt": true });
         let send = self.http.post(format!("{}/completion", self.base_url())).bearer_auth(&self.api_key).json(&body).send();
@@ -483,7 +503,7 @@ impl LlamaServer {
                 c = stream.next() => c,
                 _ = cancel.cancelled() => return Err(Cancelled.into()),
             };
-            let Some(chunk) = chunk else { return Ok(()) };
+            let Some(chunk) = chunk else { return Ok(false) };
             buf.extend_from_slice(&chunk?);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
@@ -494,7 +514,7 @@ impl LlamaServer {
                     on_text(text);
                 }
                 if event["stop"].as_bool() == Some(true) {
-                    return Ok(());
+                    return Ok(event["stopped_limit"].as_bool() == Some(true));
                 }
             }
         }

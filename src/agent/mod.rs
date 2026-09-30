@@ -141,7 +141,7 @@ enum Verdict {
     Deny(String),
 }
 
-const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Write what you need to continue the work without the older ones, as short bullet points under these headings: ## Goal, ## Done (files changed and why, with exact paths), ## Decisions (with reasons), ## Next, ## Open problems. Reply in plain text without tools.";
+const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Write what you need to continue the work without the older ones, as short bullet points under these headings, in this order: ## Goal, ## Next, ## Open problems, ## Decisions (with reasons), ## Done (files changed and why, with exact paths). Keep the whole summary under 400 words. Reply in plain text without tools.";
 /// Facts from the note step are three labeled lines of up to 160 characters.
 const REMEMBER_MAX_TOKENS: u32 = 160;
 const TITLE_PROMPT: &str = "Scoobert title step. Reply with a short title for this conversation: 3 to 6 words that name the task, with no quotes and no period. Reply in plain text without tools.";
@@ -824,7 +824,7 @@ impl Host {
                 self.emit(Event::Activity { conv: id.into(), text: Some(format!("{label}: {} words written", thousands(words as u64))) });
             }
         };
-        let result: anyhow::Result<()> = match &draft {
+        let result: anyhow::Result<bool> = match &draft {
             Some(d) => self.continue_summary(&body, &d.text, max_tokens, cancel, on_text).await,
             None => {
                 let reply = stream::send(&self.http, ep, &body, cancel, |delta| match delta {
@@ -839,18 +839,25 @@ impl Host {
                     Ok(r) if r.stop == StopReason::Aborted => Err(crate::util::Cancelled.into()),
                     Ok(r) if r.text.trim().is_empty() => Err(anyhow::anyhow!("The model could not summarize the conversation. {}", r.error.unwrap_or_default())),
                     Ok(r) if r.stop == StopReason::Error => Err(anyhow::anyhow!("The summary stopped partway. {}", r.error.unwrap_or_default())),
-                    Ok(_) => Ok(()),
+                    Ok(r) => Ok(r.stop == StopReason::Length),
                     Err(e) => Err(e),
                 }
             }
         };
-        let written = written.into_inner().unwrap();
-        if let Err(err) = result {
-            // What was written so far is kept, so the next attempt continues from it rather than starting over.
-            if ep.local && !written.trim().is_empty() {
-                let _ = live.conv.lock().unwrap().set_summary_draft(SummaryDraft { start, kept_from, text: written });
+        let mut written = written.into_inner().unwrap();
+        let truncated = match result {
+            Ok(truncated) => truncated,
+            Err(err) => {
+                // What was written so far is kept, so the next attempt continues from it rather than starting over.
+                if ep.local && !written.trim().is_empty() {
+                    let _ = live.conv.lock().unwrap().set_summary_draft(SummaryDraft { start, kept_from, text: written });
+                }
+                return Err(err);
             }
-            return Err(err);
+        };
+        // A summary that hit the length limit ends mid-line, and a half line reads as a fact.
+        if truncated && let Some(end) = written.trim_end().rfind('\n') {
+            written.truncate(end);
         }
         let mut summary = written.trim().to_string();
         let folder = self.settings().notes_folder;
@@ -874,7 +881,7 @@ impl Host {
 
     /// Continues a summary from its draft. A chat request cannot start the reply with given text while thinking is
     /// on, so this sends the rendered prompt with the draft already written to the completion endpoint.
-    async fn continue_summary(&self, body: &Value, draft: &str, max_tokens: u32, cancel: &CancellationToken, on_text: impl FnMut(&str)) -> anyhow::Result<()> {
+    async fn continue_summary(&self, body: &Value, draft: &str, max_tokens: u32, cancel: &CancellationToken, on_text: impl FnMut(&str)) -> anyhow::Result<bool> {
         // The model's own template writes the draft as its reply, followed by a marker. Cutting at the marker gives
         // the prompt in whatever format the model uses. A later user message keeps the server from treating the
         // reply as a prefill, which it refuses while thinking is on.
