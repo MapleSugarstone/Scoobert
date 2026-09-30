@@ -387,23 +387,41 @@ impl Host {
             read_notes: Mutex::new(BTreeSet::new()),
             run_notes: Mutex::new(Vec::new()),
         });
-        self.convs.lock().unwrap().insert(id, live.clone());
+        self.convs.lock().unwrap().insert(id.clone(), live.clone());
+        // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
+        let model = live.conv.lock().unwrap().model.clone();
+        if matches!(self.target(&model), Ok(Target::Local(m)) if self.llama.loaded_model().as_deref() == Some(&m.name)) {
+            self.warm(&id);
+        }
+        Ok(self.snapshot(&live, notice))
+    }
+
+    /// Loads the conversation's model and its cached prompt in the background, so the next message starts sooner.
+    pub fn warm(self: &Arc<Self>, id: &str) {
+        let Ok(live) = self.live(id) else { return };
+        if live.running.load(Ordering::SeqCst) {
+            return;
+        }
         let host = self.clone();
-        let warm = live.clone();
         self.rt.spawn(async move {
-            let _guard = warm.background.lock().await;
-            if let Err(err) = host.prepare(&warm).await
+            let Ok(_guard) = live.background.try_lock() else { return };
+            if let Err(err) = host.prepare(&live).await
                 && !is_cancelled(&err)
             {
                 eprintln!("[cache] {err:#}");
             }
         });
-        Ok(self.snapshot(&live, notice))
     }
 
-    /// Closes conversations that are not running, except `keep`.
+    /// Closes conversations that are not running, except `keep`, and stops their cache work.
     pub fn close_idle(&self, keep: &str) {
-        self.convs.lock().unwrap().retain(|id, l| id == keep || l.running.load(Ordering::SeqCst));
+        self.convs.lock().unwrap().retain(|id, l| {
+            let keep = id == keep || l.running.load(Ordering::SeqCst);
+            if !keep && let Some(t) = l.cache_cancel.lock().unwrap().as_ref() {
+                t.cancel();
+            }
+            keep
+        });
     }
 
     pub fn set_model(&self, id: &str, model: &str) -> anyhow::Result<()> {

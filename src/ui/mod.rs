@@ -139,6 +139,8 @@ pub enum Message {
     RevealProject(PathBuf),
     Sessions(PathBuf, Vec<Summary>),
     NewConversation,
+    /// Starts a conversation in a project, or in Chats when the project is None.
+    NewConversationIn(Option<PathBuf>),
     /// Starts a conversation with no project.
     NewChat,
     SearchProjects(String),
@@ -228,6 +230,8 @@ pub struct App {
     update_progress: Option<(u64, u64)>,
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
+    /// The conversation whose model and cached prompt were last loaded because the user started typing.
+    warmed: Option<String>,
     /// Whether a rewind also puts back the files the model changed.
     rewind_files: bool,
 }
@@ -293,6 +297,7 @@ impl App {
             update_progress: None,
             web_offer: false,
             rewind_files: true,
+            warmed: None,
         };
         let mut tasks = vec![system::theme().map(Message::Mode)];
         if crate::update::due(app.state.update_checked_at) {
@@ -571,6 +576,12 @@ impl App {
                 }
             }
             Message::NewConversation => return self.open(None),
+            Message::NewConversationIn(place) => {
+                if self.current_project() == place {
+                    return self.open(None);
+                }
+                return self.switch_to(place, None);
+            }
             Message::SearchProjects(query) => {
                 let starting = self.search.trim().is_empty() && !query.trim().is_empty();
                 self.search = query;
@@ -691,7 +702,17 @@ impl App {
                 }
             }
 
-            Message::Composer(action) => self.composer.perform(action),
+            Message::Composer(action) => {
+                // Typing is the sign a message is coming, so the model loads then rather than when a conversation opens.
+                if matches!(action, text_editor::Action::Edit(_))
+                    && let (Some(host), Some(chat)) = (&self.host, &self.chat)
+                    && self.warmed.as_deref() != Some(chat.id.as_str())
+                {
+                    host.warm(&chat.id);
+                    self.warmed = Some(chat.id.clone());
+                }
+                self.composer.perform(action);
+            }
             Message::Send => return self.send(true),
             Message::Continue => {
                 let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut()) else { return Task::none() };
@@ -780,6 +801,7 @@ impl App {
             Message::SetModel(choice) => {
                 self.state.settings.model = choice.name.clone();
                 self.save();
+                self.warmed = None;
                 if let (Some(host), Some(chat)) = (&self.host, &mut self.chat) {
                     match host.set_model(&chat.id, &choice.name) {
                         Ok(()) => chat.model = choice.name,
@@ -1268,15 +1290,22 @@ impl App {
         }
         // Chats is listed first, as a project without a folder.
         let general = current.is_none();
-        list = list.push(
-            button(text("Chats").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() }))
-                .width(Fill)
-                .padding([6, 4])
-                .style(theme::row_button)
-                .on_press(Message::SelectNoProject),
-        );
+        let chats = button(text("Chats").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() }))
+            .width(Fill)
+            .padding([6, 4])
+            .style(theme::row_button)
+            .on_press(Message::SelectNoProject);
+        let chats_actions = row![
+            space::horizontal(),
+            tooltip(
+                button(icon(Icon::Plus, 14.0)).padding(4).style(theme::ghost).on_press(Message::NewConversationIn(None)),
+                container(text("New chat").size(12)).padding([4, 8]).style(theme::tooltip),
+                tooltip::Position::Bottom,
+            ),
+        ]
+        .align_y(Alignment::Center);
+        list = list.push(hover(chats, container(chats_actions).height(Fill).align_y(Alignment::Center)));
         if general {
-            list = list.push(self.new_conversation_row());
             list = list.extend(self.sessions.iter().map(|s| self.session_row(s)));
             list = list.push(space().height(8));
         }
@@ -1289,13 +1318,17 @@ impl App {
                 .on_press(Message::SelectProject(p.path.clone()));
             let actions = row![
                 space::horizontal(),
+                tooltip(
+                    button(icon(Icon::Plus, 14.0)).padding(4).style(theme::ghost).on_press(Message::NewConversationIn(Some(p.path.clone()))),
+                    container(text("New conversation").size(12)).padding([4, 8]).style(theme::tooltip),
+                    tooltip::Position::Bottom,
+                ),
                 button(icon(Icon::Folder, 14.0)).padding(4).style(theme::ghost).on_press(Message::RevealProject(p.path.clone())),
                 button(icon(Icon::Close, 14.0)).padding(4).style(theme::ghost).on_press(Message::AskConfirm(Confirm::RemoveProject(p.path.clone()))),
             ]
             .align_y(Alignment::Center);
             list = list.push(hover(name, container(actions).height(Fill).align_y(Alignment::Center)));
             if is_current {
-                list = list.push(self.new_conversation_row());
                 for s in &self.sessions {
                     list = list.push(self.session_row(s));
                 }
@@ -1333,15 +1366,6 @@ impl App {
         .height(Fill)
         .style(theme::sidebar)
         .into()
-    }
-
-    /// The first row under the open project, selected while its new conversation is still empty.
-    fn new_conversation_row(&self) -> Element<'_, Message> {
-        let selected = self.chat.as_ref().is_some_and(|c| c.is_empty());
-        let label = row![icon(Icon::Plus, 14.0), text("New conversation").size(13)].spacing(8).align_y(Alignment::Center);
-        let item = button(label).width(Fill).padding([6, 10]).style(theme::list_item(selected)).on_press(Message::NewConversation);
-        let bar = container(space()).width(2).height(Fill).style(if selected { theme::accent_bar } else { |_: &Theme| container::Style::default() });
-        row![bar, item].height(32).into()
     }
 
     /// Lists every conversation in Chats and the projects, newest first, for the sidebar search.
