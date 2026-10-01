@@ -116,6 +116,8 @@ struct Live {
     run_notes: Mutex<Vec<String>>,
     /// Messages the user sent while a task ran, which the task reads after its current step.
     queued: Mutex<Vec<(String, Vec<conversation::Image>)>>,
+    /// The running task updates the notes, so the note step after it is skipped.
+    notes_update: AtomicBool,
 }
 
 enum Target {
@@ -165,6 +167,8 @@ const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
 const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again. A file you were writing when it stopped was saved up to its last complete line, as its result above says.</interrupted>";
 /// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
+/// Instructions for the Update notes button. `{notes}` is the notes folder.
+const NOTES_UPDATE: &str = "<notes_update>Update the project notes from this whole conversation, then stop. Read {notes}/Features.md first if it exists. Keep it in this form: a # Features heading, a ## Done section, and a ## To do section, with one line per feature written as - **Short name**: one sentence about what it does or what it still needs. Add every feature this conversation finished to Done, and every feature it planned, started, or left unfinished to To do. Move an item from To do to Done when it is finished instead of listing it twice, and keep the items from earlier conversations. Link a feature to its topic page with [[Topic]] when one exists. Then add each decision, convention, or known problem a later conversation needs to the topic page it belongs to, or to Decisions.md, Conventions.md, or Problems.md in {notes}/. Use edit for small changes and write for new files, change only files in {notes}/, and reply with a short list of what you changed.</notes_update>";
 /// Context for a message the user sent while a task ran.
 pub const QUEUED: &str = "<queued>The user sent this while you were working. Take it into account, and carry on with the task unless it asks you to change course.</queued>";
 const INTERRUPTED: &str = "<interrupted>The user stopped your previous reply before it finished. Follow this message. Do not resume the stopped work unless this message asks you to.</interrupted>";
@@ -401,6 +405,7 @@ impl Host {
             read_notes: Mutex::new(BTreeSet::new()),
             run_notes: Mutex::new(Vec::new()),
             queued: Mutex::new(Vec::new()),
+            notes_update: AtomicBool::new(false),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -584,6 +589,18 @@ impl Host {
     }
 
     pub fn prompt(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool) -> anyhow::Result<()> {
+        self.start(id, text, images, resume, None)
+    }
+
+    /// Asks the model to update the project's notes from the whole conversation: the features it finished and the
+    /// ones still to do on the Features page, and other lasting facts on their topic pages.
+    pub fn update_notes(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
+        let folder = self.settings().notes_folder;
+        self.start(id, tr("Update the notes from this conversation.").into(), Vec::new(), false, Some(NOTES_UPDATE.replace("{notes}", &folder)))
+    }
+
+    /// Starts a task. `instructions` go with the message for the model only.
+    fn start(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool, instructions: Option<String>) -> anyhow::Result<()> {
         let live = self.live(id)?;
         if live.running.swap(true, Ordering::SeqCst) {
             bail!("Scoobert is still working on the last message.");
@@ -596,8 +613,10 @@ impl Host {
         }
         let host = self.clone();
         let conv_id = id.to_string();
+        // A notes update already writes what the note step would ask for.
+        live.notes_update.store(instructions.is_some(), Ordering::SeqCst);
         self.rt.spawn(async move {
-            let result = host.run(&live, &conv_id, text, images, resume, &cancel).await;
+            let result = host.run(&live, &conv_id, text, images, resume, instructions, &cancel).await;
             if let Err(err) = &result
                 && !is_cancelled(err)
             {
@@ -616,7 +635,17 @@ impl Host {
         Ok(())
     }
 
-    async fn run(self: &Arc<Self>, live: &Arc<Live>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    async fn run(
+        self: &Arc<Self>,
+        live: &Arc<Live>,
+        id: &str,
+        text: String,
+        images: Vec<conversation::Image>,
+        resume: bool,
+        instructions: Option<String>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let s = self.settings();
         let interrupted = was_stopped(&live.conv.lock().unwrap().messages);
         self.save_stopped_writes(live, id, cancel).await?;
@@ -637,6 +666,9 @@ impl Host {
         if resume || interrupted {
             let note = if resume { RESUME } else { INTERRUPTED };
             context = [note, &context].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+        }
+        if let Some(instructions) = instructions {
+            context = if context.is_empty() { instructions } else { format!("{instructions}\n\n{context}") };
         }
         let mut environment = String::new();
         if first {
@@ -1483,7 +1515,8 @@ impl Host {
                 return;
             };
             let mut facts = Vec::new();
-            if (local || hosted) && s.remember_step && memory::worth_noting(&task) {
+            let updated_notes = live.notes_update.swap(false, Ordering::SeqCst);
+            if (local || hosted) && s.remember_step && !updated_notes && memory::worth_noting(&task) {
                 host.emit(Event::Activity { conv: id.clone(), text: Some(tr("Taking notes...").into()) });
                 let cancel = CancellationToken::new();
                 *live.note_cancel.lock().unwrap() = Some(cancel.clone());
@@ -1627,7 +1660,7 @@ fn clean_title(answer: &str) -> Option<String> {
 /// Long file contents the model already saved are replaced by a line saying where they went. The file is on disk
 /// for the model to read again, and keeping every written file in the prompt would fill a small context fast.
 fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
-    const LONG: usize = 1500;
+    const LONG: usize = tools::SHORTENED_WRITE;
     let saved: HashSet<String> = messages
         .iter()
         .filter_map(|m| match m {

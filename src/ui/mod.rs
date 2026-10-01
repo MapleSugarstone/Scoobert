@@ -193,7 +193,8 @@ pub enum Message {
     Toggle(String),
     Link(String),
     Copy(String),
-    SaveAsNote(String),
+    /// Asks the model to update the project's notes from the open conversation.
+    UpdateNotes,
     /// The answer to the offer to turn on web search before sending: true turns it on.
     WebOffer(bool),
 
@@ -341,13 +342,9 @@ impl App {
         (app, Task::batch(tasks))
     }
 
+    /// The window's name in the taskbar and the window switcher. The top bar already shows the project and title.
     fn title(&self) -> String {
-        match (&self.chat, self.current_project()) {
-            (Some(c), Some(p)) if !c.is_empty() => format!("{} - {} - Scoobert", clip(&c.title, 60), project_name(&p)),
-            (_, Some(p)) => format!("{} - Scoobert", project_name(&p)),
-            (Some(c), None) if !c.is_empty() => format!("{} - Scoobert", clip(&c.title, 60)),
-            _ => "Scoobert".into(),
-        }
+        "Scoobert".into()
     }
 
     fn theme(&self) -> Theme {
@@ -953,10 +950,21 @@ impl App {
                 self.toast(tr("Copied."));
                 return iced::clipboard::write(text);
             }
-            Message::SaveAsNote(body) => {
-                let title = body.lines().map(|l| l.trim_start_matches('#').trim()).find(|l| !l.is_empty()).map(|l| clip(l, 60)).unwrap_or_else(|| "Saved reply".into());
-                let project = self.current_project();
-                return self.notes.update(notes::Msg::CreateWith(title, body), project.as_deref());
+            Message::UpdateNotes => {
+                let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut()) else { return Task::none() };
+                match host.update_notes(&chat.id) {
+                    Ok(()) => {
+                        chat.pending = Some(tr("Update the notes from this conversation.").into());
+                        chat.running = true;
+                        chat.interrupted = false;
+                        chat.error = None;
+                        // The notes pane shows the pages as the model changes them.
+                        if !self.notes.open {
+                            return self.notes.update(notes::Msg::TogglePane, self.current_project().as_deref());
+                        }
+                    }
+                    Err(e) => chat.error = Some(format!("{e:#}")),
+                }
             }
 
             Message::Notes(msg) => {
@@ -1528,11 +1536,11 @@ impl App {
             .on_press(Message::SelectNoProject);
         let chats_actions = row![
             space::horizontal(),
-            tooltip(
-                button(icon(Icon::Plus, 14.0)).padding(4).style(theme::ghost).on_press(Message::NewConversationIn(None)),
+            row_actions(row![tooltip(
+                button(icon(Icon::Plus, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::NewConversationIn(None)),
                 container(text(tr("New chat")).size(12)).padding([4, 8]).style(theme::tooltip),
                 tooltip::Position::Bottom,
-            ),
+            )]),
         ]
         .align_y(Alignment::Center);
         list = list.push(hover(chats, container(chats_actions).height(Fill).align_y(Alignment::Center)));
@@ -1549,13 +1557,15 @@ impl App {
                 .on_press(Message::SelectProject(p.path.clone()));
             let actions = row![
                 space::horizontal(),
-                tooltip(
-                    button(icon(Icon::Plus, 14.0)).padding(4).style(theme::ghost).on_press(Message::NewConversationIn(Some(p.path.clone()))),
-                    container(text(tr("New conversation")).size(12)).padding([4, 8]).style(theme::tooltip),
-                    tooltip::Position::Bottom,
-                ),
-                button(icon(Icon::Folder, 14.0)).padding(4).style(theme::ghost).on_press(Message::RevealProject(p.path.clone())),
-                button(icon(Icon::Close, 14.0)).padding(4).style(theme::ghost).on_press(Message::AskConfirm(Confirm::RemoveProject(p.path.clone()))),
+                row_actions(row![
+                    tooltip(
+                        button(icon(Icon::Plus, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::NewConversationIn(Some(p.path.clone()))),
+                        container(text(tr("New conversation")).size(12)).padding([4, 8]).style(theme::tooltip),
+                        tooltip::Position::Bottom,
+                    ),
+                    button(icon(Icon::Folder, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::RevealProject(p.path.clone())),
+                    button(icon(Icon::Close, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::AskConfirm(Confirm::RemoveProject(p.path.clone()))),
+                ]),
             ]
             .align_y(Alignment::Center);
             list = list.push(hover(name, container(actions).height(Fill).align_y(Alignment::Center)));
@@ -1840,6 +1850,19 @@ impl App {
         }
         tools = tools.push(text(tr("Enter to send, Shift+Enter for a new line")).size(12).style(theme::muted));
         tools = tools.push(space::horizontal());
+        // Update notes covers the whole conversation, so it sits beside Send rather than on one reply.
+        if !running && self.chat.as_ref().is_some_and(|c| !crate::agent::is_general(&c.cwd) && c.has_reply()) {
+            tools = tools.push(tooltip(
+                button(row![icon(Icon::File, 14.0), text(tr("Update notes")).size(13)].spacing(6).align_y(Alignment::Center))
+                    .padding([6, 12])
+                    .style(theme::secondary)
+                    .on_press(Message::UpdateNotes),
+                container(text(tr("Adds the features this conversation finished, and the ones still to do, to the project's notes.")).size(12).width(280))
+                    .padding([4, 8])
+                    .style(theme::tooltip),
+                tooltip::Position::Top,
+            ));
+        }
         tools = tools.push(action);
         let mut col = Column::new().spacing(10);
         if self.web_offer {
@@ -1900,6 +1923,11 @@ static NEEDS_WEB: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|
 
 fn project_name(p: &std::path::Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| crate::paths::display(p))
+}
+
+/// The buttons a hovered sidebar row shows, on a fade that hides the end of a long name under them.
+fn row_actions<'a>(buttons: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
+    container(buttons.align_y(Alignment::Center)).padding(iced::Padding { left: 20.0, right: 2.0, ..iced::Padding::ZERO }).style(theme::row_actions).into()
 }
 
 fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {

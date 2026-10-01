@@ -353,6 +353,10 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
         (None, _) => "Created",
     };
     let mut output = format!("{verb} {shown} (now {} bytes).", new.len());
+    // The note that replaces long content in the conversation reads like a failed write unless it is explained.
+    if content.len() > SHORTENED_WRITE {
+        output.push_str(" From here on the conversation shows this call's content as a short note to save room. The file holds all of it.");
+    }
     // After a part is added, the file's top-level lines show what earlier parts already declared.
     if append {
         let lines = outline(&new, path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")));
@@ -370,6 +374,22 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
 }
 
 const OUTLINE_LINES: usize = 40;
+
+/// Writes longer than this show as a short note in later requests.
+pub const SHORTENED_WRITE: usize = 1500;
+
+/// Whether a command writes a file from a heredoc or a PowerShell here-string. Only the line that opens a heredoc
+/// is checked for a redirect, since the text inside it is often code with `>` in it.
+fn writes_heredoc(command: &str) -> bool {
+    use std::sync::LazyLock;
+    static HEREDOC: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"<<-?\s*['"]?[A-Za-z_]\w*['"]?"#).unwrap());
+    static REDIRECT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?:^|[^0-9&>=-])>{1,2}\s*['"]?[\w./~$]|\btee\b"#).unwrap());
+    static HERE_STRING: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"@['"]\s*$"#).unwrap());
+    static PS_WRITE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?i)\b(?:Set-Content|Add-Content|Out-File|WriteAllText)\b"#).unwrap());
+    let bash = command.lines().any(|l| HEREDOC.is_match(l) && REDIRECT.is_match(&HEREDOC.replace_all(l, " ")));
+    let powershell = command.lines().any(|l| HERE_STRING.is_match(l)) && PS_WRITE.is_match(command);
+    bash || powershell
+}
 
 /// The note `shorten_saved_writes` puts in place of an earlier write's content.
 static SAVED_WRITE_NOTE: std::sync::LazyLock<regex::Regex> =
@@ -477,6 +497,9 @@ async fn command(
 ) -> Result<Outcome, String> {
     let cmd_text = arg(call, &["command", "cmd", "script"]).ok_or("The shell tool needs a command.")?;
     let timeout = Duration::from_secs(arg_u64(call, "timeout").unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 24 * 3600));
+    if writes_heredoc(cmd_text) {
+        return Err("Nothing ran. This command writes a file from a heredoc, which can change quotes, backslashes, and dollar signs without an error. Use write to create or replace the file, or edit to change part of it. The file keeps everything you write, even though the conversation later shows a long write as a short note.".into());
+    }
     let sandboxed = limits.unattended && matches!(limits.isolation, Isolation::Bubblewrap { .. });
     if limits.unattended
         && !sandboxed
@@ -710,6 +733,17 @@ mod tests {
         assert!(restore_checkpoint(&dir.join("checkpoints"), &c.id).unwrap().is_ok());
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn heredoc_file_writes_are_spotted() {
+        assert!(writes_heredoc("cat > src/a.ts << 'EOF'\nconst x = (a) => a > 1;\nEOF"));
+        assert!(writes_heredoc("cd proj && cat <<EOF >> notes.md\nline\nEOF"));
+        assert!(writes_heredoc("tee src/a.ts <<'EOF'\nx\nEOF"));
+        assert!(writes_heredoc("@'\nconst a = 1;\n'@ | Set-Content -Path a.ts"));
+        assert!(!writes_heredoc("python - <<'EOF'\nprint(1 > 0)\nx = lambda a: a\nEOF"));
+        assert!(!writes_heredoc("npm run build > build.log 2>&1"));
+        assert!(!writes_heredoc("node -e \"console.log(1 >> 2)\" 2>&1"));
     }
 
     #[tokio::test]

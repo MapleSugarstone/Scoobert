@@ -70,7 +70,6 @@ pub enum Msg {
     Back,
     TogglePreview,
     New,
-    CreateWith(String, String),
     Daily,
     Created(Result<String, String>),
     Query(String),
@@ -356,17 +355,6 @@ impl Pane {
                 self.open = true;
                 return wrap(Task::perform(
                     blocking(move || vault.create("", "Untitled", "# Untitled\n\n").map_err(|e| format!("{e:#}"))),
-                    Msg::Created,
-                ));
-            }
-            Msg::CreateWith(title, body) => {
-                let Some(vault) = self.vault() else { return Task::none() };
-                self.open = true;
-                return wrap(Task::perform(
-                    blocking(move || {
-                        let name = crate::notes::sanitize_name(&title);
-                        vault.create("", &name, &format!("# {name}\n\n{}\n", body.trim())).map_err(|e| format!("{e:#}"))
-                    }),
                     Msg::Created,
                 ));
             }

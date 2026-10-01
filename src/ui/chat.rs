@@ -116,6 +116,10 @@ impl Chat {
         self.entries.is_empty() && self.pending.is_none()
     }
 
+    pub fn has_reply(&self) -> bool {
+        self.entries.iter().any(|e| matches!(e, Entry::Assistant { .. }))
+    }
+
     fn push(&mut self, m: AgentMessage) {
         let index = self.seen;
         self.seen += 1;
@@ -528,15 +532,11 @@ fn user_bubble<'a>(message: &str, notes: &[String], images: usize, index: Option
 }
 
 fn reply_actions<'a>(raw: &str) -> Element<'a, Message> {
-    let action = |i: Icon, label: &'static str, m: Message| {
-        button(row![icon(i, 13.0), text(label).size(12)].spacing(4).align_y(Alignment::Center)).padding([2, 6]).style(theme::ghost).on_press(m)
-    };
-    row![
-        action(Icon::Copy, tr("Copy"), Message::Copy(raw.to_string())),
-        action(Icon::File, tr("Save as note"), Message::SaveAsNote(raw.to_string())),
-    ]
-    .spacing(4)
-    .into()
+    button(row![icon(Icon::Copy, 13.0), text(tr("Copy")).size(12)].spacing(4).align_y(Alignment::Center))
+        .padding([2, 6])
+        .style(theme::ghost)
+        .on_press(Message::Copy(raw.to_string()))
+        .into()
 }
 
 fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {

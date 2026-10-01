@@ -33,6 +33,8 @@ pub fn remember_prompt(topics: &[String]) -> String {
 
 /// The catalog page Scoobert rebuilds after each write, as the vault's home page.
 pub const HOME: &str = "Home.md";
+/// The page the Update notes button keeps, with the features done and the features still to do.
+pub const FEATURES: &str = "Features.md";
 const HOME_TASKS: usize = 10;
 const HOME_DAYS: usize = 7;
 const TOPIC_LIST: usize = 20;
@@ -564,12 +566,12 @@ fn reviewed(text: &str) -> bool {
     field(text, "reviewed").is_some_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
-/// Topic pages: notes outside the log folders, other than the home page and the Decisions, Conventions, and
-/// Problems pages, most linked first.
+/// Topic pages: notes outside the log folders, other than the home page and the Features, Decisions, Conventions,
+/// and Problems pages, most linked first.
 pub fn topic_pages(vault: &Vault) -> Vec<String> {
-    let kinds = ["decisions.md", "conventions.md", "problems.md"];
+    let kinds = [FEATURES.to_lowercase(), "decisions.md".into(), "conventions.md".into(), "problems.md".into()];
     let counts = backlink_counts(vault);
-    let mut pages: Vec<String> = vault.notes().into_iter().map(|n| n.path).filter(|p| !is_log(p) && !kinds.contains(&p.to_lowercase().as_str())).collect();
+    let mut pages: Vec<String> = vault.notes().into_iter().map(|n| n.path).filter(|p| !is_log(p) && !kinds.contains(&p.to_lowercase())).collect();
     pages.sort_by(|a, b| counts.get(b).unwrap_or(&0).cmp(counts.get(a).unwrap_or(&0)).then(a.cmp(b)));
     pages
 }
@@ -706,8 +708,8 @@ pub fn link_mentions(vault: &Vault, text: &str, skip: &str) -> String {
     out
 }
 
-/// Rebuilds the home page: every topic page with its summary, the Decisions, Conventions, and Problems pages,
-/// recent tasks, and recent days. A home page marked `reviewed: true` is left as the user wrote it.
+/// Rebuilds the home page: the Features page, every topic page with its summary, the Decisions, Conventions, and
+/// Problems pages, recent tasks, and recent days. A home page marked `reviewed: true` is left as the user wrote it.
 pub fn rebuild_home(vault: &Vault) -> anyhow::Result<()> {
     if vault.read(HOME).is_ok_and(|t| reviewed(&t)) {
         return Ok(());
@@ -722,6 +724,10 @@ pub fn rebuild_home(vault: &Vault) -> anyhow::Result<()> {
         format!("---\ntype: index\nupdated: {date}\n---\n# Home\n"),
         "Scoobert keeps this page up to date with every note in the project. Set `reviewed: true` in its properties to stop that.".into(),
     ];
+    if vault.read(FEATURES).is_ok() {
+        out.push("\n## Features\n".into());
+        out.push(format!("- [[{}]]: what is done and what is still to do", note_name(FEATURES)));
+    }
     let mut topics = topic_pages(vault);
     topics.sort_by_key(|p| note_name(p).to_lowercase());
     if !topics.is_empty() {

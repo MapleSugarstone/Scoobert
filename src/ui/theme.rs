@@ -370,6 +370,15 @@ pub fn link(theme: &Theme, status: button::Status) -> button::Style {
     button::Style { background: None, text_color: fg, ..Default::default() }
 }
 
+/// The buttons a hovered sidebar row shows: they sit on a fade from clear into the hovered row's color, so a long
+/// name runs out under them instead of showing through them.
+pub fn row_actions(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    let row = mix(t.surface, t.surface2, 0.5);
+    let fade = iced::gradient::Linear::new(iced::Degrees(90.0)).add_stop(0.0, Color { a: 0.0, ..row }).add_stop(0.3, row).add_stop(1.0, row);
+    container::Style { background: Some(iced::Background::Gradient(fade.into())), border: border::rounded(RADIUS), ..Default::default() }
+}
+
 pub fn row_button(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);
     let bg = match status {
