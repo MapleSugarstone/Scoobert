@@ -110,8 +110,8 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
         ),
         tool(
             "edit",
-            "Replace one exact piece of text in a file. old_text must match the file exactly, including indentation, and appear only once. Include nearby lines to make it unique.",
-            json!({ "path": path, "old_text": { "type": "string" }, "new_text": { "type": "string" } }),
+            "Replace an exact piece of text in a file. old_text must match the file exactly, including indentation, and appear only once. Include nearby lines to make it unique, or set replace_all to true to replace every place it appears.",
+            json!({ "path": path, "old_text": { "type": "string" }, "new_text": { "type": "string" }, "replace_all": { "type": "boolean" } }),
             &["path", "old_text", "new_text"],
         ),
         tool(
@@ -419,6 +419,7 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     save_checkpoint(limits.checkpoints.as_deref(), &call.id, &path).await;
     let old_text = arg(call, &["old_text", "oldText", "old_string", "old_str"]).ok_or("edit needs old_text.")?;
     let new_text = arg(call, &["new_text", "newText", "new_string", "new_str"]).ok_or("edit needs new_text.")?;
+    let all = ["replace_all", "replaceAll"].iter().any(|k| call.arguments.get(*k).is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true")));
     let shown = paths::display(&path);
     if old_text.is_empty() {
         return Err("old_text is empty. Use write to create a file.".into());
@@ -433,13 +434,16 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     if count == 0 {
         return Err(format!("old_text was not found in {shown}. Read the file again and copy the text exactly, including indentation."));
     }
-    if count > 1 {
-        return Err(format!("old_text appears {count} times in {shown}. Include more surrounding lines so it matches once."));
+    if count > 1 && !all {
+        return Err(format!(
+            "old_text appears {count} times in {shown}. Include more surrounding lines so it matches once, or set replace_all to true to replace all {count}."
+        ));
     }
-    let updated = text.replacen(&old_n, &new_n, 1);
+    let updated = if all { text.replace(&old_n, &new_n) } else { text.replacen(&old_n, &new_n, 1) };
     let written = if crlf { updated.replace('\n', "\r\n") } else { updated.clone() };
     tokio::fs::write(&path, &written).await.map_err(|e| format!("Could not write {shown}: {e}"))?;
-    Ok(Outcome { output: format!("Edited {shown}."), is_error: false, diff: Some(unified_diff(&text, &updated)) })
+    let output = if count > 1 { format!("Edited {shown} in {count} places.") } else { format!("Edited {shown}.") };
+    Ok(Outcome { output, is_error: false, diff: Some(unified_diff(&text, &updated)) })
 }
 
 /// A file's state before a tool call changed it: its bytes, or that it did not exist.
@@ -684,6 +688,10 @@ mod tests {
         let ok = run(&call("edit", json!({"path": "a.txt", "old_text": "one\ntwo", "new_text": "1\n2"})), &dir, &shell, &Limits::default(), &cancel, |_| {}).await;
         assert!(!ok.is_error, "{}", ok.output);
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "1\r\n2\r\ntwo\r\n");
+        std::fs::write(dir.join("a.txt"), "one\r\ntwo\r\ntwo\r\n").unwrap();
+        let all = run(&call("edit", json!({"path": "a.txt", "old_text": "two", "new_text": "2", "replace_all": true})), &dir, &shell, &Limits::default(), &cancel, |_| {}).await;
+        assert!(all.output.contains("2 places"), "{}", all.output);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\r\n2\r\n2\r\n");
         let _ = std::fs::remove_dir_all(dir);
     }
 
