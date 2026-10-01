@@ -435,13 +435,15 @@ impl LlamaServer {
 
     /// The start of every slot file name for the loaded model and context size.
     fn slot_stem(&self) -> String {
-        let shared = self.shared.lock().unwrap();
-        let (name, ctx) = match &shared.model {
-            Some((m, ctx)) => (m.name.clone(), *ctx),
-            None => ("model".to_string(), DEFAULT_CONTEXT),
-        };
+        let ctx = self.shared.lock().unwrap().model.as_ref().map(|(_, ctx)| *ctx).unwrap_or(DEFAULT_CONTEXT);
+        format!("{}{ctx}-", self.model_stem())
+    }
+
+    /// The start of every slot file name for the loaded model, at any context size.
+    fn model_stem(&self) -> String {
+        let name = self.shared.lock().unwrap().model.as_ref().map(|(m, _)| m.name.clone()).unwrap_or_else(|| "model".into());
         let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
-        format!("{safe}-{ctx}-")
+        format!("{safe}-")
     }
 
     pub async fn tokenize(&self, text: &str) -> anyhow::Result<Vec<i32>> {
@@ -607,16 +609,20 @@ impl LlamaServer {
 
     /// Restores the slot file whose tokens make up the longest start of `tokens`, and returns how many tokens the
     /// slot then holds. A file that differs anywhere is skipped, since a model with recurrent layers can reuse
-    /// nothing from it.
+    /// nothing from it. Files saved at another context size count too, because a slot's state does not depend on
+    /// the context size, and a file that starts `tokens` fits wherever `tokens` fits.
     pub async fn restore_longest(&self, tokens: &[i32]) -> usize {
-        let stem = self.slot_stem();
+        let stem = self.model_stem();
         let mut found: Vec<(usize, String)> = std::fs::read_dir(paths::get().slots())
             .into_iter()
             .flatten()
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if !name.starts_with(&stem) || !name.ends_with(".bin") {
+                // The context size follows the model name, so another model whose name starts the same is skipped.
+                let rest = name.strip_prefix(&stem)?;
+                let ctx = rest.split('-').next()?;
+                if ctx.is_empty() || !ctx.bytes().all(|b| b.is_ascii_digit()) || !name.ends_with(".bin") {
                     return None;
                 }
                 let saved = saved_tokens(&e.path())?;
