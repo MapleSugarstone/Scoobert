@@ -35,6 +35,17 @@ use chat::Chat;
 use icons::{Icon, icon};
 
 const SIDEBAR_WIDTH: f32 = 290.0;
+/// The chat keeps at least this width. A narrower window hides the sidebar first, then narrows the notes pane.
+const CHAT_MIN: f32 = 440.0;
+const NOTES_MIN: f32 = 300.0;
+/// Below this window width the top bar drops its text labels.
+const COMPACT_WIDTH: f32 = 1100.0;
+/// The top bar's sidebar button and logo when the sidebar is hidden.
+const BRAND_COMPACT: f32 = 104.0;
+/// The minimize, maximize, and close buttons.
+const CAPTION_WIDTH: f32 = 138.0;
+/// Below this window width the top bar shows the project without the conversation title, and tightens the rest.
+const LOCATION_WIDTH: f32 = 900.0;
 const COMPOSER_ID: &str = "composer";
 const RENAME_ID: &str = "rename";
 const PROJECT_SEARCH_ID: &str = "project-search";
@@ -172,6 +183,8 @@ pub enum Message {
     SetThinking(Thinking),
     SetLanguage(&'static crate::i18n::Language),
     LanguageMenu(bool),
+    ToggleSidebar,
+    CloseDrawer,
     SetApprovals(Approvals),
     Approve(u64, Decision),
     Toggle(String),
@@ -234,6 +247,8 @@ pub struct App {
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
     language_menu: bool,
+    /// The sidebar open over the chat, in a window too narrow to show it beside the chat.
+    sidebar_drawer: bool,
     /// The model whose saved prompts are being built ahead of time.
     preparing: Option<(String, u64)>,
     /// The conversation whose model and cached prompt were last loaded because the user started typing.
@@ -304,6 +319,7 @@ impl App {
             update_progress: None,
             web_offer: false,
             language_menu: false,
+            sidebar_drawer: false,
             rewind_files: true,
             warmed: None,
             preparing: None,
@@ -356,6 +372,22 @@ impl App {
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
+    }
+
+    /// Whether the sidebar sits beside the chat, and the notes pane's width, for the window's current width.
+    fn panes(&self) -> (bool, f32) {
+        let width = self.window_size.map_or(f32::MAX, |s| s.width);
+        let docked = !self.state.sidebar_closed && self.sidebar_fits();
+        let side = if docked { SIDEBAR_WIDTH + 1.0 } else { 0.0 };
+        let notes = if self.notes.open { self.notes.width().min(width - side - 1.0 - CHAT_MIN).max(NOTES_MIN) } else { 0.0 };
+        (docked, notes)
+    }
+
+    /// Whether the window leaves the chat its minimum width with the sidebar and the smallest notes pane beside it.
+    fn sidebar_fits(&self) -> bool {
+        let width = self.window_size.map_or(f32::MAX, |s| s.width);
+        let notes = if self.notes.open { 1.0 + NOTES_MIN } else { 0.0 };
+        width - SIDEBAR_WIDTH - 1.0 - notes >= CHAT_MIN
     }
 
     fn save(&mut self) {
@@ -488,6 +520,19 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        // Picking something in the sidebar drawer closes it.
+        if matches!(
+            message,
+            Message::OpenConversation(_)
+                | Message::OpenIn(..)
+                | Message::NewChat
+                | Message::NewConversationIn(_)
+                | Message::SelectProject(_)
+                | Message::SelectNoProject
+                | Message::OpenSettings(_)
+        ) {
+            self.sidebar_drawer = false;
+        }
         match message {
             Message::HostReady(HostHandle(host)) => {
                 self.host = Some(host);
@@ -858,6 +903,18 @@ impl App {
                 self.save();
             }
             Message::LanguageMenu(open) => self.language_menu = open,
+            Message::ToggleSidebar => {
+                if self.panes().0 {
+                    self.state.sidebar_closed = true;
+                    self.save();
+                } else if self.state.sidebar_closed && self.sidebar_fits() {
+                    self.state.sidebar_closed = false;
+                    self.save();
+                } else {
+                    self.sidebar_drawer = !self.sidebar_drawer;
+                }
+            }
+            Message::CloseDrawer => self.sidebar_drawer = false,
             Message::Approve(id, decision) => {
                 if let Some(host) = &self.host {
                     host.answer(id, decision);
@@ -1155,10 +1212,15 @@ impl App {
         let body: Element<'_, Message> = if self.needs_setup() {
             self.setup.view(&self.state).map(Message::Setup)
         } else {
-            let mut main = row![self.sidebar(), rule::vertical(1).style(theme::divider), self.main_area(&theme)];
+            let (docked, notes_width) = self.panes();
+            let mut main = row![];
+            if docked {
+                main = main.push(self.sidebar()).push(rule::vertical(1).style(theme::divider));
+            }
+            main = main.push(self.main_area(&theme));
             if self.notes.open {
                 main = main.push(rule::vertical(1).style(theme::divider));
-                main = main.push(self.notes.view(&theme));
+                main = main.push(self.notes.view(&theme, notes_width));
             }
             main.height(Fill).into()
         };
@@ -1187,6 +1249,10 @@ impl App {
         let base = container(layout).width(Fill).height(Fill).style(theme::app);
 
         let mut layers = stack![base];
+        if self.sidebar_drawer && !self.panes().0 && !self.needs_setup() {
+            layers = layers.push(mouse_area(container(space()).width(Fill).height(Fill).style(theme::backdrop)).on_press(Message::CloseDrawer));
+            layers = layers.push(container(container(self.sidebar()).height(Fill).style(theme::drawer)).height(Fill));
+        }
         if self.language_menu {
             let mut list = Column::new().spacing(2);
             for language in crate::i18n::LANGUAGES {
@@ -1203,11 +1269,12 @@ impl App {
             // A click anywhere else closes the menu.
             layers = layers.push(mouse_area(container(space()).width(Fill).height(Fill)).on_press(Message::LanguageMenu(false)));
             // The right padding lines the menu up under the language button, left of Notes and the window controls.
+            let compact = self.window_size.is_some_and(|s| s.width < COMPACT_WIDTH);
             layers = layers.push(
                 container(container(list).width(220).padding(4).style(theme::popover))
                     .width(Fill)
                     .align_x(Alignment::End)
-                    .padding(iced::Padding { top: 4.0, right: 250.0, ..iced::Padding::ZERO }),
+                    .padding(iced::Padding { top: 4.0, right: if compact { 202.0 } else { 250.0 }, ..iced::Padding::ZERO }),
             );
         }
         if let Some(panel) = &self.settings {
@@ -1245,26 +1312,47 @@ impl App {
     }
 
     fn topbar(&self) -> Element<'_, Message> {
-        let brand = container(row![self.logo(36.0), text("Scoobert").size(19).font(fonts::ui_semibold())].spacing(10).align_y(Alignment::Center))
-            .width(SIDEBAR_WIDTH)
-            .padding([0, 16]);
+        let docked = self.panes().0;
+        let compact = self.window_size.is_some_and(|s| s.width < COMPACT_WIDTH);
+        let narrow = self.window_size.is_some_and(|s| s.width < LOCATION_WIDTH);
+        let toggle = tooltip(
+            button(icon(Icon::Sidebar, 16.0)).padding([6, 8]).style(if self.sidebar_drawer { theme::secondary } else { theme::ghost }).on_press(Message::ToggleSidebar),
+            container(text(tr("Show or hide the sidebar")).size(12)).padding([4, 8]).style(theme::tooltip),
+            tooltip::Position::Bottom,
+        );
+        // Beside the sidebar the brand spans its width. Without it, the name goes so the conversation keeps the room.
+        let brand: Element<'_, Message> = if docked {
+            container(row![toggle, self.logo(36.0), text("Scoobert").size(19).font(fonts::ui_semibold())].spacing(10).align_y(Alignment::Center))
+                .width(SIDEBAR_WIDTH)
+                .padding([0, 10])
+                .into()
+        } else {
+            container(row![toggle, self.logo(36.0)].spacing(10).align_y(Alignment::Center)).width(BRAND_COMPACT).padding([0, 10]).into()
+        };
         let choices = self.model_choices();
         let selected = self.current_model().map(|m| ModelChoice {
             name: m.name.clone(),
             label: if m.provider.is_empty() { m.label.clone() } else { format!("{} ({})", m.label, m.provider) },
         });
+        // A long model name is cut in a narrow window rather than crowding out the buttons after it.
         let model_pick = pick_list(choices, selected, Message::SetModel)
             .placeholder(tr("No model"))
-            .width(Length::Shrink)
+            .width(if narrow { Length::Fixed(130.0) } else if compact { Length::Fixed(180.0) } else { Length::Shrink })
             .padding([5, 10])
             .text_size(13)
             .style(theme::select)
             .menu_style(theme::menu);
         let thinking = self.chat.as_ref().map(|c| c.thinking).unwrap_or(self.state.settings.thinking);
         let reasoning = self.current_model().is_none_or(|m| m.reasoning);
-        let mut right = row![text(tr("Model")).size(13).style(theme::muted), model_pick].spacing(8).align_y(Alignment::Center);
+        let mut right = row![].spacing(8).align_y(Alignment::Center);
+        if !compact {
+            right = right.push(text(tr("Model")).size(13).style(theme::muted));
+        }
+        right = right.push(model_pick);
         if reasoning {
-            right = right.push(text(tr("Thinking")).size(13).style(theme::muted));
+            if !compact {
+                right = right.push(text(tr("Thinking")).size(13).style(theme::muted));
+            }
             right = right.push(
                 pick_list(Thinking::ALL, Some(thinking), Message::SetThinking)
                     .padding([5, 10])
@@ -1275,19 +1363,22 @@ impl App {
         }
         // The button shows a two-letter code so the top bar keeps room for the conversation title.
         let code = crate::i18n::current().code.split('-').next().unwrap_or_default().to_uppercase();
+        let mut language = row![icon(Icon::Globe, 16.0)].spacing(6).align_y(Alignment::Center);
+        if !narrow {
+            language = language.push(text(code).size(13));
+        }
         right = right.push(
-            button(row![icon(Icon::Globe, 16.0), text(code).size(13)].spacing(6).align_y(Alignment::Center))
+            button(language)
                 .padding([6, 10])
                 .style(if self.language_menu { theme::secondary } else { theme::ghost })
                 .on_press(Message::LanguageMenu(!self.language_menu)),
         );
         let notes_style = if self.notes.open { theme::secondary } else { theme::ghost };
-        right = right.push(
-            button(row![icon(Icon::Panel, 16.0), text(tr("Notes")).size(13)].spacing(6).align_y(Alignment::Center))
-                .padding([6, 12])
-                .style(notes_style)
-                .on_press(Message::Notes(notes::Msg::TogglePane)),
-        );
+        let mut notes_label = row![icon(Icon::Panel, 16.0)].spacing(6).align_y(Alignment::Center);
+        if !compact {
+            notes_label = notes_label.push(text(tr("Notes")).size(13));
+        }
+        right = right.push(button(notes_label).padding([6, 12]).style(notes_style).on_press(Message::Notes(notes::Msg::TogglePane)));
         let caption = |i: Icon, m: Message| button(center(icon(i, 16.0))).width(46).height(36).padding(0).style(theme::caption).on_press(m);
         let close_glyph: Element<'_, Message> = if self.close_hover { icons::tinted(Icon::Close, 16.0, |_| iced::Color::WHITE).into() } else { icon(Icon::Close, 16.0).into() };
         let close = mouse_area(button(center(close_glyph)).width(46).height(36).padding(0).style(theme::caption_close).on_press(Message::Quit))
@@ -1298,18 +1389,20 @@ impl App {
             caption(if self.maximized { Icon::Restore } else { Icon::Maximize }, Message::ToggleMaximize),
             close,
         ];
-        row![brand, self.location(), right.padding([0, 16]), container(controls).height(Fill).align_y(Alignment::Start)]
-            .height(56)
-            .align_y(Alignment::Center)
-            .into()
+        // The window buttons sit in a layer of their own, so a top bar too full for the window can never push them out.
+        let bar = row![brand, self.location(), right.padding([0, if narrow { 8 } else { 16 }]), space().width(CAPTION_WIDTH)].height(56).align_y(Alignment::Center);
+        stack![bar, container(controls).width(Fill).height(Fill).align_x(Alignment::End).align_y(Alignment::Start)].height(56).into()
     }
 
     /// Where the open conversation lives: the project as a label that opens its folder, then the conversation title.
     fn location(&self) -> Element<'_, Message> {
+        let narrow = self.window_size.is_some_and(|s| s.width < LOCATION_WIDTH);
         let name = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| tr("Chats").into());
+        // A narrow window keeps the project label and leaves out the title, so a long name is shortened to fit.
+        let shown = if narrow { clip(&name, 14) } else { name.clone() };
         let place: Element<'_, Message> = match self.current_project() {
             Some(p) => tooltip(
-                button(row![icon(Icon::Folder, 14.0), text(name.clone()).size(13)].spacing(6).align_y(Alignment::Center))
+                button(row![icon(Icon::Folder, 14.0), text(shown).size(13).wrapping(text::Wrapping::None)].spacing(6).align_y(Alignment::Center))
                     .padding([4, 10])
                     .style(theme::place)
                     .on_press(Message::RevealProject(p)),
@@ -1320,17 +1413,20 @@ impl App {
             None => button(text(name.clone()).size(13)).padding([4, 10]).style(theme::place).into(),
         };
         let mut crumbs = row![place].spacing(8).align_y(Alignment::Center);
-        if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty()) {
+        if let Some(c) = self.chat.as_ref().filter(|c| !c.is_empty() && !narrow) {
             crumbs = crumbs.push(icons::tinted(Icon::ChevronRight, 14.0, |t| t.muted));
             // A long project name leaves less room, and the title is shortened with an ellipsis before it reaches the model menu.
             let room = 46usize.saturating_sub(name.chars().count()).max(12);
             crumbs = crumbs.push(text(clip(&c.title, room)).size(13).style(theme::muted).wrapping(text::Wrapping::None));
         }
         // Lines the label up with the messages, which sit 24 in from the chat column and center once it is wider than they are.
-        let notes = if self.notes.open { 1.0 + self.notes.width() } else { 0.0 };
-        let column = self.window_size.map_or(0.0, |s| s.width) - SIDEBAR_WIDTH - 1.0 - notes;
-        let left = 1.0 + ((column - chat::MAX_WIDTH) / 2.0).max(0.0) + 24.0;
-        container(crumbs).width(Fill).clip(true).padding(iced::Padding { left, right: 32.0, ..Default::default() }).into()
+        let (docked, notes_width) = self.panes();
+        let (side, brand) = if docked { (SIDEBAR_WIDTH + 1.0, SIDEBAR_WIDTH) } else { (0.0, BRAND_COMPACT) };
+        let notes = if self.notes.open { 1.0 + notes_width } else { 0.0 };
+        let column = self.window_size.map_or(0.0, |s| s.width) - side - notes;
+        let left = (side + ((column - chat::MAX_WIDTH) / 2.0).max(0.0) + 24.0 - brand).max(8.0);
+        let right = if narrow { 8.0 } else { 32.0 };
+        container(crumbs).width(Fill).clip(true).padding(iced::Padding { left, right, ..Default::default() }).into()
     }
 
     fn sidebar(&self) -> Element<'_, Message> {

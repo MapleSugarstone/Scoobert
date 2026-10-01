@@ -209,6 +209,8 @@ pub struct State {
     pub window: Option<(f32, f32)>,
     /// Stored as closed so the pane starts open for new users and for state saved before this field.
     pub notes_closed: bool,
+    /// The user hid the sidebar. A narrow window hides it as well, without changing this.
+    pub sidebar_closed: bool,
     pub update_checked_at: i64,
     /// The version whose saved prompts were built for the default model. A new version rebuilds them once.
     pub prepared_version: String,

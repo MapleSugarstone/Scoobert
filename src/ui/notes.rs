@@ -162,6 +162,7 @@ impl Pane {
         }
     }
 
+    /// The width the pane asks for. A narrow window gives it less.
     pub fn width(&self) -> f32 {
         if self.wide { 720.0 } else { 420.0 }
     }
@@ -475,8 +476,7 @@ impl Pane {
         ])
     }
 
-    pub fn view(&self, theme: &Theme) -> Element<'_, Message> {
-        let width = self.width();
+    pub fn view(&self, theme: &Theme, width: f32) -> Element<'_, Message> {
         if self.root.is_none() {
             let body = column![
                 text(tr("Notes")).size(14).font(fonts::ui_semibold()),
@@ -486,17 +486,22 @@ impl Pane {
             .padding(20);
             return container(body).width(width).height(Fill).style(theme::app).into();
         }
+        // A pane narrowed by a small window shows the tabs as icons, so the note buttons beside them still fit.
+        let labels = width >= 400.0;
         let tab = |label: &'static str, i: Icon, t: Tab| {
             let active = self.tab == t;
             let underline = container(space()).height(2).width(Fill).style(if active { theme::accent_bar } else { |_: &Theme| container::Style::default() });
-            column![
-                button(row![icon(i, 15.0), text(label).size(13)].spacing(6).align_y(Alignment::Center))
-                    .padding([8, 10])
-                    .style(theme::tab(active))
-                    .on_press(Message::Notes(Msg::Tab(t))),
-                underline,
-            ]
-            .width(Length::Shrink)
+            let mut content = row![icon(i, 15.0)].spacing(6).align_y(Alignment::Center);
+            if labels {
+                content = content.push(text(label).size(13));
+            }
+            let button = button(content).padding([8, 10]).style(theme::tab(active)).on_press(Message::Notes(Msg::Tab(t)));
+            let button: Element<'_, Message> = if labels {
+                button.into()
+            } else {
+                iced::widget::tooltip(button, container(text(label).size(12)).padding([4, 8]).style(theme::tooltip), iced::widget::tooltip::Position::Bottom).into()
+            };
+            column![button, underline].width(Length::Shrink)
         };
         let action = |i: Icon, tip: &'static str, m: Msg| {
             iced::widget::tooltip(

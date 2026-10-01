@@ -219,6 +219,12 @@ pub fn tooltip(theme: &Theme) -> container::Style {
     toast(theme)
 }
 
+/// The sidebar shown over the chat in a narrow window.
+pub fn drawer(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style { shadow: Shadow { color: t.shadow, offset: Vector::new(4.0, 0.0), blur_radius: 24.0 }, ..Default::default() }
+}
+
 /// A menu that opens under a top bar button.
 pub fn popover(theme: &Theme) -> container::Style {
     let t = tokens(theme);
