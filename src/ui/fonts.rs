@@ -50,6 +50,28 @@ fn pick() -> &'static Fonts {
     })
 }
 
+/// A font made for the interface language's script. Japanese, Korean, and Chinese need one, because a Latin UI
+/// font leaves their characters to fallback fonts that mix weights and pick Han glyph shapes by the system locale.
+fn script_font() -> Option<&'static str> {
+    let code = crate::i18n::current().code;
+    if cfg!(windows) {
+        return match code {
+            "ja" => Some("Yu Gothic UI"),
+            "ko" => Some("Malgun Gothic"),
+            "zh-Hans" => Some("Microsoft YaHei UI"),
+            _ => None,
+        };
+    }
+    let (family, needles): (&'static str, [&str; 2]) = match code {
+        "ja" => ("Noto Sans CJK JP", ["notosanscjk", "notosansjp"]),
+        "ko" => ("Noto Sans CJK KR", ["notosanscjk", "notosanskr"]),
+        "zh-Hans" => ("Noto Sans CJK SC", ["notosanscjk", "notosanssc"]),
+        _ => return None,
+    };
+    static FILES: OnceLock<Vec<String>> = OnceLock::new();
+    FILES.get_or_init(font_files).iter().any(|f| needles.iter().any(|n| f.starts_with(n))).then_some(family)
+}
+
 /// Lower-case font file names in the usual Linux font folders, including the host's inside a Flatpak.
 fn font_files() -> Vec<String> {
     let home = crate::paths::get().home.clone();
@@ -82,7 +104,7 @@ fn collect(dir: &Path, depth: u32, out: &mut Vec<String>) {
 }
 
 pub fn ui() -> Font {
-    Font::with_name(pick().ui)
+    Font::with_name(script_font().unwrap_or(pick().ui))
 }
 
 pub fn ui_semibold() -> Font {

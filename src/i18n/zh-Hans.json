@@ -299,6 +299,8 @@
   "{n} years ago": "{n}年前",
   "Just now": "刚刚",
   "Show or hide the sidebar": "显示或隐藏侧边栏",
+  "Restart Scoobert to use this language's font everywhere.": "重新启动 Scoobert，即可在所有位置使用此语言的字体。",
+  "Sends when the current step finishes": "当前步骤完成后发送",
   "less than a minute": "不到 1 分钟",
   "about a minute": "约 1 分钟",
   "about {n} minutes": "约 {n} 分钟",

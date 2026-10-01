@@ -299,6 +299,8 @@
  "{n} years ago": "há {n} anos",
  "Just now": "Agora mesmo",
  "Show or hide the sidebar": "Mostrar ou ocultar a barra lateral",
+ "Restart Scoobert to use this language's font everywhere.": "Reinicie o Scoobert para usar a fonte deste idioma em todos os lugares.",
+ "Sends when the current step finishes": "Será enviada quando a etapa atual terminar",
  "less than a minute": "menos de um minuto",
  "about a minute": "cerca de um minuto",
  "about {n} minutes": "cerca de {n} minutos",

@@ -51,7 +51,10 @@ const RENAME_ID: &str = "rename";
 const PROJECT_SEARCH_ID: &str = "project-search";
 
 pub fn run() -> iced::Result {
-    let saved = State::load().window.map(|(w, h)| Size::new(w, h)).unwrap_or(Size::new(1310.0, 730.0));
+    let state = State::load();
+    // The default font follows the language, so the language is set before the window is built.
+    crate::i18n::set(state.settings.language().code);
+    let saved = state.window.map(|(w, h)| Size::new(w, h)).unwrap_or(Size::new(1310.0, 730.0));
     let (size, position) = place_window(saved);
     iced::application(App::new, App::update, App::view)
         .window(window::Settings {
@@ -249,6 +252,9 @@ pub struct App {
     language_menu: bool,
     /// The sidebar open over the chat, in a window too narrow to show it beside the chat.
     sidebar_drawer: bool,
+    /// The interface font when the window was built, which text without its own font keeps until a restart.
+    start_font: iced::Font,
+    font_noted: bool,
     /// The model whose saved prompts are being built ahead of time.
     preparing: Option<(String, u64)>,
     /// The conversation whose model and cached prompt were last loaded because the user started typing.
@@ -320,6 +326,8 @@ impl App {
             web_offer: false,
             language_menu: false,
             sidebar_drawer: false,
+            start_font: fonts::ui(),
+            font_noted: false,
             rewind_files: true,
             warmed: None,
             preparing: None,
@@ -372,6 +380,15 @@ impl App {
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
+    }
+
+    /// Text without its own font uses the one chosen at startup, so a language that needs another font asks for a
+    /// restart, once.
+    fn note_font_change(&mut self) {
+        if fonts::ui() != self.start_font && !self.font_noted {
+            self.font_noted = true;
+            self.toast = Some((tr("Restart Scoobert to use this language's font everywhere.").into(), Instant::now()));
+        }
     }
 
     /// Whether the sidebar sits beside the chat, and the notes pane's width, for the window's current width.
@@ -901,6 +918,7 @@ impl App {
                 self.state.settings.language = language.code.to_string();
                 self.language_menu = false;
                 self.save();
+                self.note_font_change();
             }
             Message::LanguageMenu(open) => self.language_menu = open,
             Message::ToggleSidebar => {
@@ -1071,7 +1089,10 @@ impl App {
     fn after_settings(&mut self, task: Task<Message>, effect: settings::Effect) -> Task<Message> {
         match effect {
             settings::Effect::None => {}
-            settings::Effect::Saved => self.save(),
+            settings::Effect::Saved => {
+                self.save();
+                self.note_font_change();
+            }
             settings::Effect::ModelsChanged => {
                 self.save();
                 self.refresh_models();
@@ -1100,6 +1121,20 @@ impl App {
     fn send(&mut self, offer_web: bool) -> Task<Message> {
         let text = self.composer.text().trim().to_string();
         if text.is_empty() && self.images.is_empty() {
+            return Task::none();
+        }
+        // While a task runs, the message waits for its current step, like a note passed in rather than a Stop.
+        if let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut())
+            && chat.running
+        {
+            let images = std::mem::take(&mut self.images);
+            match host.queue(&chat.id, text.clone(), images) {
+                Ok(()) => {
+                    chat.queued.push(text);
+                    self.composer = text_editor::Content::new();
+                }
+                Err(e) => chat.error = Some(format!("{e:#}")),
+            }
             return Task::none();
         }
         if offer_web && !self.state.settings.web_access && NEEDS_WEB.is_match(&text) {
@@ -1191,10 +1226,35 @@ impl App {
         // The conversation file exists from the user's message on, so the sidebar and the resume point follow
         // it right away rather than when the task ends.
         let saved = matches!(event, Event::Message { message: crate::agent::conversation::Message::User(_), .. } | Event::Titled { .. });
+        let stopped = matches!(event, Event::Settled { interrupted: true, .. });
         let Some(chat) = self.chat.as_mut().filter(|c| c.id == conv) else {
             return if settled { self.load_sessions() } else { Task::none() };
         };
         chat.apply(event);
+        // Messages the task ended without reading go back to the message box after Stop, and otherwise start the
+        // next task, since the task may have finished just as they were sent.
+        let left = if settled { self.host.as_ref().map(|h| h.take_queued(&conv)).unwrap_or_default() } else { Vec::new() };
+        if settled {
+            chat.queued.clear();
+        }
+        if !left.is_empty() {
+            let text = left.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join("\n\n");
+            let images: Vec<_> = left.into_iter().flat_map(|(_, i)| i).collect();
+            if stopped {
+                let draft = self.composer.text();
+                let draft = draft.trim();
+                self.composer = text_editor::Content::with_text(&if draft.is_empty() { text } else { format!("{text}\n\n{draft}") });
+                self.images.extend(images);
+            } else if let Some(host) = self.host.clone() {
+                match host.prompt(&conv, text.clone(), images, false) {
+                    Ok(()) => {
+                        chat.pending = Some(text);
+                        chat.running = true;
+                    }
+                    Err(e) => chat.error = Some(format!("{e:#}")),
+                }
+            }
+        }
         if settled || saved {
             let (project, file) = (chat.cwd.clone(), chat.file.clone());
             if file.exists() {
@@ -1741,11 +1801,24 @@ impl App {
         }
         let vision = self.current_model().is_some_and(|m| m.vision);
         let action: Element<'_, Message> = if running {
-            button(row![icons::tinted(Icon::Stop, 15.0, |_| iced::Color::WHITE), text(tr("Stop")).size(14).font(fonts::ui_semibold())].spacing(6).align_y(Alignment::Center))
+            let stop = button(row![icons::tinted(Icon::Stop, 15.0, |_| iced::Color::WHITE), text(tr("Stop")).size(14).font(fonts::ui_semibold())].spacing(6).align_y(Alignment::Center))
                 .padding([7, 18])
                 .style(theme::stop)
-                .on_press(Message::Stop)
-                .into()
+                .on_press(Message::Stop);
+            // A message typed while Scoobert works waits for the current step instead of stopping it.
+            if self.composer.text().trim().is_empty() && self.images.is_empty() {
+                stop.into()
+            } else {
+                let send = tooltip(
+                    button(row![text(tr("Send")).size(13), icons::tinted(Icon::ArrowRight, 14.0, |t| t.accent_text)].spacing(6).align_y(Alignment::Center))
+                        .padding([6, 14])
+                        .style(theme::primary)
+                        .on_press(Message::Send),
+                    container(text(tr("Sends when the current step finishes")).size(12)).padding([4, 8]).style(theme::tooltip),
+                    tooltip::Position::Top,
+                );
+                row![send, stop].spacing(8).align_y(Alignment::Center).into()
+            }
         } else {
             let can_send = !self.composer.text().trim().is_empty() || !self.images.is_empty();
             let arrow = if can_send { icons::tinted(Icon::ArrowRight, 14.0, |t| t.accent_text) } else { icons::tinted(Icon::ArrowRight, 14.0, |t| t.muted) };

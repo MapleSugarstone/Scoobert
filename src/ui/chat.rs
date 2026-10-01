@@ -67,6 +67,8 @@ pub struct Chat {
     pub error: Option<String>,
     /// A message sent but not yet confirmed by the host, shown right away.
     pub pending: Option<String>,
+    /// Messages sent while the task runs, which it reads after its current step.
+    pub queued: Vec<String>,
     /// The last task stopped before it finished, so the transcript offers Continue.
     pub interrupted: bool,
     counter: usize,
@@ -96,6 +98,7 @@ impl Chat {
             notice: s.notice,
             error: None,
             pending: None,
+            queued: Vec::new(),
             interrupted: s.interrupted,
             counter: 0,
             seen: 0,
@@ -201,9 +204,13 @@ impl Chat {
                 if let AgentMessage::Tool(t) = &message {
                     self.context += (t.output.chars().count() as f64 / 3.5) as u64;
                 }
-                if matches!(message, AgentMessage::User(_)) {
+                if let AgentMessage::User(u) = &message {
                     self.pending = None;
                     self.error = None;
+                    // The task reads every waiting message at once.
+                    if u.context.starts_with("<queued>") {
+                        self.queued.clear();
+                    }
                 }
                 if let AgentMessage::Assistant(a) = &message {
                     self.stream = None;
@@ -290,6 +297,9 @@ impl Chat {
             let generated = self.stream.as_ref().map(|s| s.generated).unwrap_or(0);
             let label = if generated > 0 { trf("Working... {count} tokens written so far", &[("count", &thousands(generated))]) } else { tr("Working...").to_string() };
             items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
+        }
+        for q in &self.queued {
+            items = items.push(column![user_bubble(q, &[], 0, None), text(tr("Sends when the current step finishes")).size(12).style(theme::muted)].spacing(4));
         }
         if self.interrupted && !self.running && self.pending.is_none() {
             items = items.push(

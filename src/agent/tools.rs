@@ -328,6 +328,10 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     let path = target_path(cwd, call, limits.notes.as_deref()).ok_or("write needs a path.")?;
     save_checkpoint(limits.checkpoints.as_deref(), &call.id, &path).await;
     let content = arg(call, &["content", "text", "contents"]).ok_or("write needs content.")?;
+    // The conversation shows earlier writes as a short note, and a model can copy that note as a file's content.
+    if SAVED_WRITE_NOTE.is_match(content.trim()) {
+        return Err("Nothing was written. That text is the note Scoobert shows in place of an earlier write's content, not file content. Write the file's real content, and read the file first if you need to see what it holds.".into());
+    }
     let old = tokio::fs::read_to_string(&path).await.ok();
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Could not create {}: {e}", paths::display(dir)))?;
@@ -348,11 +352,42 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
         (Some(_), false) => "Replaced",
         (None, _) => "Created",
     };
-    Ok(Outcome {
-        output: format!("{verb} {shown} (now {} bytes).", new.len()),
-        is_error: false,
-        diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)),
-    })
+    let mut output = format!("{verb} {shown} (now {} bytes).", new.len());
+    // After a part is added, the file's top-level lines show what earlier parts already declared.
+    if append {
+        let lines = outline(&new, path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")));
+        if !lines.is_empty() {
+            output.push_str("\nTop-level lines in the file now:");
+            for line in lines.iter().take(OUTLINE_LINES) {
+                output.push_str(&format!("\n{line}"));
+            }
+            if lines.len() > OUTLINE_LINES {
+                output.push_str(&format!("\n[{} more]", lines.len() - OUTLINE_LINES));
+            }
+        }
+    }
+    Ok(Outcome { output, is_error: false, diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)) })
+}
+
+const OUTLINE_LINES: usize = 40;
+
+/// The note `shorten_saved_writes` puts in place of an earlier write's content.
+static SAVED_WRITE_NOTE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$").unwrap());
+
+/// The lines at a file's left margin, which name what it imports and declares, or a Markdown file's headings.
+fn outline(text: &str, markdown: bool) -> Vec<String> {
+    text.lines()
+        .map(str::trim_end)
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with(char::is_whitespace)
+                && !["//", "/*", "*", "--", ";"].iter().any(|p| l.starts_with(p))
+                && markdown == l.starts_with('#')
+                && !l.chars().all(|c| "{}[]();,".contains(c))
+        })
+        .map(|l| crate::util::clip(l, 100))
+        .collect()
 }
 
 async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
@@ -674,6 +709,22 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
         assert!(restore_checkpoint(&dir.join("checkpoints"), &c.id).unwrap().is_ok());
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn writes_refuse_the_saved_write_note_and_outline_appends() {
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (shell, limits, cancel) = (Shell::detect(), Limits::default(), CancellationToken::new());
+        let note = call("write", json!({"path": "a.ts", "content": "[4243 characters written to src/game/a.ts. Read the file to see them.]"}));
+        let out = run(&note, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(out.is_error && !dir.join("a.ts").exists(), "{}", out.output);
+        let first = call("write", json!({"path": "a.ts", "content": "import x from \"y\";\n\nexport const PASSIVES = {\n  a: 1,\n};\n"}));
+        assert!(!run(&first, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains("Top-level"));
+        let second = call("write", json!({"path": "a.ts", "content": "// weapons\nfunction W() {\n  return 1;\n}\n", "append": true}));
+        let out = run(&second, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(out.output.contains("Top-level lines in the file now:\nimport x from \"y\";\nexport const PASSIVES = {\nfunction W() {"), "{}", out.output);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

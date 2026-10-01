@@ -114,6 +114,8 @@ struct Live {
     allowed: Mutex<HashSet<String>>,
     read_notes: Mutex<BTreeSet<String>>,
     run_notes: Mutex<Vec<String>>,
+    /// Messages the user sent while a task ran, which the task reads after its current step.
+    queued: Mutex<Vec<(String, Vec<conversation::Image>)>>,
 }
 
 enum Target {
@@ -161,8 +163,10 @@ const SAVE_DURING_TASK: std::time::Duration = std::time::Duration::from_secs(300
 /// Thinking tokens a local model may spend on a side request before it must answer.
 const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
-const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again. If you were writing a file when it stopped, check only that file, because it may be partly written.</interrupted>";
+const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again. A file you were writing when it stopped was saved up to its last complete line, as its result above says.</interrupted>";
 /// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
+/// Context for a message the user sent while a task ran.
+pub const QUEUED: &str = "<queued>The user sent this while you were working. Take it into account, and carry on with the task unless it asks you to change course.</queued>";
 const INTERRUPTED: &str = "<interrupted>The user stopped your previous reply before it finished. Follow this message. Do not resume the stopped work unless this message asks you to.</interrupted>";
 
 static REASONING_LOCAL: std::sync::LazyLock<regex::Regex> =
@@ -396,6 +400,7 @@ impl Host {
             allowed: Mutex::new(HashSet::new()),
             read_notes: Mutex::new(BTreeSet::new()),
             run_notes: Mutex::new(Vec::new()),
+            queued: Mutex::new(Vec::new()),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -553,6 +558,31 @@ impl Host {
 
     /// Sends a message and runs the conversation until the model stops calling tools.
     /// Sends a message. `resume` sends the hidden note that asks the model to finish an interrupted task.
+    /// Holds a message sent while a task runs. The task reads it after its current step.
+    pub fn queue(&self, id: &str, text: String, images: Vec<conversation::Image>) -> anyhow::Result<()> {
+        self.live(id)?.queued.lock().unwrap().push((text, images));
+        Ok(())
+    }
+
+    /// Takes back the messages a task ended without reading.
+    pub fn take_queued(&self, id: &str) -> Vec<(String, Vec<conversation::Image>)> {
+        self.live(id).map(|l| std::mem::take(&mut *l.queued.lock().unwrap())).unwrap_or_default()
+    }
+
+    /// Adds the messages the user sent during the task to the conversation, so the next request reads them.
+    fn deliver_queued(&self, live: &Live, id: &str) -> anyhow::Result<()> {
+        let queued = std::mem::take(&mut *live.queued.lock().unwrap());
+        if queued.is_empty() {
+            return Ok(());
+        }
+        let text = queued.iter().map(|(t, _)| t.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
+        let images = queued.into_iter().flat_map(|(_, i)| i).collect();
+        let user = Message::User(UserMessage { text, context: QUEUED.into(), images, time: now_millis(), ..Default::default() });
+        live.conv.lock().unwrap().push(user.clone())?;
+        self.emit(Event::Message { conv: id.to_string(), message: user });
+        Ok(())
+    }
+
     pub fn prompt(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool) -> anyhow::Result<()> {
         let live = self.live(id)?;
         if live.running.swap(true, Ordering::SeqCst) {
@@ -588,10 +618,12 @@ impl Host {
 
     async fn run(self: &Arc<Self>, live: &Arc<Live>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let s = self.settings();
-        let (cwd, first, model_name, interrupted) = {
+        let interrupted = was_stopped(&live.conv.lock().unwrap().messages);
+        self.save_stopped_writes(live, id, cancel).await?;
+        let (cwd, first, model_name) = {
             let mut c = live.conv.lock().unwrap();
             answer_dangling_calls(&mut c)?;
-            (c.cwd.clone(), !c.has_user_message(), c.model.clone(), was_stopped(&c.messages))
+            (c.cwd.clone(), !c.has_user_message(), c.model.clone())
         };
         let notes = {
             let mut read = live.read_notes.lock().unwrap();
@@ -673,6 +705,7 @@ impl Host {
         // One summary per state of the conversation; summarizing again without new messages cannot help.
         let mut compacted_at = None;
         loop {
+            self.deliver_queued(live, id)?;
             let len = live.conv.lock().unwrap().messages.len();
             if compacted_at != Some(len) && self.too_long(live, &target) {
                 self.compact(live, id, &target, &ep, true, cancel).await?;
@@ -725,6 +758,10 @@ impl Host {
                 return Ok(());
             }
             if stop != StopReason::ToolUse || calls.is_empty() || cancel.is_cancelled() {
+                // A message sent during the final reply gets its own reply before the task ends.
+                if stop == StopReason::Stop && !cancel.is_cancelled() && !live.queued.lock().unwrap().is_empty() {
+                    continue;
+                }
                 return Ok(());
             }
             for call in calls {
@@ -743,6 +780,49 @@ impl Host {
                 return Ok(());
             }
         }
+    }
+
+    /// Saves the complete lines of file writes that Stop cut off, through the usual approval, and tells the model
+    /// where to continue. A cut-off write that would replace an existing file saves nothing, since half of it would
+    /// lose the rest of that file.
+    async fn save_stopped_writes(&self, live: &Live, id: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let (cwd, calls) = {
+            let c = live.conv.lock().unwrap();
+            match c.messages.last() {
+                Some(Message::Assistant(a)) if a.stop == StopReason::Aborted && !a.tool_calls.is_empty() => (c.cwd.clone(), a.tool_calls.clone()),
+                _ => return Ok(()),
+            }
+        };
+        let notes = cwd.join(&self.settings().notes_folder);
+        for call in calls {
+            let append = call.arguments.get("append").and_then(Value::as_bool).unwrap_or(false);
+            let exists = tools::target_path(&cwd, &call, Some(&notes)).is_some_and(|p| p.exists());
+            let lines = call.arg("content").lines().count();
+            let result = if !append && exists {
+                ToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    output: format!("The reply was stopped while writing this file, and saving part of it would have replaced the rest, so nothing was saved and {} is unchanged.", call.arg("path")),
+                    is_error: true,
+                    diff: None,
+                    time: now_millis(),
+                }
+            } else {
+                let mut r = self.run_tool(live, id, &cwd, &call, cancel).await;
+                if !r.is_error {
+                    r.output = format!(
+                        "{} The reply was stopped while writing this file, so only its first {lines} lines were saved. Continue from line {} with write and append set to true, and do not write the saved lines again.",
+                        r.output,
+                        lines + 1
+                    );
+                }
+                r
+            };
+            let message = Message::Tool(result);
+            live.conv.lock().unwrap().push(message.clone())?;
+            self.emit(Event::Message { conv: id.to_string(), message });
+        }
+        Ok(())
     }
 
     /// Sends a request, trying again after dropped connections, rate limits, and a model server that stopped.

@@ -155,6 +155,104 @@ fn arguments_text(args: &Value) -> String {
     }
 }
 
+/// A file write cut off by Stop, reduced to the complete lines it had written. Any other call, and a write without a
+/// complete line yet, is dropped.
+fn salvage_write(call: ToolCall) -> Option<ToolCall> {
+    if call.name != "write" {
+        return None;
+    }
+    let fields: Vec<(String, Value)> = match &call.arguments {
+        Value::Object(o) => o.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        Value::String(raw) => partial_object(raw),
+        _ => return None,
+    };
+    let path = fields.iter().find(|(k, _)| k == "path").and_then(|(_, v)| v.as_str())?.to_string();
+    let content = fields.iter().find(|(k, _)| k == "content").and_then(|(_, v)| v.as_str())?;
+    let end = content.rfind('\n')? + 1;
+    let content = content[..end].to_string();
+    // The fields keep the model's order, so the call renders as it was generated.
+    let mut args = Map::new();
+    for (key, value) in fields {
+        let value = match key.as_str() {
+            "content" => Value::String(content.clone()),
+            "path" => Value::String(path.clone()),
+            _ => value,
+        };
+        args.insert(key, value);
+    }
+    Some(ToolCall { arguments: Value::Object(args), ..call })
+}
+
+/// The top-level fields of a JSON object cut off mid-stream, in order. A string cut off partway keeps what arrived,
+/// and anything after it is gone.
+fn partial_object(raw: &str) -> Vec<(String, Value)> {
+    let mut chars = raw.trim_start().chars().peekable();
+    let mut fields = Vec::new();
+    if chars.next() != Some('{') {
+        return fields;
+    }
+    // Reads a string after its opening quote, and whether it was cut off before its closing quote.
+    let read_string = |chars: &mut std::iter::Peekable<std::str::Chars>| -> (String, bool) {
+        let mut out = String::new();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => return (out, false),
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some('r') => out.push('\r'),
+                    Some('b') => out.push('\u{8}'),
+                    Some('f') => out.push('\u{c}'),
+                    Some('u') => {
+                        let hex: String = chars.by_ref().take(4).collect();
+                        match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                            Some(ch) if hex.len() == 4 => out.push(ch),
+                            _ => return (out, true),
+                        }
+                    }
+                    Some(other) => out.push(other),
+                    None => return (out, true),
+                },
+                c => out.push(c),
+            }
+        }
+        (out, true)
+    };
+    loop {
+        while chars.peek().is_some_and(|c| c.is_whitespace() || *c == ',') {
+            chars.next();
+        }
+        if chars.next() != Some('"') {
+            return fields;
+        }
+        let (key, cut) = read_string(&mut chars);
+        if cut {
+            return fields;
+        }
+        while chars.peek().is_some_and(|c| c.is_whitespace() || *c == ':') {
+            chars.next();
+        }
+        match chars.peek() {
+            Some('"') => {
+                chars.next();
+                let (value, cut) = read_string(&mut chars);
+                fields.push((key, Value::String(value)));
+                if cut {
+                    return fields;
+                }
+            }
+            Some(_) => {
+                let word: String = std::iter::from_fn(|| chars.next_if(|c| !matches!(c, ',' | '}') && !c.is_whitespace())).collect();
+                match serde_json::from_str::<Value>(&word) {
+                    Ok(value) if matches!(chars.peek(), Some(',' | '}') | Some(' ' | '\n' | '\r' | '\t')) => fields.push((key, value)),
+                    _ => return fields,
+                }
+            }
+            None => return fields,
+        }
+    }
+}
+
 /// The effort names Qwen's chat template accepts.
 fn qwen_effort(level: Thinking) -> &'static str {
     match level {
@@ -514,13 +612,55 @@ impl Accumulator {
             (None, None) => StopReason::Stop,
         };
         if aborted {
-            // Tool calls cut off mid-stream have partial arguments and must not run.
-            self.msg.tool_calls.clear();
+            // A call cut off mid-stream must not run as written. A file write keeps its complete lines, which the
+            // next turn saves so the model continues the file instead of writing it again.
+            self.msg.tool_calls = std::mem::take(&mut self.msg.tool_calls).into_iter().filter_map(salvage_write).collect();
         }
         self.msg.error = self.error;
         if self.usage != Usage::default() {
             self.msg.usage = Some(self.usage);
         }
         self.msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cut(raw: &str) -> Option<Value> {
+        salvage_write(ToolCall { id: "1".into(), name: "write".into(), arguments: Value::String(raw.into()) }).map(|c| c.arguments)
+    }
+
+    #[test]
+    fn a_cut_off_write_keeps_its_complete_lines() {
+        let args = cut(r#"{"path": "src/a.ts", "content": "line one\nline \"two\"\nline thr"#).unwrap();
+        assert_eq!(args["path"], "src/a.ts");
+        assert_eq!(args["content"], "line one\nline \"two\"\n");
+        let keys: Vec<&String> = args.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["path", "content"]);
+    }
+
+    #[test]
+    fn a_cut_off_write_keeps_append_and_its_order() {
+        let args = cut(r#"{"append": true, "path": "a.ts", "content": "x\ny"#).unwrap();
+        assert_eq!(args["append"], true);
+        assert_eq!(args["content"], "x\n");
+        assert_eq!(args.as_object().unwrap().keys().next().unwrap(), "append");
+    }
+
+    #[test]
+    fn nothing_is_kept_without_a_path_or_a_whole_line() {
+        assert_eq!(cut(r#"{"path": "src/a"#), None);
+        assert_eq!(cut(r#"{"path": "a.ts", "content": "half a li"#), None);
+        assert_eq!(cut(r#"{"content": "x\n", "pa"#), None);
+        let read = ToolCall { id: "1".into(), name: "read".into(), arguments: Value::String(r#"{"path": "a"#.into()) };
+        assert_eq!(salvage_write(read), None);
+    }
+
+    #[test]
+    fn escapes_cut_in_half_end_the_text() {
+        assert_eq!(cut(r#"{"path": "a.ts", "content": "one\ntwo\n\u00"#).unwrap()["content"], "one\ntwo\n");
+        assert_eq!(cut("{\"path\": \"a.ts\", \"content\": \"one\\n\\").unwrap()["content"], "one\n");
     }
 }

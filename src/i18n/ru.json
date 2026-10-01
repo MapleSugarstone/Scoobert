@@ -299,6 +299,8 @@
  "{n} years ago": "{n} г. назад",
  "Just now": "Только что",
  "Show or hide the sidebar": "Показать или скрыть боковую панель",
+ "Restart Scoobert to use this language's font everywhere.": "Перезапустите Scoobert, чтобы везде использовался шрифт этого языка.",
+ "Sends when the current step finishes": "Отправится, когда завершится текущий шаг",
  "less than a minute": "меньше минуты",
  "about a minute": "около минуты",
  "about {n} minutes": "около {n} мин.",

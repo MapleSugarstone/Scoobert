@@ -299,6 +299,8 @@
   "{n} years ago": "{n}년 전",
   "Just now": "방금",
   "Show or hide the sidebar": "사이드바 표시/숨기기",
+  "Restart Scoobert to use this language's font everywhere.": "이 언어의 글꼴을 모든 곳에 적용하려면 Scoobert를 다시 시작하세요.",
+  "Sends when the current step finishes": "현재 단계가 끝나면 전송됩니다",
   "less than a minute": "1분 미만",
   "about a minute": "약 1분",
   "about {n} minutes": "약 {n}분",

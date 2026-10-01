@@ -299,6 +299,8 @@
   "{n} years ago": "{n}年前",
   "Just now": "たった今",
   "Show or hide the sidebar": "サイドバーの表示/非表示",
+  "Restart Scoobert to use this language's font everywhere.": "この言語のフォントをすべての表示に使うには、Scoobert を再起動してください。",
+  "Sends when the current step finishes": "現在のステップが終わると送信されます",
   "less than a minute": "1分未満",
   "about a minute": "約1分",
   "about {n} minutes": "約{n}分",

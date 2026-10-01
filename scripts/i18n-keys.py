@@ -34,7 +34,7 @@ def read_string(src, i):
                 out.append(simple[n])
                 i += 2
                 continue
-            if n == "u":
+            if n == "u" and src[i + 2] == "{":
                 end = src.index("}", i)
                 out.append(chr(int(src[i + 3 : end], 16)))
                 i = end + 1
@@ -79,6 +79,11 @@ def without_tests(text):
         depth = 0
         while True:
             c = text[i]
+            # A raw string such as r#"{"a": 1}"# ends at its quote and the same number of hashes.
+            raw = re.match(r'r(#*)"', text[i:])
+            if raw and not text[i - 1].isalnum():
+                i = text.index('"' + raw.group(1), i + len(raw.group(0))) + 1 + len(raw.group(1))
+                continue
             if c == '"':
                 _, i = read_string(text, i)
                 continue
