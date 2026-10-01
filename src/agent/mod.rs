@@ -1676,14 +1676,12 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
             }
             let path = call.arg("path").to_string();
             let Some(args) = call.arguments.as_object_mut() else { continue };
+            // The text moves to a field of another name, so the history never shows a note where file content goes,
+            // which a model copied into new writes.
             for key in ["content", "new_text", "old_text"] {
                 let Some(len) = args.get(key).and_then(Value::as_str).map(|s| s.chars().count()).filter(|&n| n > LONG) else { continue };
-                let note = if key == "content" {
-                    format!("[{len} characters written to {path}. Read the file to see them.]")
-                } else {
-                    format!("[{len} characters, now in {path}.]")
-                };
-                args.insert(key.into(), note.into());
+                args.remove(key);
+                args.insert(format!("{key}_saved"), format!("{len} characters, saved in full in {path}").into());
             }
         }
     }
@@ -1895,7 +1893,8 @@ mod tests {
         ];
         let out = super::shorten_saved_writes(messages);
         let Message::Assistant(a) = &out[0] else { panic!() };
-        assert_eq!(a.tool_calls[0].arg("content"), "[3000 characters written to a.ts. Read the file to see them.]");
+        assert!(a.tool_calls[0].arguments.get("content").is_none());
+        assert_eq!(a.tool_calls[0].arg("content_saved"), "3000 characters, saved in full in a.ts");
         assert_eq!(a.tool_calls[1].arg("content").len(), 3000);
     }
 

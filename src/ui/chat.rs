@@ -478,12 +478,19 @@ impl Chat {
         .style(theme::row_button)
         .on_press(Message::Toggle(id.to_string()));
         let mut col = column![header].spacing(6);
+        // A failed call shows why under its header, so the reason is visible without opening it.
+        if let Some(r) = card.result.as_ref().filter(|r| r.is_error && !open)
+            && let Some(first) = r.output.lines().map(str::trim).find(|l| !l.is_empty())
+        {
+            col = col.push(container(text(clip(first, 200)).size(12).style(theme::danger_text)).padding(Padding { left: 18.0, ..Padding::ZERO }));
+        }
         let live = self.live_output.get(&card.call.id).filter(|o| !o.is_empty());
         if open || running && live.is_some() {
             let body: Element<'a, Message> = match (&card.result, live) {
+                (Some(r), _) if r.is_error => error_view(&r.output),
                 (Some(r), _) => match &r.diff {
-                    Some(d) if !r.is_error => diff_view(d),
-                    _ => output_view(&r.output),
+                    Some(d) => diff_view(d),
+                    None => output_view(&r.output),
                 },
                 (None, Some(out)) => output_view(out),
                 (None, None) => output_view(&serde_json::to_string_pretty(&card.call.arguments).unwrap_or_default()),
@@ -629,10 +636,16 @@ const MAX_SHOWN_LINES: usize = 400;
 fn output_view<'a>(output: &str) -> Element<'a, Message> {
     let lines: Vec<&str> = output.lines().collect();
     let shown = if lines.len() > MAX_SHOWN_LINES { lines[lines.len() - MAX_SHOWN_LINES..].join("\n") } else { lines.join("\n") };
-    let body = scrollable(text(shown).size(12.5).font(fonts::mono()))
-        .direction(scrollable::Direction::Both { vertical: scrollable::Scrollbar::new(), horizontal: scrollable::Scrollbar::new() })
-        .style(theme::scrollbar);
+    // The scrollbars get their own space beside the text instead of covering its last line and column.
+    let bar = || scrollable::Scrollbar::new().spacing(4);
+    let body = scrollable(text(shown).size(12.5).font(fonts::mono())).direction(scrollable::Direction::Both { vertical: bar(), horizontal: bar() }).style(theme::scrollbar);
     container(body).padding(10).width(Fill).max_height(320).style(theme::code_block).into()
+}
+
+/// A failed call's message, wrapped to the card's width so it reads as text rather than one long line.
+fn error_view<'a>(output: &str) -> Element<'a, Message> {
+    let body = scrollable(text(output.trim().to_string()).size(13).width(Fill)).style(theme::scrollbar);
+    container(body).padding([8, 12]).width(Fill).max_height(320).style(theme::error_box).into()
 }
 
 fn diff_view<'a>(diff: &str) -> Element<'a, Message> {

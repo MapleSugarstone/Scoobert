@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Downloads a llama.cpp CPU build for Linux into vendor/llama so a release can bundle it.
+# Downloads a llama.cpp CPU build for Linux into vendor/llama so a release can bundle it, with the Vulkan backend
+# from the same release for the graphics card setting. The backend loads only when the system has a Vulkan driver.
 # Usage: scripts/fetch-llama.sh b11193
 set -euo pipefail
 release="${1:?Pass a llama.cpp release, for example b11193}"
@@ -19,6 +20,11 @@ mkdir -p "$out"
 cp "$bin/llama-server" "$out/"
 # The server loads the ggml backends and libllama from its own folder.
 find "$bin" -maxdepth 1 -name '*.so*' ! -name '*vulkan*' ! -name '*cuda*' -exec cp -P {} "$out/" \;
+vulkan_url="https://github.com/ggml-org/llama.cpp/releases/download/$release/llama-$release-bin-ubuntu-vulkan-x64.tar.gz"
+curl -fL --retry 3 -o "$tmp/vulkan.tar.gz" "$vulkan_url"
+mkdir -p "$tmp/vulkan"
+tar -xzf "$tmp/vulkan.tar.gz" -C "$tmp/vulkan"
+find "$tmp/vulkan" -name 'libggml-vulkan.so*' -exec cp -P {} "$out/" \;
 find "$tmp/src" -maxdepth 3 -name 'LICENSE*' -exec cp {} "$out/" \; || true
 [ -e "$out/LICENSE" ] || curl -fsSL -o "$out/LICENSE-llama.cpp" https://raw.githubusercontent.com/ggml-org/llama.cpp/master/LICENSE
 chmod +x "$out/llama-server"

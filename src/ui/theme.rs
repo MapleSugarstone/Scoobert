@@ -215,8 +215,16 @@ pub fn error_box(theme: &Theme) -> container::Style {
     }
 }
 
+/// Lighter than a selected row and outlined, so a tooltip stands out from the list it covers.
 pub fn tooltip(theme: &Theme) -> container::Style {
-    toast(theme)
+    let t = tokens(theme);
+    container::Style {
+        background: Some(mix(t.surface2, t.line, 0.6).into()),
+        border: Border { color: Color { a: 0.6, ..t.muted }, width: 1.0, radius: Radius::new(RADIUS) },
+        text_color: Some(t.text),
+        shadow: Shadow { color: t.shadow, offset: Vector::new(0.0, 4.0), blur_radius: 16.0 },
+        ..Default::default()
+    }
 }
 
 /// The sidebar shown over the chat in a narrow window.
@@ -374,7 +382,18 @@ pub fn link(theme: &Theme, status: button::Status) -> button::Style {
 /// name runs out under them instead of showing through them.
 pub fn row_actions(theme: &Theme) -> container::Style {
     let t = tokens(theme);
-    let row = mix(t.surface, t.surface2, 0.5);
+    fade_into(mix(t.surface, t.surface2, 0.5))
+}
+
+/// The same fade for a conversation row, in the color of the selected row or of a hovered one.
+pub fn conversation_actions(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let t = tokens(theme);
+        fade_into(if selected { t.surface2 } else { mix(t.surface, t.surface2, 0.6) })
+    }
+}
+
+fn fade_into(row: Color) -> container::Style {
     let fade = iced::gradient::Linear::new(iced::Degrees(90.0)).add_stop(0.0, Color { a: 0.0, ..row }).add_stop(0.3, row).add_stop(1.0, row);
     container::Style { background: Some(iced::Background::Gradient(fade.into())), border: border::rounded(RADIUS), ..Default::default() }
 }

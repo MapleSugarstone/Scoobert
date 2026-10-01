@@ -18,6 +18,8 @@ async fn main() {
     if let Some(ctx) = std::env::var("SCOOBERT_CTX").ok().and_then(|c| c.parse().ok()) {
         settings.context_sizes.insert(args[2].clone(), ctx);
     }
+    // SCOOBERT_GPU runs the model on the graphics card.
+    settings.use_gpu = std::env::var_os("SCOOBERT_GPU").is_some();
     let shared = Arc::new(RwLock::new(settings));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let host = Host::new(shared, tx);

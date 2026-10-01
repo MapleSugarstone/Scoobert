@@ -24,6 +24,20 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
 const SLOT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const LARGE_MODEL_BYTES: u64 = 12_000_000_000;
 const DEFAULT_CONTEXT: u32 = 32_768;
+/// The server process ended before the model finished loading.
+#[derive(Debug)]
+struct ExitedWhileLoading(String);
+
+impl std::fmt::Display for ExitedWhileLoading {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ExitedWhileLoading {}
+
+/// Free memory kept beyond a disk-loaded model's cache and buffers, for the parts of the weights in use.
+const DISK_MARGIN: u64 = 3_000_000_000;
 /// How often a long read saves its progress.
 const SAVE_EVERY: Duration = Duration::from_secs(60);
 const FIRST_STEP: usize = 256;
@@ -47,6 +61,8 @@ pub enum ServerStatus {
     Loading(String),
     Ready(String),
     Error(String),
+    /// The graphics card could not load the named model, which then loads on the processor.
+    GpuFailed(String),
 }
 
 struct Running {
@@ -71,6 +87,8 @@ pub struct LlamaServer {
     proc: tokio::sync::Mutex<Option<Running>>,
     shared: Mutex<Shared>,
     busy: AtomicUsize,
+    /// Models the graphics card failed to load in this run, until the app saves them to the settings.
+    gpu_refused: Mutex<std::collections::HashSet<String>>,
     /// A load holds `proc` until the model is ready, so `stop` cancels this first.
     loading: Mutex<CancellationToken>,
     on_status: Box<dyn Fn(ServerStatus) + Send + Sync>,
@@ -101,6 +119,7 @@ impl LlamaServer {
             proc: tokio::sync::Mutex::new(None),
             shared: Mutex::new(Shared { model: None, slot_owner: None, last_use: Instant::now(), last_save: Instant::now() }),
             busy: AtomicUsize::new(0),
+            gpu_refused: Mutex::new(std::collections::HashSet::new()),
             loading: Mutex::new(CancellationToken::new()),
             on_status: Box::new(on_status),
         });
@@ -215,7 +234,20 @@ impl LlamaServer {
             }
         }
         self.stop_locked(&mut proc).await;
-        let result = self.start_locked(&mut proc, model, &cancel).await;
+        let s = self.settings();
+        let gpu = s.use_gpu && !s.gpu_failed.contains(&model.name) && !self.gpu_refused.lock().unwrap().contains(&model.name);
+        let mut result = self.start_locked(&mut proc, model, gpu, &cancel).await;
+        // A graphics card that cannot load the model leaves it to the processor, and the app remembers the model. Only
+        // a server that dies while loading counts, since a check that fails before the start is not the card's doing.
+        if gpu
+            && let Err(err) = &result
+            && err.is::<ExitedWhileLoading>()
+        {
+            eprintln!("[llama] the graphics card could not load {}: {err:#}", model.name);
+            self.gpu_refused.lock().unwrap().insert(model.name.clone());
+            (self.on_status)(ServerStatus::GpuFailed(model.name.clone()));
+            result = self.start_locked(&mut proc, model, false, &cancel).await;
+        }
         if let Err(err) = &result
             && !crate::util::is_cancelled(err)
         {
@@ -224,7 +256,7 @@ impl LlamaServer {
         result
     }
 
-    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, cancel: &CancellationToken) -> anyhow::Result<()> {
+    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, gpu: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let Some(exe) = self.executable() else {
             bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
         };
@@ -236,12 +268,18 @@ impl LlamaServer {
         let need = self.memory_needed(model, ctx);
         let free = crate::sys::available_memory();
         if free < need {
-            bail!(
-                "{} needs about {} of free memory, and {} is free. Close other apps, then send your message again.",
-                model.name,
-                gb(need),
-                gb(free)
-            );
+            // A mixture-of-experts model can leave its weights on disk, where the system reads the parts each token
+            // uses. Everything else, such as the conversation's cache, still has to fit in memory.
+            let experts = gguf::mixture_of_experts(&model.path);
+            let rest = need.saturating_sub(model.size) + DISK_MARGIN;
+            if !(experts && self.settings().models_from_disk && free >= rest) {
+                let args: &[(&str, &dyn std::fmt::Display)] = &[("model", &model.name), ("need", &gb(need)), ("free", &gb(free))];
+                bail!(if experts {
+                    crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, or turn on loading models from disk in Settings to run it slowly.", args)
+                } else {
+                    crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, then send your message again.", args)
+                });
+            }
         }
         let slots = paths::get().slots();
         let mut args: Vec<String> = vec!["-m".into(), path_arg(&model.path), "--alias".into(), model.name.clone()];
@@ -255,9 +293,6 @@ impl LlamaServer {
         args.extend([
             "-c", &ctx.to_string(),
             "--jinja",
-            // A GPU build still reserves GPU memory with no offloaded layers, which crashes 27B models on an integrated GPU.
-            "--device", "none",
-            "-ngl", "0",
             "-np", "1",
             // The host prompt cache would hold gigabytes of RAM; slot files on disk replace it.
             "--cache-ram", "0",
@@ -274,6 +309,12 @@ impl LlamaServer {
             "--cors-origins", "http://127.0.0.1",
             "--no-cors-credentials",
         ].map(String::from));
+        // On the graphics card, llama.cpp fits as many layers as its memory holds and keeps the rest on the processor.
+        // Otherwise the card is left out entirely, because even with no layers on it a GPU backend reserves memory,
+        // which crashed 27B models on an integrated GPU.
+        if !gpu {
+            args.extend(["--device", "none", "-ngl", "0"].map(String::from));
+        }
         // For diagnosing the server, such as -v for its detailed log.
         if let Some(extra) = std::env::var_os("SCOOBERT_SERVER_ARGS") {
             args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
@@ -330,7 +371,7 @@ impl LlamaServer {
             if exited {
                 *proc = None;
                 self.shared.lock().unwrap().model = None;
-                bail!("llama-server stopped while loading {}.\n{}", model.name, log_errors());
+                return Err(ExitedWhileLoading(format!("llama-server stopped while loading {}.\n{}", model.name, log_errors())).into());
             }
             if let Ok(h) = self.request("/health", None, Duration::from_secs(2), Some(cancel)).await
                 && h["status"] == "ok"
@@ -451,6 +492,11 @@ impl LlamaServer {
         let res = self.request("/tokenize", Some(&body), Duration::from_secs(60), None).await?;
         let tokens = res["tokens"].as_array().context("llama-server returned no tokens")?;
         tokens.iter().map(|t| t.as_i64().map(|t| t as i32).context("llama-server returned a token that is not a number")).collect()
+    }
+
+    /// Lets the graphics card try again the models it failed to load in this run.
+    pub fn forget_gpu_failures(&self) {
+        self.gpu_refused.lock().unwrap().clear();
     }
 
     /// Time since the slot was last saved to disk.

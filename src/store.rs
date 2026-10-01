@@ -144,6 +144,12 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// The interface and reply language code, or empty until the user or the installer picks one.
     pub language: String,
+    /// Runs local models on the graphics card where they fit.
+    pub use_gpu: bool,
+    /// Models the graphics card failed to load, which run on the processor. Turning the card on again clears it.
+    pub gpu_failed: Vec<String>,
+    /// Lets a mixture-of-experts model larger than free memory run with its weights read from disk, slowly.
+    pub models_from_disk: bool,
 }
 
 impl Default for Settings {
@@ -165,6 +171,9 @@ impl Default for Settings {
             custom_providers: Vec::new(),
             theme: ThemeChoice::System,
             language: String::new(),
+            use_gpu: false,
+            gpu_failed: Vec::new(),
+            models_from_disk: false,
         }
     }
 }

@@ -111,6 +111,8 @@ pub enum Msg {
     WebAccess(bool),
     KeepAlive(KeepAlive),
     PreloadModel(bool),
+    UseGpu(bool),
+    ModelsFromDisk(bool),
     ModelsDir(String),
     CommitModelsDir,
     BrowseModelsDir,
@@ -227,6 +229,21 @@ impl Panel {
             }
             Msg::PreloadModel(on) => {
                 s.preload_model = on;
+                return (Task::none(), Effect::Saved);
+            }
+            Msg::UseGpu(on) => {
+                s.use_gpu = on;
+                // Turning the card on again tries it for every model, including ones it failed before.
+                if on {
+                    s.gpu_failed.clear();
+                    if let Some(host) = ctx.host {
+                        host.llama.forget_gpu_failures();
+                    }
+                }
+                return (Task::none(), Effect::Saved);
+            }
+            Msg::ModelsFromDisk(on) => {
+                s.models_from_disk = on;
                 return (Task::none(), Effect::Saved);
             }
             Msg::KeepAlive(k) => {
@@ -622,6 +639,18 @@ impl Panel {
                 tr("The first reply starts sooner, but the model holds its memory from the start until it has been idle for the time above."),
                 s.preload_model,
                 Msg::PreloadModel
+            ),
+            switch_row(
+                tr("Use the graphics card"),
+                tr("Runs as much of the model as fits on the graphics card, which is much faster with a dedicated card. A model the card cannot load runs on the processor instead. Applies the next time a model loads."),
+                s.use_gpu,
+                Msg::UseGpu
+            ),
+            switch_row(
+                tr("Load models larger than memory from disk"),
+                tr("Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory."),
+                s.models_from_disk,
+                Msg::ModelsFromDisk
             ),
             field(
                 tr("llama-server program"),

@@ -1177,6 +1177,15 @@ impl App {
 
     fn on_host_event(&mut self, event: Event) -> Task<Message> {
         match &event {
+            Event::Server(ServerStatus::GpuFailed(model)) => {
+                // The model loads on the processor now, and later loads skip the card for it.
+                if !self.state.settings.gpu_failed.contains(model) {
+                    self.state.settings.gpu_failed.push(model.clone());
+                    self.save();
+                }
+                self.toast(trf("The graphics card could not load {model}, so it runs on the processor.", &[("model", model)]));
+                return Task::none();
+            }
             Event::Server(status) => {
                 self.server = status.clone();
                 return Task::none();
@@ -1390,12 +1399,12 @@ impl App {
         );
         // Beside the sidebar the brand spans its width. Without it, the name goes so the conversation keeps the room.
         let brand: Element<'_, Message> = if docked {
-            container(row![toggle, self.logo(36.0), text("Scoobert").size(19).font(fonts::ui_semibold())].spacing(10).align_y(Alignment::Center))
+            container(row![self.logo(36.0), text("Scoobert").size(19).font(fonts::ui_semibold()), space::horizontal(), toggle].spacing(10).align_y(Alignment::Center))
                 .width(SIDEBAR_WIDTH)
-                .padding([0, 10])
+                .padding([0, 12])
                 .into()
         } else {
-            container(row![toggle, self.logo(36.0)].spacing(10).align_y(Alignment::Center)).width(BRAND_COMPACT).padding([0, 10]).into()
+            container(row![self.logo(36.0), toggle].spacing(10).align_y(Alignment::Center)).width(BRAND_COMPACT).padding([0, 12]).into()
         };
         let choices = self.model_choices();
         let selected = self.current_model().map(|m| ModelChoice {
@@ -1542,6 +1551,7 @@ impl App {
                 tooltip::Position::Bottom,
             )]),
         ]
+        .height(Fill)
         .align_y(Alignment::Center);
         list = list.push(hover(chats, container(chats_actions).height(Fill).align_y(Alignment::Center)));
         if general {
@@ -1567,6 +1577,7 @@ impl App {
                     button(icon(Icon::Close, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::AskConfirm(Confirm::RemoveProject(p.path.clone()))),
                 ]),
             ]
+            .height(Fill)
             .align_y(Alignment::Center);
             list = list.push(hover(name, container(actions).height(Fill).align_y(Alignment::Center)));
             if is_current {
@@ -1711,14 +1722,16 @@ impl App {
         let base = container(item).height(32);
         let actions = container(
             row![
-                button(icon(Icon::Pencil, 14.0)).padding(4).style(theme::ghost).on_press(Message::StartRename(s.file.clone(), s.title.clone())),
-                button(icon(Icon::Trash, 14.0)).padding(4).style(theme::ghost).on_press(Message::AskConfirm(Confirm::DeleteConversation(s.file.clone()))),
+                button(icon(Icon::Pencil, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::StartRename(s.file.clone(), s.title.clone())),
+                button(icon(Icon::Trash, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::AskConfirm(Confirm::DeleteConversation(s.file.clone()))),
             ]
-            .spacing(2),
+            .align_y(Alignment::Center),
         )
-        .padding([0, 4])
-        .style(theme::sidebar);
-        hover(base, container(actions).width(Fill).height(Fill).align_x(Alignment::End).align_y(Alignment::Center)).into()
+        .height(Fill)
+        .align_y(Alignment::Center)
+        .padding(iced::Padding { left: 20.0, right: 6.0, ..iced::Padding::ZERO })
+        .style(theme::conversation_actions(selected));
+        hover(base, container(actions).width(Fill).height(Fill).align_x(Alignment::End)).into()
     }
 
     fn status_line(&self) -> (fn(&theme::Tokens) -> iced::Color, String) {
@@ -1732,7 +1745,7 @@ impl App {
         }
         match &self.server {
             ServerStatus::Stopped => (|t| t.muted, tr("Model not loaded").into()),
-            ServerStatus::Loading(m) => (|t| t.warn, trf("Loading {model}", &[("model", m)])),
+            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) => (|t| t.warn, trf("Loading {model}", &[("model", m)])),
             ServerStatus::Ready(m) => (|t| t.ok, trf("{model} loaded", &[("model", m)])),
             ServerStatus::Error(_) => (|t| t.danger, tr("The model stopped").into()),
         }
@@ -1927,7 +1940,12 @@ fn project_name(p: &std::path::Path) -> String {
 
 /// The buttons a hovered sidebar row shows, on a fade that hides the end of a long name under them.
 fn row_actions<'a>(buttons: iced::widget::Row<'a, Message>) -> Element<'a, Message> {
-    container(buttons.align_y(Alignment::Center)).padding(iced::Padding { left: 20.0, right: 2.0, ..iced::Padding::ZERO }).style(theme::row_actions).into()
+    container(buttons.align_y(Alignment::Center))
+        .height(Fill)
+        .align_y(Alignment::Center)
+        .padding(iced::Padding { left: 20.0, right: 2.0, ..iced::Padding::ZERO })
+        .style(theme::row_actions)
+        .into()
 }
 
 fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {

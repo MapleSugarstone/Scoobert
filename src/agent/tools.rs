@@ -330,7 +330,10 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     let content = arg(call, &["content", "text", "contents"]).ok_or("write needs content.")?;
     // The conversation shows earlier writes as a short note, and a model can copy that note as a file's content.
     if SAVED_WRITE_NOTE.is_match(content.trim()) {
-        return Err("Nothing was written. That text is the note Scoobert shows in place of an earlier write's content, not file content. Write the file's real content, and read the file first if you need to see what it holds.".into());
+        return Err(format!(
+            "Nothing was written, because content held a note about an earlier write instead of file text. The write tool works, and every earlier write is complete on disk. Put the full text you want in {} in content.",
+            arg(call, &["path"]).unwrap_or_default()
+        ));
     }
     let old = tokio::fs::read_to_string(&path).await.ok();
     if let Some(dir) = path.parent() {
@@ -355,7 +358,7 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     let mut output = format!("{verb} {shown} (now {} bytes).", new.len());
     // The note that replaces long content in the conversation reads like a failed write unless it is explained.
     if content.len() > SHORTENED_WRITE {
-        output.push_str(" From here on the conversation shows this call's content as a short note to save room. The file holds all of it.");
+        output.push_str(" From here on the conversation shows this call without its content, to save room. The file holds all of it.");
     }
     // After a part is added, the file's top-level lines show what earlier parts already declared.
     if append {
@@ -391,9 +394,10 @@ fn writes_heredoc(command: &str) -> bool {
     bash || powershell
 }
 
-/// The note `shorten_saved_writes` puts in place of an earlier write's content.
+/// The notes `shorten_saved_writes` put in place of an earlier write's content before 0.2.6, and the
+/// `content_saved` text it uses now, either of which a model may copy into content.
 static SAVED_WRITE_NOTE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$").unwrap());
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$|^\d+ characters, saved in full in \S+$").unwrap());
 
 /// The lines at a file's left margin, which name what it imports and declares, or a Markdown file's headings.
 fn outline(text: &str, markdown: bool) -> Vec<String> {
