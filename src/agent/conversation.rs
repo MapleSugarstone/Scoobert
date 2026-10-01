@@ -93,6 +93,10 @@ pub struct AssistantMessage {
     #[serde(default)]
     pub model: String,
     pub time: i64,
+    /// A stopped reply whose reasoning goes back to a local model, so the next turn builds on it. Replies stopped
+    /// before 0.2.2 lack it and stay out of the prompt, which keeps their conversations' saved caches valid.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resend_thinking: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

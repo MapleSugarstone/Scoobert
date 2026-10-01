@@ -712,6 +712,8 @@ impl Host {
             if reply.stop == StopReason::Error && reply.error.is_none() {
                 reply.error = Some("The reply ended with an error.".into());
             }
+            // The next turn builds on a stopped reply's reasoning instead of repeating it.
+            reply.resend_thinking = reply.stop == StopReason::Aborted;
             let calls = reply.tool_calls.clone();
             let stop = reply.stop;
             let error = reply.error.clone();
@@ -769,28 +771,15 @@ impl Host {
             let conv = id.to_string();
             let events = self.events.clone();
             let mut started = false;
-            let (mut thinking, mut text) = (String::new(), String::new());
             let result = stream::send(&self.http, ep, body, cancel, |delta| {
                 if !started && !matches!(delta, Delta::Progress { .. }) {
                     started = true;
                     let _ = events.send(Event::Activity { conv: conv.clone(), text: None });
                 }
-                match &delta {
-                    Delta::Thinking(t) => thinking.push_str(t),
-                    Delta::Text(t) => text.push_str(t),
-                    _ => {}
-                }
                 let _ = events.send(Event::Delta { conv: conv.clone(), delta });
             })
             .await;
             ticker.cancel();
-            // A stopped reply keeps what it wrote, so the next turn builds on that reasoning instead of repeating it.
-            let result = match result {
-                Err(err) if is_cancelled(&err) && !(thinking.trim().is_empty() && text.trim().is_empty()) => {
-                    Ok(AssistantMessage { stop: StopReason::Aborted, thinking, text, model: ep.model.clone(), time: now_millis(), ..Default::default() })
-                }
-                other => other,
-            };
             let retry = match &result {
                 Err(err) => !is_cancelled(err) && transient(&format!("{err:#}")),
                 // A connection that dropped before anything arrived is worth another try.
