@@ -271,7 +271,9 @@ impl Chat {
         for (id, call) in &self.approvals {
             items = items.push(approval(*id, call));
         }
-        if let Some(a) = &self.activity {
+        // A view opened partway through a read missed its activity, and only the progress arrives.
+        let reading = self.running && self.progress.is_some_and(|(_, t)| t > 0);
+        if let Some(a) = self.activity.as_deref().or(reading.then_some("Reading...")) {
             let mut line = column![row![working_dot(), text(self.activity_label(a)).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center)].spacing(6);
             if let Some((done, total)) = self.progress.filter(|(_, t)| *t > 0) {
                 let bar = progress_bar(0.0..=total as f32, done.min(total) as f32).girth(4).style(theme::meter);
@@ -376,8 +378,16 @@ impl Chat {
         if !s.thinking.trim().is_empty() {
             let tail: String = {
                 let t = s.thinking.trim();
-                let start = t.char_indices().rev().nth(400).map(|(i, _)| i).unwrap_or(0);
-                t[start..].to_string()
+                match t.char_indices().rev().nth(400).map(|(i, _)| i) {
+                    // The preview starts at a sentence, or else a word, so the trimmed start reads as intended.
+                    Some(cut) => {
+                        let rest = &t[cut..];
+                        let sentence = rest.find(". ").map(|i| i + 2).filter(|&i| i < rest.len() / 2);
+                        let from = sentence.or_else(|| rest.find(char::is_whitespace)).unwrap_or(0);
+                        format!("...{}", rest[from..].trim_start())
+                    }
+                    None => t.to_string(),
+                }
             };
             let open = self.expanded.contains("stream-think");
             let label = if s.text.is_empty() && s.tool.is_none() { "Thinking..." } else { "Thinking" };

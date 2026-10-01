@@ -24,6 +24,12 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
 const SLOT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const LARGE_MODEL_BYTES: u64 = 12_000_000_000;
 const DEFAULT_CONTEXT: u32 = 32_768;
+/// How often a long read saves its progress.
+const SAVE_EVERY: Duration = Duration::from_secs(60);
+const FIRST_STEP: usize = 256;
+const MAX_STEP: usize = 8192;
+/// Marks a slot file the server is still writing.
+const PARTIAL: &str = "partial-";
 
 pub type SharedSettings = Arc<RwLock<Settings>>;
 
@@ -54,6 +60,7 @@ struct Shared {
     model: Option<(LocalModel, u32)>,
     slot_owner: Option<String>,
     last_use: Instant,
+    last_save: Instant,
 }
 
 pub struct LlamaServer {
@@ -88,9 +95,11 @@ impl LlamaServer {
             // Any web page can send requests to localhost, so the server requires this key.
             api_key: random_hex(24),
             port: free_port(PREFERRED_PORT),
-            http: reqwest::Client::new(),
+            // The server can close a connection just after a streamed reply ends, and a request sent on it at that
+            // moment fails, so every request opens its own.
+            http: reqwest::Client::builder().pool_max_idle_per_host(0).build().unwrap_or_default(),
             proc: tokio::sync::Mutex::new(None),
-            shared: Mutex::new(Shared { model: None, slot_owner: None, last_use: Instant::now() }),
+            shared: Mutex::new(Shared { model: None, slot_owner: None, last_use: Instant::now(), last_save: Instant::now() }),
             busy: AtomicUsize::new(0),
             loading: Mutex::new(CancellationToken::new()),
             on_status: Box::new(on_status),
@@ -421,13 +430,30 @@ impl LlamaServer {
     // the next request, and new conversations restore the prompt that every project shares.
 
     pub fn slot_file(&self, kind: &str, id: &str) -> String {
+        format!("{}{kind}-{id}.bin", self.slot_stem())
+    }
+
+    /// The start of every slot file name for the loaded model and context size.
+    fn slot_stem(&self) -> String {
         let shared = self.shared.lock().unwrap();
         let (name, ctx) = match &shared.model {
             Some((m, ctx)) => (m.name.clone(), *ctx),
             None => ("model".to_string(), DEFAULT_CONTEXT),
         };
         let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
-        format!("{safe}-{ctx}-{kind}-{id}.bin")
+        format!("{safe}-{ctx}-")
+    }
+
+    pub async fn tokenize(&self, text: &str) -> anyhow::Result<Vec<i32>> {
+        let body = json!({ "content": text, "add_special": true, "parse_special": true });
+        let res = self.request("/tokenize", Some(&body), Duration::from_secs(60), None).await?;
+        let tokens = res["tokens"].as_array().context("llama-server returned no tokens")?;
+        tokens.iter().map(|t| t.as_i64().map(|t| t as i32).context("llama-server returned a token that is not a number")).collect()
+    }
+
+    /// Time since the slot was last saved to disk.
+    pub fn since_save(&self) -> Duration {
+        self.shared.lock().unwrap().last_save.elapsed()
     }
 
     pub fn hash(text: &str) -> String {
@@ -463,15 +489,8 @@ impl LlamaServer {
     }
 
     async fn tokenizes_as_start(&self, prefix: &str, full: &str) -> bool {
-        let tokens = |text: &str| json!({ "content": text, "add_special": true, "parse_special": true });
-        let (Ok(p), Ok(f)) = (
-            self.request("/tokenize", Some(&tokens(prefix)), Duration::from_secs(60), None).await,
-            self.request("/tokenize", Some(&tokens(full)), Duration::from_secs(60), None).await,
-        ) else {
-            return false;
-        };
-        match (p["tokens"].as_array(), f["tokens"].as_array()) {
-            (Some(p), Some(f)) => !p.is_empty() && f.starts_with(p),
+        match (self.tokenize(prefix).await, self.tokenize(full).await) {
+            (Ok(p), Ok(f)) => !p.is_empty() && f.starts_with(&p),
             _ => false,
         }
     }
@@ -516,8 +535,8 @@ impl LlamaServer {
                 c = stream.next() => c,
                 _ = cancel.cancelled() => return Err(Cancelled.into()),
             };
-            // The stream is read to its end even after the final event: closing it early while the server
-            // finishes the request, then saving the slot at once, crashed llama-server.
+            // The stream is read to its end even after the final event, so the server has finished the request
+            // before anything saves the slot.
             let Some(chunk) = chunk else { return Ok(last) };
             buf.extend_from_slice(&chunk?);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
@@ -533,8 +552,9 @@ impl LlamaServer {
         }
     }
 
-    pub fn has_slot_file(&self, filename: &str) -> bool {
-        paths::get().slots().join(filename).is_file()
+    /// Whether the slot file `filename` holds exactly `tokens`.
+    pub fn holds(&self, filename: &str, tokens: &[i32]) -> bool {
+        saved_tokens(&paths::get().slots().join(filename)).as_deref() == Some(tokens)
     }
 
     /// Whether a request that needs the server is running.
@@ -542,29 +562,77 @@ impl LlamaServer {
         self.busy.load(Ordering::SeqCst) > 0
     }
 
-    /// Reads `prefix` into the slot without generating, passing the tokens read so far and the total to
-    /// `on_progress` as the server reports them.
-    pub async fn fill(&self, prefix: &str, cancel: &CancellationToken, mut on_progress: impl FnMut(u64, u64)) -> anyhow::Result<()> {
-        self.touch();
-        let body = json!({ "prompt": prefix, "n_predict": 0, "cache_prompt": true, "id_slot": 0, "stream": true, "return_progress": true });
-        self.stream_completion(&body, cancel, |event| {
-            let p = &event["prompt_progress"];
-            if p.is_object() {
-                let (total, cached, done) = (p["total"].as_u64().unwrap_or(0), p["cache"].as_u64().unwrap_or(0), p["processed"].as_u64().unwrap_or(0));
-                on_progress(done.saturating_sub(cached), total.saturating_sub(cached));
-            }
-        })
-        .await?;
+    /// Reads `tokens` into the slot without generating, passing the tokens read so far and the total to
+    /// `on_progress`. The slot is saved to `filename` after each step of about a minute and at the end, so a read
+    /// that is stopped or closed partway resumes from the last save. `held` is how many tokens the slot holds
+    /// exactly. `None` means it holds the start of `tokens` followed by unknown tokens, and then the first step
+    /// covers all of `tokens`, because a model with recurrent layers cannot drop tokens from the end of its state.
+    pub async fn fill(&self, tokens: &[i32], held: Option<usize>, filename: &str, cancel: &CancellationToken, mut on_progress: impl FnMut(u64, u64)) -> anyhow::Result<()> {
+        let mut done = held.unwrap_or(0);
+        let mut step = if held.is_some() { FIRST_STEP } else { tokens.len() };
+        // The server's count of reused tokens in the first step, which progress is measured from.
+        let mut base = None;
+        while done < tokens.len() {
+            let end = (done + step).min(tokens.len());
+            let began = Instant::now();
+            self.touch();
+            let body = json!({ "prompt": &tokens[..end], "n_predict": 0, "cache_prompt": true, "id_slot": 0, "stream": true, "return_progress": true });
+            self.stream_completion(&body, cancel, |event| {
+                let p = &event["prompt_progress"];
+                if p.is_object() {
+                    let base = *base.get_or_insert(p["cache"].as_u64().unwrap_or(0));
+                    on_progress(p["processed"].as_u64().unwrap_or(0).saturating_sub(base), (tokens.len() as u64).saturating_sub(base));
+                }
+            })
+            .await?;
+            let rate = (end - done) as f64 / began.elapsed().as_secs_f64().max(0.001);
+            done = end;
+            self.save(filename).await?;
+            step = ((rate * SAVE_EVERY.as_secs_f64()) as usize).clamp(FIRST_STEP, MAX_STEP);
+        }
         Ok(())
     }
 
+    /// Saves the slot under `filename`. The server writes to a temporary name first, so closing Scoobert during a
+    /// save leaves the previous file whole.
     pub async fn save(&self, filename: &str) -> anyhow::Result<()> {
-        self.request("/slots/0?action=save", Some(&json!({ "filename": filename })), Duration::from_secs(120), None).await?;
+        let partial = format!("{PARTIAL}{filename}");
+        self.request("/slots/0?action=save", Some(&json!({ "filename": partial })), Duration::from_secs(120), None).await?;
+        let dir = paths::get().slots();
+        std::fs::rename(dir.join(&partial), dir.join(filename)).context("Could not keep the saved prompt")?;
+        self.shared.lock().unwrap().last_save = Instant::now();
         prune();
         Ok(())
     }
 
-    pub async fn restore(&self, filename: &str) -> bool {
+    /// Restores the slot file whose tokens make up the longest start of `tokens`, and returns how many tokens the
+    /// slot then holds. A file that differs anywhere is skipped, since a model with recurrent layers can reuse
+    /// nothing from it.
+    pub async fn restore_longest(&self, tokens: &[i32]) -> usize {
+        let stem = self.slot_stem();
+        let mut found: Vec<(usize, String)> = std::fs::read_dir(paths::get().slots())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !name.starts_with(&stem) || !name.ends_with(".bin") {
+                    return None;
+                }
+                let saved = saved_tokens(&e.path())?;
+                (!saved.is_empty() && tokens.starts_with(&saved)).then_some((saved.len(), name))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        for (len, name) in found {
+            if self.restore(&name).await {
+                return len;
+            }
+        }
+        0
+    }
+
+    async fn restore(&self, filename: &str) -> bool {
         let file = paths::get().slots().join(filename);
         if !file.is_file() {
             return false;
@@ -703,7 +771,46 @@ fn log_errors() -> String {
     lines[lines.len().saturating_sub(3)..].join("\n")
 }
 
-/// Deletes the oldest slot files once the folder passes its size cap.
+/// The tokens a slot file holds, read from its header. The server writes them as -1, 1, the count, the tokens,
+/// and 0. A plain list of tokens is read as it is.
+fn saved_tokens(path: &Path) -> Option<Vec<i32>> {
+    use std::io::Read;
+    let mut file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header).ok()?;
+    let word = |i: usize| u32::from_le_bytes([header[i], header[i + 1], header[i + 2], header[i + 3]]);
+    if word(0) != 0x6767_7371 {
+        return None;
+    }
+    // No context is this long, so a larger count means the file is not in this format.
+    let n = word(8) as usize;
+    if n > 1 << 22 {
+        return None;
+    }
+    let mut raw = vec![0u8; n * 4];
+    file.read_exact(&mut raw).ok()?;
+    token_list(raw.chunks_exact(4).map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
+
+fn token_list(ints: Vec<i32>) -> Option<Vec<i32>> {
+    match ints.as_slice() {
+        [-1, 1, count, rest @ ..] if *count >= 0 && rest.len() == *count as usize + 1 => Some(rest[..*count as usize].to_vec()),
+        _ if ints.iter().all(|&t| t >= 0) => Some(ints),
+        _ => None,
+    }
+}
+
+/// Deletes the saved prompts of conversation `id` for every model.
+pub fn forget_chat(id: &str) {
+    let suffix = format!("-chat-{id}.bin");
+    for e in std::fs::read_dir(paths::get().slots()).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().ends_with(&suffix) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Deletes the oldest slot files once the folder passes its size cap, and saves that were cut short.
 fn prune() {
     let dir = paths::get().slots();
     let mut files: Vec<(PathBuf, u64, SystemTime)> = std::fs::read_dir(&dir)
@@ -715,6 +822,14 @@ fn prune() {
             let m = e.metadata().ok()?;
             Some((e.path(), m.len(), m.modified().ok()?))
         })
+        .filter(|(path, _, modified)| {
+            let partial = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(PARTIAL));
+            let stale = modified.elapsed().is_ok_and(|age| age > Duration::from_secs(600));
+            if partial && stale {
+                let _ = std::fs::remove_file(path);
+            }
+            !partial
+        })
         .collect();
     files.sort_by(|a, b| b.2.cmp(&a.2));
     let mut total = 0;
@@ -723,5 +838,34 @@ fn prune() {
         if total > SLOT_CACHE_BYTES {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_tokens_from_a_slot_file() {
+        let path = std::env::temp_dir().join(format!("scoobert-slot-{}.bin", random_hex(6)));
+        let mut bytes = Vec::new();
+        for word in [0x6767_7371u32, 3, 7] {
+            bytes.extend(word.to_le_bytes());
+        }
+        for int in [-1i32, 1, 3, 248045, 8678, 198, 0, 1, 3] {
+            bytes.extend(int.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(saved_tokens(&path), Some(vec![248045, 8678, 198]));
+        std::fs::write(&path, b"not a slot file").unwrap();
+        assert_eq!(saved_tokens(&path), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn token_lists() {
+        assert_eq!(token_list(vec![5, 6, 7]), Some(vec![5, 6, 7]));
+        assert_eq!(token_list(vec![-1, 1, 2, 5, 6, 0]), Some(vec![5, 6]));
+        assert_eq!(token_list(vec![-1, 1, 9, 5, 6, 0]), None);
     }
 }

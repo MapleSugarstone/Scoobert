@@ -155,6 +155,8 @@ const KEEP_SHARE: f64 = 0.35;
 /// Characters per token when estimating, set low so the estimate errs toward summarizing early.
 const CHARS_PER_TOKEN: f64 = 3.2;
 const MAX_RETRIES: u32 = 3;
+/// How long a task runs between saves of its prompt cache. A save of a large model's cache writes about a gigabyte.
+const SAVE_DURING_TASK: std::time::Duration = std::time::Duration::from_secs(300);
 /// Thinking tokens a local model may spend on a side request before it must answer.
 const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
@@ -459,7 +461,12 @@ impl Host {
             bail!("That file is not one of Scoobert's conversations.");
         }
         self.convs.lock().unwrap().retain(|_, l| l.conv.lock().unwrap().file != file);
-        Conversation::delete(file)
+        Conversation::delete(file)?;
+        // The file name ends with the conversation's id, which names its saved prompts.
+        if let Some(id) = file.file_stem().and_then(|s| s.to_str()).and_then(|s| s.rsplit('-').next()) {
+            crate::llama::forget_chat(id);
+        }
+        Ok(())
     }
 
     pub fn answer(&self, approval: u64, decision: Decision) {
@@ -659,6 +666,16 @@ impl Host {
             if compacted_at != Some(len) && self.too_long(live, &target) {
                 self.compact(live, id, &target, &ep, true, cancel).await?;
                 compacted_at = Some(len);
+            }
+            // A read after a summary goes in saved steps, so closing Scoobert partway does not start it over. A long
+            // task saves every few minutes for the same reason.
+            if ep.local && (self.llama.slot_owner().as_deref() != Some(id) || self.llama.since_save() > SAVE_DURING_TASK)
+                && let Err(err) = self.persist(live, false, false, cancel).await
+            {
+                if is_cancelled(&err) {
+                    return Err(err);
+                }
+                eprintln!("[cache] {err:#}");
             }
             self.emit(Event::Activity { conv: id.into(), text: Some("Reading...".into()) });
             let (system, messages, thinking) = self.request_parts(live);
@@ -900,18 +917,10 @@ impl Host {
         // Notes attached to the summarized messages are gone from the request, so they can be attached again.
         live.read_notes.lock().unwrap().clear();
         self.emit(Event::NotesChanged { cwd: conv.cwd.clone() });
+        // The next request reads the summary in saved steps. The summary message opens with the same environment
+        // block as a new conversation, so that read starts from the saved prompt for new conversations here.
         if matches!(target, Target::Local(_)) {
             self.llama.set_slot_owner(None);
-            // The summary message opens with the same environment block as a new conversation, so the saved prompt
-            // for new conversations here covers the instructions and tools, and only the summary and kept messages
-            // are read again.
-            let (cwd, thinking, environment) = {
-                let c = live.conv.lock().unwrap();
-                (c.cwd.clone(), c.thinking, c.compaction.as_ref().map(|k| k.environment.clone()).unwrap_or_default())
-            };
-            if let Ok(prefix) = self.opening_prefix(target, &cwd, thinking, &environment).await {
-                self.llama.restore(&self.llama.slot_file("shared", &LlamaServer::hash(&prefix))).await;
-            }
         }
         self.emit(Event::Compacted { conv: id.to_string(), kept_from });
         Ok(())
@@ -1130,10 +1139,6 @@ impl Host {
         }
         // The new user message is already in the conversation; the cache covers what came before it.
         let history = conv.messages.len() > 1;
-        if history && self.llama.restore(&self.llama.slot_file("chat", id)).await {
-            self.llama.set_slot_owner(Some(id.to_string()));
-            return Ok(());
-        }
         let cancel = live.cache_cancel.lock().unwrap().clone().unwrap_or_default();
         self.persist(live, !history, true, &cancel).await
     }
@@ -1147,10 +1152,6 @@ impl Host {
             return Ok(());
         }
         let history = conv.has_user_message();
-        if history && self.llama.restore(&self.llama.slot_file("chat", &conv.id)).await {
-            self.llama.set_slot_owner(Some(conv.id.clone()));
-            return Ok(());
-        }
         let cancel = CancellationToken::new();
         *live.cache_cancel.lock().unwrap() = Some(cancel.clone());
         let result = self.persist(live, !history, false, &cancel).await;
@@ -1158,7 +1159,8 @@ impl Host {
         result
     }
 
-    /// Fills the slot with the part of the request that the next request starts with, and saves it.
+    /// Fills the slot with the part of the request that the next request starts with, and saves it. The fill
+    /// starts from the saved prompt that matches the most of it, so only the difference is read.
     /// `exclude_last` leaves out the newest message, which the upcoming request sends anyway.
     async fn persist(&self, live: &Live, shared: bool, exclude_last: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let conv = live.conv.lock().unwrap().clone();
@@ -1191,17 +1193,26 @@ impl Host {
             let prefix = self.llama.shared_prefix(&stream::payload(&self.endpoint(&target), &req), "").await?;
             (prefix, self.llama.slot_file("chat", &conv.id))
         };
-        if shared && self.llama.restore(&name).await {
-            self.llama.set_slot_owner(Some(conv.id.clone()));
-            return Ok(());
-        }
+        let tokens = self.llama.tokenize(&prefix).await?;
+        // A slot that already holds this conversation holds it followed by the last reply, which the server
+        // matches itself.
+        let held = if !shared && self.llama.slot_owner().as_deref() == Some(&conv.id) {
+            None
+        } else {
+            let held = self.llama.restore_longest(&tokens).await;
+            if held == tokens.len() {
+                self.llama.set_slot_owner(Some(conv.id.clone()));
+                return Ok(());
+            }
+            Some(held)
+        };
         let _busy = self.llama.busy();
         // The activity appears with the first progress report, so a fill that takes a moment shows nothing.
         let label = if shared { "Reading Scoobert's instructions" } else { "Reading the conversation" };
         let mut shown = false;
         let filled = self
             .llama
-            .fill(&prefix, cancel, |done, total| {
+            .fill(&tokens, held, &name, cancel, |done, total| {
                 if !shown {
                     self.emit(Event::Activity { conv: conv.id.clone(), text: Some(label.into()) });
                     shown = true;
@@ -1214,7 +1225,6 @@ impl Host {
             self.emit(Event::Activity { conv: conv.id.clone(), text: None });
         }
         filled?;
-        self.llama.save(&name).await?;
         self.llama.set_slot_owner(Some(conv.id.clone()));
         Ok(())
     }
@@ -1300,22 +1310,24 @@ impl Host {
         let environment = prompt::environment_block(cwd, &s.notes_folder, &self.shell);
         let prefix = self.opening_prefix(&target, cwd, s.thinking, &environment).await?;
         let name = self.llama.slot_file("shared", &LlamaServer::hash(&prefix));
-        if self.llama.has_slot_file(&name) {
+        let tokens = self.llama.tokenize(&prefix).await?;
+        if self.llama.holds(&name, &tokens) {
             return Ok(());
         }
         self.emit(Event::Preparing(Some((model.name.clone(), 0))));
         let _busy = self.llama.busy();
-        let filled = self
-            .llama
-            .fill(&prefix, cancel, |done, total| {
-                if total > 0 {
-                    self.emit(Event::Preparing(Some((model.name.clone(), done * 100 / total))));
-                }
-            })
-            .await;
-        let result = match filled {
-            Ok(()) => self.llama.save(&name).await,
-            Err(e) => Err(e),
+        // A bake that was stopped partway saved what it had read, and continues from there.
+        let held = self.llama.restore_longest(&tokens).await;
+        let result = if held == tokens.len() {
+            self.llama.save(&name).await
+        } else {
+            self.llama
+                .fill(&tokens, Some(held), &name, cancel, |done, total| {
+                    if total > 0 {
+                        self.emit(Event::Preparing(Some((model.name.clone(), done * 100 / total))));
+                    }
+                })
+                .await
         };
         // The slot now holds this prompt, so the next conversation restores its own.
         self.llama.set_slot_owner(None);
@@ -1490,7 +1502,15 @@ fn finished_task(conv: &Conversation, notes_folder: &str, related: Vec<String>) 
 
 /// The model's title answer, cleaned of labels, quotes, and trailing punctuation, when it is usable.
 fn clean_title(answer: &str) -> Option<String> {
-    let line = answer.lines().map(str::trim).find(|l| !l.is_empty())?;
+    // A small model can repeat the step's label before its answer.
+    const ECHO: &str = "Scoobert title step";
+    let line = answer
+        .lines()
+        .map(|l| match l.trim().get(..ECHO.len()) {
+            Some(start) if start.eq_ignore_ascii_case(ECHO) => l.trim()[ECHO.len()..].trim_start_matches(['.', ':', '-', ' ']),
+            _ => l.trim(),
+        })
+        .find(|l| !l.is_empty())?;
     let line = line.trim_start_matches(['#', '*', ' ']);
     let line = line.strip_prefix("Title:").or_else(|| line.strip_prefix("title:")).unwrap_or(line);
     let (quotes, stops) = (['"', '\'', '*', '`'], ['.', '!', ':']);
@@ -1759,6 +1779,9 @@ mod tests {
         assert_eq!(clean_title("**Secure auth cookies**").as_deref(), Some("Secure auth cookies"));
         assert_eq!(clean_title(""), None);
         assert_eq!(clean_title(&"word ".repeat(20)), None);
+        assert_eq!(clean_title("Scoobert title step"), None);
+        assert_eq!(clean_title("Scoobert title step.\nFind the first public function").as_deref(), Some("Find the first public function"));
+        assert_eq!(clean_title("scoobert title step: Save loader").as_deref(), Some("Save loader"));
     }
 
     fn user(n: usize) -> Message {
