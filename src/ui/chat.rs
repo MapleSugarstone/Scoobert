@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use iced::widget::{Column, button, column, container, markdown, rich_text, row, rule, scrollable, space, text};
+use iced::widget::{Column, button, column, container, markdown, progress_bar, rich_text, row, rule, scrollable, space, text};
 use iced::{Alignment, Element, Fill, Length, Padding, Theme};
 
 use super::Message;
@@ -14,7 +14,7 @@ use crate::agent::conversation::{AssistantMessage, Message as AgentMessage, Stop
 use crate::agent::stream::Delta;
 use crate::agent::{ConvId, Decision, Snapshot};
 use crate::store::Thinking;
-use crate::util::{clip, thousands};
+use crate::util::{about_duration, clip, thousands};
 
 pub const TRANSCRIPT_ID: &str = "transcript";
 const COMPACTED: &str = "Scoobert summarized the messages above to make room and continued from the summary. The summary is in the Tasks folder of the notes.";
@@ -55,6 +55,8 @@ pub struct Chat {
     pub running: bool,
     pub activity: Option<String>,
     pub progress: Option<(u64, u64)>,
+    /// When the current read started and how far it was then, for the time left.
+    progress_since: Option<(std::time::Instant, u64)>,
     pub stream: Option<Streaming>,
     pub approvals: Vec<(u64, ToolCall)>,
     pub live_output: HashMap<String, String>,
@@ -84,6 +86,7 @@ impl Chat {
             running: s.running,
             activity: None,
             progress: None,
+            progress_since: None,
             stream: None,
             approvals: Vec::new(),
             live_output: HashMap::new(),
@@ -160,6 +163,16 @@ impl Chat {
                     self.progress = None;
                 }
             }
+            // Reading progress is shown on the activity line, so it does not open an empty reply.
+            E::Delta { delta: Delta::Progress { done, total, prompt }, .. } => {
+                if self.progress.is_none_or(|(d, t)| done < d || total != t) {
+                    self.progress_since = Some((std::time::Instant::now(), done));
+                }
+                self.progress = Some((done, total));
+                if prompt > 0 {
+                    self.context = prompt;
+                }
+            }
             E::Delta { delta, .. } => {
                 let s = self.stream.get_or_insert_with(Streaming::default);
                 match delta {
@@ -178,12 +191,7 @@ impl Chat {
                         self.activity = None;
                         self.progress = None;
                     }
-                    Delta::Progress { done, total, prompt } => {
-                        self.progress = Some((done, total));
-                        if prompt > 0 {
-                            self.context = prompt;
-                        }
-                    }
+                    Delta::Progress { .. } => {}
                 }
             }
             E::Message { message, .. } => {
@@ -231,6 +239,21 @@ impl Chat {
         }
     }
 
+    /// The activity, with how far a long read has got and the time left once its speed is known.
+    fn activity_label(&self, activity: &str) -> String {
+        let Some((done, total)) = self.progress.filter(|(_, t)| *t > 0) else { return activity.to_string() };
+        let activity = activity.trim_end_matches("...");
+        let mut label = format!("{activity}: {} of {} tokens", thousands(done), thousands(total));
+        if let Some((since, from)) = self.progress_since
+            && done > from
+            && total > done
+        {
+            let rate = (done - from) as f64 / since.elapsed().as_secs_f64().max(0.001);
+            label.push_str(&format!(", {} left", about_duration(((total - done) as f64 / rate) as u64)));
+        }
+        label
+    }
+
     pub fn view<'a>(&'a self, md_settings: markdown::Settings) -> Element<'a, Message> {
         let mut items = Column::new().spacing(14).padding(Padding { top: 24.0, right: 24.0, bottom: 24.0, left: 24.0 }).max_width(MAX_WIDTH);
         if let Some(n) = &self.notice {
@@ -249,11 +272,12 @@ impl Chat {
             items = items.push(approval(*id, call));
         }
         if let Some(a) = &self.activity {
-            let label = match self.progress {
-                Some((done, total)) if total > 0 => format!("{a} {} of {} tokens", thousands(done), thousands(total)),
-                _ => a.clone(),
-            };
-            items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
+            let mut line = column![row![working_dot(), text(self.activity_label(a)).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center)].spacing(6);
+            if let Some((done, total)) = self.progress.filter(|(_, t)| *t > 0) {
+                let bar = progress_bar(0.0..=total as f32, done.min(total) as f32).girth(4).style(theme::meter);
+                line = line.push(container(bar).max_width(420).padding(Padding { left: 16.0, ..Padding::ZERO }));
+            }
+            items = items.push(line);
         } else if self.running && self.approvals.is_empty() && self.live_output.is_empty() && self.stream.as_ref().is_none_or(|s| s.text.is_empty() && s.thinking.is_empty() && s.tool.is_none()) {
             let generated = self.stream.as_ref().map(|s| s.generated).unwrap_or(0);
             let label = if generated > 0 { format!("Working... {} tokens written so far", thousands(generated)) } else { "Working...".to_string() };

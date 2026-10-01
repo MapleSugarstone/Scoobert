@@ -231,7 +231,7 @@ pub struct App {
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
     /// The model whose saved prompts are being built ahead of time.
-    preparing: Option<String>,
+    preparing: Option<(String, u64)>,
     /// The conversation whose model and cached prompt were last loaded because the user started typing.
     warmed: Option<String>,
     /// Whether a rewind also puts back the files the model changed.
@@ -1383,9 +1383,14 @@ impl App {
             .into(),
             None => status,
         };
+        let percent: Element<'_, Message> = match &self.preparing {
+            Some((_, pct)) => text(format!("{pct}%")).size(13).style(theme::muted).into(),
+            None => space().into(),
+        };
         let footer = row![
             container(space()).width(8).height(8).style(theme::dot(dot)),
             status,
+            percent,
             button(icon(Icon::Gear, 18.0)).padding(4).style(theme::ghost).on_press(Message::OpenSettings(settings::Section::General)),
         ]
         .spacing(8)
@@ -1491,8 +1496,7 @@ impl App {
         .spacing(8)
         .align_y(Alignment::Center);
         let item = button(label).width(Fill).padding([6, 10]).style(theme::list_item(selected)).on_press(Message::OpenConversation(s.file.clone()));
-        let bar = container(space()).width(2).height(Fill).style(if selected { theme::accent_bar } else { |_: &Theme| container::Style::default() });
-        let base = row![bar, item].height(32);
+        let base = container(item).height(32);
         let actions = container(
             row![
                 button(icon(Icon::Pencil, 14.0)).padding(4).style(theme::ghost).on_press(Message::StartRename(s.file.clone(), s.title.clone())),
@@ -1511,7 +1515,7 @@ impl App {
         {
             return (|t| t.ok, format!("Using {}", m.provider));
         }
-        if let Some(m) = &self.preparing {
+        if let Some((m, _)) = &self.preparing {
             return (|t| t.warn, format!("Preparing {m}"));
         }
         match &self.server {

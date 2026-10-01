@@ -118,3 +118,13 @@ pub fn thousands(n: u64) -> String {
     }
     out
 }
+
+/// A rough length of time for a progress line, such as about 9 minutes.
+pub fn about_duration(secs: u64) -> String {
+    match secs {
+        0..50 => "less than a minute".into(),
+        50..90 => "about a minute".into(),
+        90..3_300 => format!("about {} minutes", (secs + 30) / 60),
+        _ => format!("about {:.1} hours", secs as f64 / 3600.0),
+    }
+}

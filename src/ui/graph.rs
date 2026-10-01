@@ -106,7 +106,8 @@ impl canvas::Program<Message> for GraphView {
                 }
                 let dim = state.hovered.is_some() && !near(i);
                 frame.fill_text(Text {
-                    content: node.name.clone(),
+                    // Long names overlap their neighbors, so they are cut and shown in full while pointed at.
+                    content: if state.hovered == Some(i) { node.name.clone() } else { crate::util::clip(&node.name, 24) },
                     position: c + Vector::new(0.0, r + 4.0),
                     color: if dim { iced::Color { a: 0.35, ..t.text } } else { t.text },
                     size: 12.0.into(),

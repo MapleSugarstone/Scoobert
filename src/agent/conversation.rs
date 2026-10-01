@@ -134,6 +134,8 @@ enum Entry {
     },
     /// The part of a summary written before the summary step was interrupted.
     SummaryDraft { start: usize, kept_from: usize, text: String },
+    /// The system prompt and tools the conversation is sent with until its next summary.
+    Prompt { system: String, tools: Vec<Value>, notes_folder: String, web: bool, general: bool },
     /// The conversation moved to another folder, when a conversation without a project started one.
     Cwd { cwd: PathBuf },
     /// Messages from `to` on were discarded. They stay in the file above this line.
@@ -154,12 +156,23 @@ pub struct Compaction {
     pub context: String,
 }
 
-/// The start of a summary of the messages from start to kept_from, which the next attempt continues.
+/// The start of a summary of the messages from `start` to `kept_from`, which the next attempt continues.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SummaryDraft {
     pub start: usize,
     pub kept_from: usize,
     pub text: String,
+}
+
+/// The system prompt and tools a conversation keeps until its next summary, so a Scoobert update that changes
+/// them does not invalidate its cached prompt. The settings they were built from decide when they no longer apply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PinnedPrompt {
+    pub system: String,
+    pub tools: Vec<Value>,
+    pub notes_folder: String,
+    pub web: bool,
+    pub general: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -174,6 +187,7 @@ pub struct Conversation {
     pub messages: Vec<Message>,
     pub compaction: Option<Compaction>,
     pub summary_draft: Option<SummaryDraft>,
+    pub prompt: Option<PinnedPrompt>,
 }
 
 #[derive(Clone, Debug)]
@@ -202,6 +216,7 @@ impl Conversation {
             messages: Vec::new(),
             compaction: None,
             summary_draft: None,
+            prompt: None,
         }
     }
 
@@ -224,6 +239,7 @@ impl Conversation {
                         messages: Vec::new(),
                         compaction: None,
                         summary_draft: None,
+                        prompt: None,
                     });
                 }
                 (Entry::Message { message }, Some(c)) => c.messages.push(message),
@@ -233,8 +249,12 @@ impl Conversation {
                 (Entry::Compaction { summary, kept_from, environment, context }, Some(c)) => {
                     c.compaction = Some(Compaction { summary, kept_from, at: c.messages.len(), environment, context });
                     c.summary_draft = None;
+                    c.prompt = None;
                 }
                 (Entry::SummaryDraft { start, kept_from, text }, Some(c)) => c.summary_draft = Some(SummaryDraft { start, kept_from, text }),
+                (Entry::Prompt { system, tools, notes_folder, web, general }, Some(c)) => {
+                    c.prompt = Some(PinnedPrompt { system, tools, notes_folder, web, general });
+                }
                 (Entry::Cwd { cwd }, Some(c)) => c.cwd = cwd,
                 (Entry::Rewind { to }, Some(c)) => c.truncate(to),
                 _ => {}
@@ -292,7 +312,22 @@ impl Conversation {
         self.append(&Entry::Compaction { summary: summary.clone(), kept_from, environment: environment.clone(), context: context.clone() })?;
         self.compaction = Some(Compaction { summary, kept_from, at: self.messages.len(), environment, context });
         self.summary_draft = None;
+        // The summary changes the start of the conversation, so the cache is rebuilt anyway and the next request
+        // takes the current prompt.
+        self.prompt = None;
         Ok(())
+    }
+
+    pub fn set_prompt(&mut self, prompt: PinnedPrompt) -> anyhow::Result<()> {
+        let entry = Entry::Prompt {
+            system: prompt.system.clone(),
+            tools: prompt.tools.clone(),
+            notes_folder: prompt.notes_folder.clone(),
+            web: prompt.web,
+            general: prompt.general,
+        };
+        self.prompt = Some(prompt);
+        if self.file.exists() { self.append(&entry) } else { Ok(()) }
     }
 
     pub fn set_summary_draft(&mut self, draft: SummaryDraft) -> anyhow::Result<()> {
@@ -452,7 +487,7 @@ pub fn quick_title(text: &str) -> String {
     }
     s = &s[start..];
     let lower = fold(s);
-    if let Some(i) = [" that ", " which ", ", ", " because ", " so that ", " and then "].iter().filter_map(|p| lower.find(p)).filter(|&i| i > 12).min() {
+    if let Some(i) = [" that ", " which ", " where ", " when ", ", ", " because ", " so that ", " and then "].iter().filter_map(|p| lower.find(p)).filter(|&i| i > 12).min() {
         s = &s[..i];
     }
     let mut title = String::new();
@@ -465,7 +500,14 @@ pub fn quick_title(text: &str) -> String {
         }
         title.push_str(word);
     }
-    let title = title.trim_end_matches(['.', '?', '!', ',', ':', ';']).to_string();
+    let mut title = title.trim_end_matches(['.', '?', '!', ',', ':', ';']).to_string();
+    // A title cut at the word limit should not end on a word that only leads into the next one.
+    const DANGLING: [&str; 17] = ["a", "an", "the", "and", "or", "to", "of", "for", "in", "on", "with", "where", "every", "each", "that", "my", "your"];
+    while let Some((head, last)) = title.rsplit_once(' ')
+        && DANGLING.contains(&last.to_lowercase().as_str())
+    {
+        title = head.to_string();
+    }
     let mut chars = title.chars();
     match chars.next() {
         Some(c) => c.to_uppercase().chain(chars).collect(),
@@ -526,5 +568,7 @@ mod tests {
         assert_eq!(quick_title("Make a small snake game in one HTML file"), "Make a small snake game in one HTML file");
         assert_eq!(quick_title("hey can you fix the failing test? It broke yesterday"), "Fix the failing test");
         assert_eq!(quick_title("   "), "New conversation");
+        assert_eq!(quick_title("I want you to make a tile based adventure game where every sprite is 8x8 size"), "Make a tile based adventure game");
+        assert_eq!(quick_title("Make a tile based adventure game with lots of every kind of thing"), "Make a tile based adventure game with lots");
     }
 }

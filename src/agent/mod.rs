@@ -62,8 +62,9 @@ pub enum Event {
     NotesSaved { conv: ConvId, notes: Vec<String> },
     Error { conv: Option<ConvId>, message: String },
     NotesChanged { cwd: PathBuf },
-    /// Scoobert is building a saved prompt for this model ahead of time. None means it finished or stopped.
-    Preparing(Option<String>),
+    /// Scoobert is building a saved prompt for this model ahead of time, with the percent read so far. `None` means
+    /// it finished or stopped.
+    Preparing(Option<(String, u64)>),
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +142,7 @@ enum Verdict {
     Deny(String),
 }
 
-const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Write what you need to continue the work without the older ones, as short bullet points under these headings, in this order: ## Goal, ## Next, ## Open problems, ## Decisions (with reasons), ## Done (files changed and why, with exact paths). Keep the whole summary under 400 words. Reply in plain text without tools.";
+const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Start with one line that begins with Title: and names the whole task in three to six words. Then write what you need to continue the work without the older ones, as short bullet points under these headings, in this order: ## Goal, ## Next, ## Open problems, ## Decisions (with reasons), ## Done (files changed and why, with exact paths). Keep the whole summary under 400 words. Reply in plain text without tools.";
 /// Facts from the note step are three labeled lines of up to 160 characters.
 const REMEMBER_MAX_TOKENS: u32 = 160;
 const TITLE_PROMPT: &str = "Scoobert title step. Reply with a short title for this conversation: 3 to 6 words that name the task, with no quotes and no period. Reply in plain text without tools.";
@@ -621,7 +622,25 @@ impl Host {
                 _ = cancel.cancelled() => return Err(crate::util::Cancelled.into()),
             };
             if self.llama.loaded_model().as_deref() != Some(&model.name) {
-                self.emit(Event::Activity { conv: id.into(), text: Some(format!("Loading {}...", model.name)) });
+                // Loading takes from seconds to minutes and reports no progress, so the time so far is shown.
+                let (events, conv, name, stop) = (self.events.clone(), id.to_string(), model.name.clone(), CancellationToken::new());
+                let ticker = stop.clone();
+                self.rt.spawn(async move {
+                    let start = std::time::Instant::now();
+                    loop {
+                        let _ = events.send(Event::Activity { conv: conv.clone(), text: Some(format!("Loading {name}: {} s", start.elapsed().as_secs())) });
+                        tokio::select! {
+                            _ = ticker.cancelled() => break,
+                            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                        }
+                    }
+                });
+                let loaded = tokio::select! {
+                    r = self.llama.ensure(model) => r,
+                    _ = cancel.cancelled() => Err(crate::util::Cancelled.into()),
+                };
+                stop.cancel();
+                loaded?;
             }
             let cache = CancellationToken::new();
             *live.cache_cancel.lock().unwrap() = Some(cache.clone());
@@ -808,7 +827,10 @@ impl Host {
         let (thinking, thinking_budget) = side_thinking(ep, live);
         let max_tokens = if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED };
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens };
-        let body = stream::payload(ep, &req);
+        let mut body = stream::payload(ep, &req);
+        if ep.local {
+            body["return_progress"] = true.into();
+        }
 
         // A local model continues the summary an interrupted attempt started, when it covers the same messages.
         let draft = conv.summary_draft.clone().filter(|d| ep.local && d.start == start && d.kept_from == kept_from);
@@ -829,9 +851,7 @@ impl Host {
             None => {
                 let reply = stream::send(&self.http, ep, &body, cancel, |delta| match delta {
                     Delta::Text(t) => on_text(&t),
-                    Delta::Progress { done, total, .. } if total > 0 => {
-                        self.emit(Event::Activity { conv: id.into(), text: Some(format!("{label}: read {} of {} tokens", thousands(done), thousands(total))) });
-                    }
+                    progress @ Delta::Progress { .. } => self.emit(Event::Delta { conv: id.into(), delta: progress }),
                     _ => {}
                 })
                 .await;
@@ -859,10 +879,18 @@ impl Host {
         if truncated && let Some(end) = written.trim_end().rfind('\n') {
             written.truncate(end);
         }
-        let mut summary = written.trim().to_string();
+        let (named, mut summary) = memory::split_title(written.trim());
         let folder = self.settings().notes_folder;
         let vault = crate::notes::Vault::new(conv.cwd.join(&folder));
-        match memory::save_task_summary(&vault, &conv.display_title(), &summary) {
+        // The model's name for the task, else the conversation's title, since the first message can be a paragraph.
+        let title = named.clone().or(conv.title.clone()).unwrap_or_else(|| conversation::quick_title(&conv.display_title()));
+        if conv.title.is_none()
+            && let Some(name) = &named
+            && live.conv.lock().unwrap().set_title(name).is_ok()
+        {
+            self.emit(Event::Titled { conv: id.to_string(), title: name.clone() });
+        }
+        match memory::save_task_summary(&vault, &conv.id, &title, &summary) {
             Ok(rel) => summary.push_str(&format!("\n\nThis summary is also saved in {folder}/{rel}.")),
             Err(err) => eprintln!("[notes] {err:#}"),
         }
@@ -874,6 +902,16 @@ impl Host {
         self.emit(Event::NotesChanged { cwd: conv.cwd.clone() });
         if matches!(target, Target::Local(_)) {
             self.llama.set_slot_owner(None);
+            // The summary message opens with the same environment block as a new conversation, so the saved prompt
+            // for new conversations here covers the instructions and tools, and only the summary and kept messages
+            // are read again.
+            let (cwd, thinking, environment) = {
+                let c = live.conv.lock().unwrap();
+                (c.cwd.clone(), c.thinking, c.compaction.as_ref().map(|k| k.environment.clone()).unwrap_or_default())
+            };
+            if let Ok(prefix) = self.opening_prefix(target, &cwd, thinking, &environment).await {
+                self.llama.restore(&self.llama.slot_file("shared", &LlamaServer::hash(&prefix))).await;
+            }
         }
         self.emit(Event::Compacted { conv: id.to_string(), kept_from });
         Ok(())
@@ -900,8 +938,8 @@ impl Host {
     /// The system prompt and the messages as the model sees them, with any summary in place of older messages.
     fn request_parts(&self, live: &Live) -> (String, Vec<Message>, Thinking) {
         let s = self.settings();
+        let (system, _) = self.pinned_prompt(live);
         let mut c = live.conv.lock().unwrap();
-        let system = prompt::system_prompt(&s.notes_folder, self.shell.tool_name());
         // A summary made before its details were kept gets them now, fixed for the rest of this session, so notes
         // that change after a task do not change the first message and invalidate the cached prompt.
         let cwd = c.cwd.clone();
@@ -1004,8 +1042,33 @@ impl Host {
     }
 
     fn tool_specs(&self, live: &Live) -> Vec<Value> {
-        let cwd = live.conv.lock().unwrap().cwd.clone();
-        tools::specs(&self.shell, is_general(&cwd), self.settings().web_access)
+        self.pinned_prompt(live).1
+    }
+
+    /// The system prompt and tools the conversation is sent with. They stay as they were when its last summary was
+    /// made or it started, so an update to Scoobert does not invalidate its cached prompt. A change to the settings
+    /// they depend on replaces them.
+    fn pinned_prompt(&self, live: &Live) -> (String, Vec<Value>) {
+        let s = self.settings();
+        let mut c = live.conv.lock().unwrap();
+        let general = is_general(&c.cwd);
+        if let Some(p) = &c.prompt
+            && p.notes_folder == s.notes_folder
+            && p.web == s.web_access
+            && p.general == general
+        {
+            return (p.system.clone(), p.tools.clone());
+        }
+        let system = prompt::system_prompt(&s.notes_folder, self.shell.tool_name());
+        let tools = tools::specs(&self.shell, general, s.web_access);
+        // Only a running task pins them, so opening a conversation to read it does not write to its file.
+        if live.running.load(Ordering::SeqCst) {
+            let pin = conversation::PinnedPrompt { system: system.clone(), tools: tools.clone(), notes_folder: s.notes_folder.clone(), web: s.web_access, general };
+            if let Err(err) = c.set_prompt(pin) {
+                eprintln!("[prompt] {err:#}");
+            }
+        }
+        (system, tools)
     }
 
     /// Creates a project folder for a conversation that has none and moves the conversation into it.
@@ -1133,7 +1196,24 @@ impl Host {
             return Ok(());
         }
         let _busy = self.llama.busy();
-        self.llama.fill(&prefix, cancel).await?;
+        // The activity appears with the first progress report, so a fill that takes a moment shows nothing.
+        let label = if shared { "Reading Scoobert's instructions" } else { "Reading the conversation" };
+        let mut shown = false;
+        let filled = self
+            .llama
+            .fill(&prefix, cancel, |done, total| {
+                if !shown {
+                    self.emit(Event::Activity { conv: conv.id.clone(), text: Some(label.into()) });
+                    shown = true;
+                }
+                self.emit(Event::Delta { conv: conv.id.clone(), delta: Delta::Progress { done, total, prompt: 0 } });
+            })
+            .await;
+        // A running task replaces the activity itself. Work after a reply clears it.
+        if shown && !live.running.load(Ordering::SeqCst) {
+            self.emit(Event::Activity { conv: conv.id.clone(), text: None });
+        }
+        filled?;
         self.llama.save(&name).await?;
         self.llama.set_slot_owner(Some(conv.id.clone()));
         Ok(())
@@ -1223,9 +1303,17 @@ impl Host {
         if self.llama.has_slot_file(&name) {
             return Ok(());
         }
-        self.emit(Event::Preparing(Some(model.name.clone())));
+        self.emit(Event::Preparing(Some((model.name.clone(), 0))));
         let _busy = self.llama.busy();
-        let result = match self.llama.fill(&prefix, cancel).await {
+        let filled = self
+            .llama
+            .fill(&prefix, cancel, |done, total| {
+                if total > 0 {
+                    self.emit(Event::Preparing(Some((model.name.clone(), done * 100 / total))));
+                }
+            })
+            .await;
+        let result = match filled {
             Ok(()) => self.llama.save(&name).await,
             Err(e) => Err(e),
         };
@@ -1292,7 +1380,8 @@ impl Host {
                 host.emit(Event::Activity { conv: id.clone(), text: Some("Taking notes...".into()) });
                 let cancel = CancellationToken::new();
                 *live.note_cancel.lock().unwrap() = Some(cancel.clone());
-                match host.ask(&live, memory::REMEMBER_PROMPT, REMEMBER_MAX_TOKENS, &cancel).await {
+                let question = memory::remember_prompt(&memory::topic_names(&crate::notes::Vault::new(conv.cwd.join(&s.notes_folder))));
+                match host.ask(&live, &question, REMEMBER_MAX_TOKENS, &cancel).await {
                     Ok(answer) => facts = memory::parse_facts(&answer),
                     Err(err) if !is_cancelled(&err) => eprintln!("[notes] {err:#}"),
                     Err(_) => {}

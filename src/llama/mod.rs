@@ -486,9 +486,21 @@ impl LlamaServer {
     /// Streams a plain completion of `prompt`, passing each piece of text to `on_text`. Returns true when it stopped
     /// at `n_predict` rather than finishing.
     pub async fn complete(&self, prompt: &str, n_predict: u32, cancel: &CancellationToken, mut on_text: impl FnMut(&str)) -> anyhow::Result<bool> {
-        use futures::StreamExt;
         let body = json!({ "prompt": prompt, "n_predict": n_predict, "stream": true, "cache_prompt": true });
-        let send = self.http.post(format!("{}/completion", self.base_url())).bearer_auth(&self.api_key).json(&body).send();
+        let last = self
+            .stream_completion(&body, cancel, |event| {
+                if let Some(text) = event["content"].as_str().filter(|t| !t.is_empty()) {
+                    on_text(text);
+                }
+            })
+            .await?;
+        Ok(last["stopped_limit"].as_bool() == Some(true))
+    }
+
+    /// Sends a streamed `/completion` request, passing each event to `on_event`, and returns the final one.
+    async fn stream_completion(&self, body: &Value, cancel: &CancellationToken, mut on_event: impl FnMut(&Value)) -> anyhow::Result<Value> {
+        use futures::StreamExt;
+        let send = self.http.post(format!("{}/completion", self.base_url())).bearer_auth(&self.api_key).json(body).send();
         let res = tokio::select! {
             r = send => r?,
             _ = cancel.cancelled() => return Err(Cancelled.into()),
@@ -503,18 +515,16 @@ impl LlamaServer {
                 c = stream.next() => c,
                 _ = cancel.cancelled() => return Err(Cancelled.into()),
             };
-            let Some(chunk) = chunk else { return Ok(false) };
+            let Some(chunk) = chunk else { return Ok(Value::Null) };
             buf.extend_from_slice(&chunk?);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
                 let line = String::from_utf8_lossy(&line);
                 let Some(data) = line.trim().strip_prefix("data:") else { continue };
                 let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue };
-                if let Some(text) = event["content"].as_str().filter(|t| !t.is_empty()) {
-                    on_text(text);
-                }
+                on_event(&event);
                 if event["stop"].as_bool() == Some(true) {
-                    return Ok(event["stopped_limit"].as_bool() == Some(true));
+                    return Ok(event);
                 }
             }
         }
@@ -529,10 +539,19 @@ impl LlamaServer {
         self.busy.load(Ordering::SeqCst) > 0
     }
 
-    pub async fn fill(&self, prefix: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
+    /// Reads `prefix` into the slot without generating, passing the tokens read so far and the total to
+    /// `on_progress` as the server reports them.
+    pub async fn fill(&self, prefix: &str, cancel: &CancellationToken, mut on_progress: impl FnMut(u64, u64)) -> anyhow::Result<()> {
         self.touch();
-        let body = json!({ "prompt": prefix, "n_predict": 0, "cache_prompt": true, "id_slot": 0 });
-        self.request("/completion", Some(&body), Duration::from_secs(1800), Some(cancel)).await?;
+        let body = json!({ "prompt": prefix, "n_predict": 0, "cache_prompt": true, "id_slot": 0, "stream": true, "return_progress": true });
+        self.stream_completion(&body, cancel, |event| {
+            let p = &event["prompt_progress"];
+            if p.is_object() {
+                let (total, cached, done) = (p["total"].as_u64().unwrap_or(0), p["cache"].as_u64().unwrap_or(0), p["processed"].as_u64().unwrap_or(0));
+                on_progress(done.saturating_sub(cached), total.saturating_sub(cached));
+            }
+        })
+        .await?;
         Ok(())
     }
 
