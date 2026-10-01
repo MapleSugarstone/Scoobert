@@ -1606,7 +1606,8 @@ impl App {
                 .into()
         } else {
             let can_send = !self.composer.text().trim().is_empty() || !self.images.is_empty();
-            button(row![text("Send").size(13), icons::tinted(Icon::ArrowRight, 14.0, |t| t.accent_text)].spacing(6).align_y(Alignment::Center))
+            let arrow = if can_send { icons::tinted(Icon::ArrowRight, 14.0, |t| t.accent_text) } else { icons::tinted(Icon::ArrowRight, 14.0, |t| t.muted) };
+            button(row![text("Send").size(13), arrow].spacing(6).align_y(Alignment::Center))
                 .padding([6, 14])
                 .style(theme::primary)
                 .on_press_maybe(can_send.then_some(Message::Send))

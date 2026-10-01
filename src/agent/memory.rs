@@ -27,7 +27,7 @@ const LEAD: f64 = 1.25;
 pub fn remember_prompt(topics: &[String]) -> String {
     let reuse = if topics.is_empty() { String::new() } else { format!(" Reuse one of these topics when it fits: {}.", topics.join(", ")) };
     format!(
-        "Scoobert note step. List at most three facts from the task you just finished that a later conversation about this project needs and cannot learn from the code. Write each on its own line as Decision, Convention, or Problem, then the topic in parentheses, then a colon and the fact, as in: Decision (Save files): Use JSON because players edit saves by hand. Give a decision's reason. Name the topic in one to four words.{reuse} Keep each line under 160 characters. Reply NONE if nothing qualifies. Reply in plain text without tools."
+        "Scoobert note step. List at most three facts from the task you just finished that a later conversation about this project needs and cannot learn from the code. Write each on its own line as Decision, Convention, or Problem, then the topic in parentheses, then a colon and the fact, as in: Decision (Saves): Use JSON because players edit saves by hand. Give a decision's reason. Name the topic after the part of the project the fact is about, in one or two words such as Saves, Combat, or Rendering, and give related facts the same topic.{reuse} Keep each line under 160 characters. Reply NONE if nothing qualifies. Reply in plain text without tools."
     )
 }
 

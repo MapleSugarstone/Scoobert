@@ -35,15 +35,16 @@ pub const DARK: Tokens = Tokens {
     line: color!(0x494c54),
     text: color!(0xf7f7f9),
     muted: color!(0xbbbdc4),
-    accent: color!(0x3ccf5a),
-    accent_ink: color!(0x5fdd78),
-    accent_text: color!(0x0b1a0f),
-    ok: color!(0x57ab5a),
+    // The mascot's screen is pure green (hue 120), so the accent keeps that hue at a softer strength.
+    accent: color!(0x2fd22f),
+    accent_ink: color!(0x5ae25a),
+    accent_text: color!(0x061a06),
+    ok: color!(0x4fb84f),
     warn: color!(0xd4a72c),
     danger: color!(0xf47067),
     input: color!(0x2e3035),
     code_bg: color!(0x121315),
-    diff_add: Color::from_rgba(0.24, 0.81, 0.35, 0.16),
+    diff_add: Color::from_rgba(0.18, 0.82, 0.18, 0.16),
     diff_del: Color::from_rgba(0.96, 0.44, 0.40, 0.16),
     shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.4),
 };
@@ -55,15 +56,15 @@ pub const LIGHT: Tokens = Tokens {
     line: color!(0xb6b7be),
     text: color!(0x0b0c0e),
     muted: color!(0x3e4047),
-    accent: color!(0x1a7f37),
-    accent_ink: color!(0x1a7f37),
+    accent: color!(0x157915),
+    accent_ink: color!(0x157915),
     accent_text: color!(0xffffff),
-    ok: color!(0x2d7d46),
+    ok: color!(0x2a7f2a),
     warn: color!(0x9a6700),
     danger: color!(0xc93c37),
     input: color!(0xffffff),
     code_bg: color!(0xeeeef0),
-    diff_add: Color::from_rgba(0.10, 0.50, 0.22, 0.14),
+    diff_add: Color::from_rgba(0.08, 0.47, 0.08, 0.14),
     diff_del: Color::from_rgba(0.79, 0.24, 0.22, 0.12),
     shadow: Color::from_rgba(0.0, 0.0, 0.0, 0.12),
 };
@@ -255,12 +256,12 @@ pub fn primary(theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered => mix(t.accent, t.text, 0.12),
         button::Status::Pressed => mix(t.accent, t.bg, 0.15),
-        button::Status::Disabled => Color { a: 0.45, ..t.accent },
+        button::Status::Disabled => t.line,
         button::Status::Active => t.accent,
     };
     button::Style {
         background: Some(bg.into()),
-        text_color: t.accent_text,
+        text_color: if status == button::Status::Disabled { t.muted } else { t.accent_text },
         border: border::rounded(RADIUS),
         ..Default::default()
     }

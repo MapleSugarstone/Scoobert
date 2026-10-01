@@ -510,12 +510,15 @@ impl LlamaServer {
         }
         let mut stream = res.bytes_stream();
         let mut buf: Vec<u8> = Vec::new();
+        let mut last = Value::Null;
         loop {
             let chunk = tokio::select! {
                 c = stream.next() => c,
                 _ = cancel.cancelled() => return Err(Cancelled.into()),
             };
-            let Some(chunk) = chunk else { return Ok(Value::Null) };
+            // The stream is read to its end even after the final event: closing it early while the server
+            // finishes the request, then saving the slot at once, crashed llama-server.
+            let Some(chunk) = chunk else { return Ok(last) };
             buf.extend_from_slice(&chunk?);
             while let Some(end) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=end).collect();
@@ -524,7 +527,7 @@ impl LlamaServer {
                 let Ok(event) = serde_json::from_str::<Value>(data.trim()) else { continue };
                 on_event(&event);
                 if event["stop"].as_bool() == Some(true) {
-                    return Ok(event);
+                    last = event;
                 }
             }
         }

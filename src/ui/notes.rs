@@ -33,6 +33,8 @@ struct Editor {
     edited: Option<Instant>,
     preview: bool,
     md: markdown::Content,
+    /// The note's front matter, shown as properties above the formatted note.
+    props: Vec<(String, String)>,
     rename: Option<String>,
     backlinks: Vec<Backlink>,
 }
@@ -89,6 +91,36 @@ fn wrap(task: Task<Msg>) -> Task<Message> {
 
 fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> impl std::future::Future<Output = T> {
     async move { tokio::task::spawn_blocking(f).await.expect("the notes task finishes") }
+}
+
+/// The note's front matter as properties, and its body formatted with links the reader can follow.
+fn render(text: &str) -> (Vec<(String, String)>, markdown::Content) {
+    let mut props = Vec::new();
+    let mut body = text;
+    if let Some(rest) = text.strip_prefix("---").and_then(|r| r.strip_prefix('\n').or_else(|| r.strip_prefix("\r\n")))
+        && let Some(end) = rest.find("\n---")
+    {
+        for line in rest[..end].lines() {
+            if let Some((key, value)) = line.split_once(':') {
+                let value = value.trim().trim_matches('"');
+                if !matches!(value, "" | "[]") {
+                    props.push((key.trim().to_string(), value.to_string()));
+                }
+            }
+        }
+        body = rest[end + 4..].trim_start_matches(['-', '\r', '\n']);
+    }
+    (props, markdown::Content::parse(&link_wikilinks(body)))
+}
+
+/// Shows [[wikilinks]] as the text a reader sees, for previews that are not formatted.
+fn plain_links(text: &str) -> String {
+    WIKILINK
+        .replace_all(text, |c: &regex::Captures| {
+            let link = parse_link(&c[2]);
+            link.alias.unwrap_or_else(|| note_name(&link.target))
+        })
+        .into_owned()
 }
 
 /// Turns [[wikilinks]] into Markdown links the preview can follow.
@@ -260,7 +292,7 @@ impl Pane {
                         if same && let Some(e) = self.editor.as_mut() {
                             if e.saved != body {
                                 e.content = text_editor::Content::with_text(&body);
-                                e.md = markdown::Content::parse(&link_wikilinks(&body));
+                                (e.props, e.md) = render(&body);
                                 e.saved = body;
                             }
                             e.backlinks = backlinks;
@@ -268,10 +300,12 @@ impl Pane {
                             self.editor = Some(Editor {
                                 path,
                                 content: text_editor::Content::with_text(&body),
-                                md: markdown::Content::parse(&link_wikilinks(&body)),
+                                // A note with only a title opens for writing. Anything longer opens for reading.
+                                preview: body.lines().filter(|l| !l.trim().is_empty()).count() > 1,
+                                md: render(&body).1,
+                                props: render(&body).0,
                                 saved: body,
                                 edited: None,
-                                preview: false,
                                 rename: None,
                                 backlinks,
                             });
@@ -298,7 +332,7 @@ impl Pane {
                 let text = e.content.text();
                 e.edited = None;
                 e.saved = text.clone();
-                e.md = markdown::Content::parse(&link_wikilinks(&text));
+                (e.props, e.md) = render(&text);
                 let path = e.path.clone();
                 return wrap(Task::perform(blocking(move || vault.write(&path, &text).map(|_| ()).map_err(|e| format!("{e:#}"))), Msg::Saved));
             }
@@ -312,7 +346,7 @@ impl Pane {
             Msg::TogglePreview => {
                 if let Some(e) = self.editor.as_mut() {
                     e.preview = !e.preview;
-                    e.md = markdown::Content::parse(&link_wikilinks(&e.content.text()));
+                    (e.props, e.md) = render(&e.content.text());
                 }
             }
             Msg::New => {
@@ -591,18 +625,33 @@ impl Pane {
             button(icon(Icon::ArrowLeft, 16.0)).padding(5).style(theme::ghost).on_press(Message::Notes(Msg::Back)),
             container(title).width(Fill),
             text(status).size(12).style(theme::muted),
-            button(icon(if e.preview { Icon::Pencil } else { Icon::Eye }, 16.0)).padding(5).style(theme::ghost).on_press(Message::Notes(Msg::TogglePreview)),
+            button(row![icon(if e.preview { Icon::Pencil } else { Icon::Check }, 15.0), text(if e.preview { "Edit" } else { "Done" }).size(13)].spacing(6).align_y(Alignment::Center))
+                .padding([4, 10])
+                .style(theme::secondary)
+                .on_press(Message::Notes(Msg::TogglePreview)),
             button(icon(Icon::Trash, 16.0)).padding(5).style(theme::ghost).on_press(Message::Notes(Msg::Delete)),
         ]
         .spacing(4)
         .align_y(Alignment::Center)
         .padding([6, 8]);
         let body: Element<'a, Message> = if e.preview {
-            let settings = super::chat::markdown_settings(theme);
-            scrollable(container(markdown::view_with(e.md.items(), settings, &PreviewViewer)).padding(16))
-                .height(Fill)
-                .style(theme::scrollbar)
-                .into()
+            // Note headings stay modest, since the note's name is already in the bar above.
+            let mut settings = super::chat::markdown_settings(theme);
+            settings.text_size = 14.into();
+            settings.h1_size = 21.into();
+            settings.h2_size = 17.into();
+            settings.h3_size = 15.into();
+            settings.h4_size = 14.into();
+            let mut page = Column::new().spacing(14);
+            if !e.props.is_empty() {
+                let mut props = Column::new().spacing(3);
+                for (key, value) in &e.props {
+                    props = props.push(row![text(key.clone()).size(12).style(theme::muted).width(96), text(value.clone()).size(12)].spacing(8));
+                }
+                page = page.push(container(props).padding([8, 10]).width(Fill).style(theme::chip));
+            }
+            page = page.push(markdown::view_with(e.md.items(), settings, &PreviewViewer));
+            scrollable(container(page).padding(16)).height(Fill).style(theme::scrollbar).into()
         } else {
             container(
                 text_editor(&e.content)
@@ -621,7 +670,7 @@ impl Pane {
             let mut links = Column::new().spacing(2).push(text("Linked from").size(12).style(theme::muted));
             for b in &e.backlinks {
                 links = links.push(
-                    button(column![text(note_name(&b.path)).size(13), text(b.context.clone()).size(12).style(theme::muted)])
+                    button(column![text(note_name(&b.path)).size(13), text(plain_links(&b.context)).size(12).style(theme::muted)])
                         .width(Fill)
                         .padding([4, 6])
                         .style(theme::row_button)
