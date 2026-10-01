@@ -3,15 +3,17 @@
 use std::sync::Arc;
 
 use iced::futures::SinkExt;
-use iced::widget::{Column, button, checkbox, column, container, progress_bar, row, scrollable, space, text};
+use iced::widget::{Column, button, checkbox, column, container, pick_list, progress_bar, row, scrollable, space, text};
 use iced::{Alignment, Element, Fill, Task};
 use tokio_util::sync::CancellationToken;
 
 use super::Message;
 use super::fonts;
+use super::icons::{self, Icon};
 use super::settings::{Effect, Section};
 use super::theme;
 use crate::agent::Host;
+use crate::i18n::{tr, trf};
 use crate::llama::catalog::{CATALOG, memory_needed};
 use crate::llama::download::Progress;
 use crate::store::State;
@@ -57,6 +59,7 @@ pub enum Msg {
     Cancel,
     UseHosted,
     Skip,
+    Language(&'static crate::i18n::Language),
 }
 
 impl Default for Setup {
@@ -132,6 +135,11 @@ impl Setup {
                 state.setup_done = true;
                 return (Task::none(), Effect::Saved);
             }
+            Msg::Language(language) => {
+                crate::i18n::set(language.code);
+                state.settings.language = language.code.to_string();
+                return (Task::none(), Effect::Saved);
+            }
         }
         (Task::none(), Effect::None)
     }
@@ -191,26 +199,30 @@ impl Setup {
             let fits = fits(i);
             let need = memory_needed(m);
             let title = row![
-                text(m.label).size(15).font(fonts::ui_semibold()),
-                container(text(m.tier).size(11)).padding([1, 6]).style(theme::chip),
+                text(tr(m.label)).size(15).font(fonts::ui_semibold()),
+                container(text(tr(m.tier)).size(11)).padding([1, 6]).style(theme::chip),
                 space::horizontal(),
-                text(format!("{} download", gb(m.download_bytes))).size(12).style(theme::muted),
+                text(trf("{size} download", &[("size", &gb(m.download_bytes))])).size(12).style(theme::muted),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
-            let mut info = column![title, text(m.summary).size(13).style(theme::muted)].spacing(6);
-            let memory = format!("Needs about {} of free memory.", gb(need));
+            let mut info = column![title, text(tr(m.summary)).size(13).style(theme::muted)].spacing(6);
             info = info.push(if fits {
-                text(memory).size(12).style(theme::muted)
+                text(trf("Needs about {memory} of free memory.", &[("memory", &gb(need))])).size(12).style(theme::muted)
             } else {
-                text(format!("{memory} This computer has {} in total, so it would be very slow or fail to load.", gb(total_ram))).size(12).style(theme::warn_text)
+                text(trf(
+                    "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.",
+                    &[("memory", &gb(need)), ("total", &gb(total_ram))],
+                ))
+                .size(12)
+                .style(theme::warn_text)
             });
             if let Some(d) = self.download.as_ref().filter(|d| d.job == Job::Catalog(i)) {
-                let (done, total, status) = d.progress.as_ref().map(|p| (p.done, p.total.max(1), p.status.clone())).unwrap_or((0, 1, "Starting...".into()));
+                let (done, total, status) = d.progress.as_ref().map(|p| (p.done, p.total.max(1), p.status.clone())).unwrap_or((0, 1, tr("Starting...").into()));
                 info = info.push(progress_bar(0.0..=total as f32, done as f32).girth(6).style(theme::meter));
-                info = info.push(text(format!("{status}: {} of {}", gb(done), gb(total))).size(12).style(theme::muted));
+                info = info.push(text(trf("{status}: {done} of {total}", &[("status", &status), ("done", &gb(done)), ("total", &gb(total))])).size(12).style(theme::muted));
             } else if self.queue.contains(&Job::Catalog(i)) {
-                info = info.push(text("Waiting...").size(12).style(theme::muted));
+                info = info.push(text(tr("Waiting...")).size(12).style(theme::muted));
             }
             let pick = checkbox(self.selected[i]).on_toggle_maybe(self.download.is_none().then_some(move |on| Msg::Toggle(i, on))).style(theme::check);
             let card = container(row![pick, info.width(Fill)].spacing(12)).padding(14).width(Fill);
@@ -221,18 +233,27 @@ impl Setup {
         let total: u64 = CATALOG.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(m, _)| m.download_bytes).sum();
         let mut actions = row![].spacing(10).align_y(Alignment::Center);
         actions = actions.push(if busy {
-            button(text("Stop the download").size(14)).padding([8, 16]).style(theme::secondary).on_press(Msg::Cancel)
+            button(text(tr("Stop the download")).size(14)).padding([8, 16]).style(theme::secondary).on_press(Msg::Cancel)
         } else {
-            button(text(format!("Download {}", gb(total))).size(14)).padding([8, 16]).style(theme::primary).on_press_maybe(any.then_some(Msg::Start))
+            button(text(trf("Download {size}", &[("size", &gb(total))])).size(14)).padding([8, 16]).style(theme::primary).on_press_maybe(any.then_some(Msg::Start))
         });
-        actions = actions.push(button(text("Use a hosted model with an API key").size(14)).padding([8, 16]).style(theme::secondary).on_press(Msg::UseHosted));
+        actions = actions.push(button(text(tr("Use a hosted model with an API key")).size(14)).padding([8, 16]).style(theme::secondary).on_press(Msg::UseHosted));
         actions = actions.push(space::horizontal());
-        actions = actions.push(button(text("Skip for now").size(13)).style(theme::link).on_press(Msg::Skip));
+        actions = actions.push(button(text(tr("Skip for now")).size(13)).style(theme::link).on_press(Msg::Skip));
+        let languages: Vec<&'static crate::i18n::Language> = crate::i18n::LANGUAGES.iter().collect();
+        let language = row![
+            icons::tinted(Icon::Globe, 18.0, |t| t.muted),
+            text(tr("Language")).size(14),
+            pick_list(languages, Some(crate::i18n::current()), Msg::Language).padding([6, 12]).text_size(14).style(theme::select).menu_style(theme::menu),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
         let mut col = column![
-            text("Choose the models to download").size(22).font(fonts::ui_semibold()),
-            text(format!(
-                "Scoobert runs Qwen models on this computer, so your code stays here. This computer has {} of memory. You can add or remove models later in Settings.",
-                gb(total_ram)
+            language,
+            text(tr("Choose the models to download")).size(22).font(fonts::ui_semibold()),
+            text(trf(
+                "Scoobert runs Qwen models on this computer, so your code stays here. This computer has {memory} of memory. You can add or remove models later in Settings.",
+                &[("memory", &gb(total_ram))]
             ))
             .size(14)
             .style(theme::muted),

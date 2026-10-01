@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod i18n;
 pub mod llama;
 pub mod notes;
 pub mod paths;

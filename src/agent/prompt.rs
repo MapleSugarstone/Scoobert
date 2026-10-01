@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::memory;
 use super::tools::Shell;
+use crate::i18n::Language;
 use crate::notes::Vault;
 use crate::notes::links::resolve_link;
 use crate::paths;
@@ -65,16 +66,48 @@ pub fn environment_block(cwd: &Path, notes_folder: &str, shell: &Shell) -> Strin
     out
 }
 
-/// Details for the end of the first user message, which change too often to cache: the date and recent work.
-pub fn session_block(cwd: &Path, notes_folder: &str) -> String {
+/// Details for the end of the first user message, which change too often to cache: the date, the language to
+/// write in, and recent work.
+pub fn session_block(cwd: &Path, notes_folder: &str, language: &Language) -> String {
     let vault = Vault::new(cwd.join(notes_folder));
     let recent = if !super::is_general(cwd) && vault.exists() { memory::recent_work(&vault) } else { String::new() };
     let mut out = format!("<session>\nDate: {}", chrono::Local::now().format("%Y-%m-%d"));
+    if language.code != "en" {
+        out.push_str(&format!("\n{}", language_line(language)));
+    }
     if !recent.is_empty() {
         out.push_str(&format!("\nRecent work:\n{recent}"));
     }
     out.push_str("\n</session>");
     out
+}
+
+/// Tells the model which language to write in. The instructions themselves stay in English, which small models
+/// follow best, so the saved prompt caches stay the same in every language.
+pub fn language_line(language: &Language) -> String {
+    format!("Language: {0}. Write your replies, summaries, titles, and notes in {0}. Keep code, commands, and file names as they are.", language.english)
+}
+
+/// The language a conversation last told the model to write in, by its English name.
+pub fn stated_language(c: &super::Conversation) -> Option<String> {
+    static LINE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"(?m)^(?:<language>)?Language: ([A-Za-z ]+)\. Write").unwrap());
+    let stated = |context: &str| LINE.captures(context).map(|m| m[1].to_string());
+    let in_messages = |messages: &[super::Message]| {
+        messages.iter().rev().find_map(|m| match m {
+            super::Message::User(u) => stated(&u.context),
+            _ => None,
+        })
+    };
+    // Messages after the summary are newer than its session block, and the ones before it are older.
+    let at = c.compaction.as_ref().map(|k| k.at.min(c.messages.len())).unwrap_or(0);
+    if let Some(found) = in_messages(&c.messages[at..]) {
+        return Some(found);
+    }
+    match &c.compaction {
+        // A session block names the language only when it is not English.
+        Some(k) if !k.context.is_empty() => Some(stated(&k.context).unwrap_or_else(|| "English".into())),
+        _ => in_messages(&c.messages[..at]),
+    }
 }
 
 /// Commands checked for when describing the computer to the model, with the argument that prints a version.

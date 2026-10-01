@@ -26,6 +26,7 @@ use iced::{Alignment, Element, Fill, Length, Size, Subscription, Task, Theme, sy
 
 use crate::agent::conversation::{Conversation, Image, Summary};
 use crate::agent::{Decision, Event, Host, ModelOption, Snapshot};
+use crate::i18n::{tr, trf};
 use crate::llama::{ServerStatus, SharedSettings};
 use crate::store::{Approvals, State, ThemeChoice, Thinking};
 use crate::update::Release;
@@ -169,6 +170,8 @@ pub enum Message {
     RemoveImage(usize),
     SetModel(ModelChoice),
     SetThinking(Thinking),
+    SetLanguage(&'static crate::i18n::Language),
+    LanguageMenu(bool),
     SetApprovals(Approvals),
     Approve(u64, Decision),
     Toggle(String),
@@ -230,6 +233,7 @@ pub struct App {
     update_progress: Option<(u64, u64)>,
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
+    language_menu: bool,
     /// The model whose saved prompts are being built ahead of time.
     preparing: Option<(String, u64)>,
     /// The conversation whose model and cached prompt were last loaded because the user started typing.
@@ -264,6 +268,7 @@ fn host_worker(seed: &HostSeed) -> impl Stream<Item = Message> + use<> {
 impl App {
     fn new() -> (App, Task<Message>) {
         let state = State::load();
+        crate::i18n::set(state.settings.language().code);
         let shared = Arc::new(RwLock::new(state.settings.clone()));
         let logo = image::Handle::from_bytes(include_bytes!("../../assets/logo.png").as_slice());
         let notes = notes::Pane::new(!state.notes_closed);
@@ -298,6 +303,7 @@ impl App {
             update_notice: None,
             update_progress: None,
             web_offer: false,
+            language_menu: false,
             rewind_files: true,
             warmed: None,
             preparing: None,
@@ -565,7 +571,7 @@ impl App {
 
             Message::AddProject => {
                 return Task::perform(
-                    async { rfd::AsyncFileDialog::new().set_title("Choose a project folder").pick_folder().await.map(|h| h.path().to_path_buf()) },
+                    async { rfd::AsyncFileDialog::new().set_title(tr("Choose a project folder")).pick_folder().await.map(|h| h.path().to_path_buf()) },
                     Message::ProjectPicked,
                 );
             }
@@ -686,7 +692,7 @@ impl App {
             Message::Rewound(Ok((snap, problems)), text) => {
                 self.chat = Some(Chat::from_snapshot(*snap));
                 self.composer = text_editor::Content::with_text(&text);
-                self.toast(if problems.is_empty() { "Rewound. Edit the message and send it again.".to_string() } else { problems.join(" ") });
+                self.toast(if problems.is_empty() { tr("Rewound. Edit the message and send it again.").to_string() } else { problems.join(" ") });
                 return Task::batch([self.load_sessions(), operation::focus(COMPOSER_ID)]);
             }
             Message::Rewound(Err(e), _) => self.toast(e),
@@ -740,9 +746,9 @@ impl App {
             Message::Send => return self.send(true),
             Message::Continue => {
                 let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut()) else { return Task::none() };
-                match host.prompt(&chat.id, "Continue".into(), Vec::new(), true) {
+                match host.prompt(&chat.id, tr("Continue").into(), Vec::new(), true) {
                     Ok(()) => {
-                        chat.pending = Some("Continue".into());
+                        chat.pending = Some(tr("Continue").into());
                         chat.running = true;
                         chat.interrupted = false;
                         chat.error = None;
@@ -769,8 +775,8 @@ impl App {
                 return Task::perform(
                     async {
                         let files = rfd::AsyncFileDialog::new()
-                            .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
-                            .set_title("Attach images")
+                            .add_filter(tr("Images"), &["png", "jpg", "jpeg", "gif", "webp"])
+                            .set_title(tr("Attach images"))
                             .pick_files()
                             .await
                             .unwrap_or_default();
@@ -845,6 +851,13 @@ impl App {
                 self.state.settings.approvals = a;
                 self.save();
             }
+            Message::SetLanguage(language) => {
+                crate::i18n::set(language.code);
+                self.state.settings.language = language.code.to_string();
+                self.language_menu = false;
+                self.save();
+            }
+            Message::LanguageMenu(open) => self.language_menu = open,
             Message::Approve(id, decision) => {
                 if let Some(host) = &self.host {
                     host.answer(id, decision);
@@ -862,7 +875,7 @@ impl App {
             }
             Message::Link(url) => return self.open_link(url),
             Message::Copy(text) => {
-                self.toast("Copied.");
+                self.toast(tr("Copied."));
                 return iced::clipboard::write(text);
             }
             Message::SaveAsNote(body) => {
@@ -910,7 +923,7 @@ impl App {
                 self.settings = None;
                 self.update_notice = Some(release);
             }
-            Message::Checked(Ok(None)) => self.toast(format!("Scoobert {} is the newest version.", env!("CARGO_PKG_VERSION"))),
+            Message::Checked(Ok(None)) => self.toast(trf("Scoobert {version} is the newest version.", &[("version", &env!("CARGO_PKG_VERSION"))])),
             Message::Checked(Err(e)) => self.toast(e),
             Message::InstallUpdate => {
                 if self.chat.as_ref().is_some_and(|c| c.running) {
@@ -949,7 +962,7 @@ impl App {
             Message::UpdateLaunched(Ok(())) => return self.window.map(window::close).unwrap_or_else(iced::exit),
             Message::UpdateLaunched(Err(e)) => {
                 self.update_progress = None;
-                self.toast(format!("Could not install the update. {e}"));
+                self.toast(trf("Could not install the update. {error}", &[("error", &e)]));
             }
             Message::OpenUrl(url) => {
                 if url.starts_with("https://") {
@@ -1038,7 +1051,7 @@ impl App {
         }
         let Some(host) = self.host.clone() else { return Task::none() };
         let Some(chat) = &mut self.chat else {
-            self.toast("Add a project folder first.");
+            self.toast(tr("Add a project folder first."));
             return Task::none();
         };
         if chat.running {
@@ -1094,12 +1107,12 @@ impl App {
                     chat.cwd = path.clone();
                     chat.file = file.clone();
                 }
-                self.toast(format!("Started the project {}", project_name(path)));
+                self.toast(trf("Started the project {name}", &[("name", &project_name(path))]));
                 self.notes.set_project(Some(path.join(&self.state.settings.notes_folder)));
                 return Task::batch([self.load_sessions(), self.notes.reload()]);
             }
             Event::NotesSaved { notes, .. } => {
-                self.toast(format!("Saved to notes: {}", notes.join(", ")));
+                self.toast(trf("Saved to notes: {notes}", &[("notes", &notes.join(", "))]));
                 return self.notes.reload();
             }
             _ => {}
@@ -1151,17 +1164,19 @@ impl App {
         };
         let mut layout = column![];
         if let Some(release) = &self.update_notice {
-            let mut bar = row![text(format!("Scoobert {} is available.", release.version)).size(13)].spacing(8).align_y(Alignment::Center);
+            let mut bar = row![text(trf("Scoobert {version} is available.", &[("version", &release.version)])).size(13)].spacing(8).align_y(Alignment::Center);
             match self.update_progress {
-                Some((done, total)) if total > 0 && done >= total => bar = bar.push(text("Installing. Scoobert restarts by itself.").size(13).style(theme::muted)),
-                Some((done, total)) if total > 0 => bar = bar.push(text(format!("Downloading, {}%", done * 100 / total)).size(13).style(theme::muted)),
-                Some(_) => bar = bar.push(text("Downloading").size(13).style(theme::muted)),
+                Some((done, total)) if total > 0 && done >= total => bar = bar.push(text(tr("Installing. Scoobert restarts by itself.")).size(13).style(theme::muted)),
+                Some((done, total)) if total > 0 => {
+                    bar = bar.push(text(trf("Downloading, {percent}%", &[("percent", &(done * 100 / total))])).size(13).style(theme::muted))
+                }
+                Some(_) => bar = bar.push(text(tr("Downloading")).size(13).style(theme::muted)),
                 None => {
                     // Only a copy that can replace itself gets an asset.
                     if release.asset.is_some() {
-                        bar = bar.push(button(text("Download and install").size(13)).padding([4, 12]).style(theme::primary).on_press(Message::InstallUpdate));
+                        bar = bar.push(button(text(tr("Download and install")).size(13)).padding([4, 12]).style(theme::primary).on_press(Message::InstallUpdate));
                     }
-                    bar = bar.push(button(text("Open the release page").size(13)).style(theme::link).on_press(Message::OpenUrl(release.page.clone())));
+                    bar = bar.push(button(text(tr("Open the release page")).size(13)).style(theme::link).on_press(Message::OpenUrl(release.page.clone())));
                     bar = bar.push(space::horizontal());
                     bar = bar.push(button(icon(Icon::Close, 14.0)).style(theme::ghost).on_press(Message::Update(None)));
                 }
@@ -1172,6 +1187,29 @@ impl App {
         let base = container(layout).width(Fill).height(Fill).style(theme::app);
 
         let mut layers = stack![base];
+        if self.language_menu {
+            let mut list = Column::new().spacing(2);
+            for language in crate::i18n::LANGUAGES {
+                let mark: Element<'_, Message> =
+                    if language == crate::i18n::current() { icons::tinted(Icon::Check, 14.0, |t| t.accent_ink).into() } else { space().width(14).into() };
+                list = list.push(
+                    button(row![text(language.name).size(13).width(Fill), mark].align_y(Alignment::Center))
+                        .width(Fill)
+                        .padding([6, 10])
+                        .style(theme::row_button)
+                        .on_press(Message::SetLanguage(language)),
+                );
+            }
+            // A click anywhere else closes the menu.
+            layers = layers.push(mouse_area(container(space()).width(Fill).height(Fill)).on_press(Message::LanguageMenu(false)));
+            // The right padding lines the menu up under the language button, left of Notes and the window controls.
+            layers = layers.push(
+                container(container(list).width(220).padding(4).style(theme::popover))
+                    .width(Fill)
+                    .align_x(Alignment::End)
+                    .padding(iced::Padding { top: 4.0, right: 250.0, ..iced::Padding::ZERO }),
+            );
+        }
         if let Some(panel) = &self.settings {
             let isolation = self.host.as_ref().map(|h| h.isolation.describe()).unwrap_or_default();
             let ctx = settings::ViewCtx { state: &self.state, isolation, models: &self.models, download: &self.setup.download, queue: &self.setup.queue };
@@ -1216,7 +1254,7 @@ impl App {
             label: if m.provider.is_empty() { m.label.clone() } else { format!("{} ({})", m.label, m.provider) },
         });
         let model_pick = pick_list(choices, selected, Message::SetModel)
-            .placeholder("No model")
+            .placeholder(tr("No model"))
             .width(Length::Shrink)
             .padding([5, 10])
             .text_size(13)
@@ -1224,9 +1262,9 @@ impl App {
             .menu_style(theme::menu);
         let thinking = self.chat.as_ref().map(|c| c.thinking).unwrap_or(self.state.settings.thinking);
         let reasoning = self.current_model().is_none_or(|m| m.reasoning);
-        let mut right = row![text("Model").size(13).style(theme::muted), model_pick].spacing(8).align_y(Alignment::Center);
+        let mut right = row![text(tr("Model")).size(13).style(theme::muted), model_pick].spacing(8).align_y(Alignment::Center);
         if reasoning {
-            right = right.push(text("Thinking").size(13).style(theme::muted));
+            right = right.push(text(tr("Thinking")).size(13).style(theme::muted));
             right = right.push(
                 pick_list(Thinking::ALL, Some(thinking), Message::SetThinking)
                     .padding([5, 10])
@@ -1235,9 +1273,17 @@ impl App {
                     .menu_style(theme::menu),
             );
         }
+        // The button shows a two-letter code so the top bar keeps room for the conversation title.
+        let code = crate::i18n::current().code.split('-').next().unwrap_or_default().to_uppercase();
+        right = right.push(
+            button(row![icon(Icon::Globe, 16.0), text(code).size(13)].spacing(6).align_y(Alignment::Center))
+                .padding([6, 10])
+                .style(if self.language_menu { theme::secondary } else { theme::ghost })
+                .on_press(Message::LanguageMenu(!self.language_menu)),
+        );
         let notes_style = if self.notes.open { theme::secondary } else { theme::ghost };
         right = right.push(
-            button(row![icon(Icon::Panel, 16.0), text("Notes").size(13)].spacing(6).align_y(Alignment::Center))
+            button(row![icon(Icon::Panel, 16.0), text(tr("Notes")).size(13)].spacing(6).align_y(Alignment::Center))
                 .padding([6, 12])
                 .style(notes_style)
                 .on_press(Message::Notes(notes::Msg::TogglePane)),
@@ -1260,14 +1306,14 @@ impl App {
 
     /// Where the open conversation lives: the project as a label that opens its folder, then the conversation title.
     fn location(&self) -> Element<'_, Message> {
-        let name = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| "Chats".into());
+        let name = self.current_project().map(|p| project_name(&p)).unwrap_or_else(|| tr("Chats").into());
         let place: Element<'_, Message> = match self.current_project() {
             Some(p) => tooltip(
                 button(row![icon(Icon::Folder, 14.0), text(name.clone()).size(13)].spacing(6).align_y(Alignment::Center))
                     .padding([4, 10])
                     .style(theme::place)
                     .on_press(Message::RevealProject(p)),
-                container(text("Show the project folder").size(12)).padding([4, 8]).style(theme::tooltip),
+                container(text(tr("Show the project folder")).size(12)).padding([4, 8]).style(theme::tooltip),
                 tooltip::Position::Bottom,
             )
             .into(),
@@ -1288,24 +1334,24 @@ impl App {
     }
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let new_button = button(row![icon(Icon::Plus, 16.0), text("New chat").size(14)].spacing(8).align_y(Alignment::Center))
+        let new_button = button(row![icon(Icon::Plus, 16.0), text(tr("New chat")).size(14)].spacing(8).align_y(Alignment::Center))
             .width(Fill)
             .padding([8, 14])
             .style(theme::secondary)
             .on_press(Message::NewChat);
         let header = row![
-            text("Projects").size(13).style(theme::muted),
+            text(tr("Projects")).size(13).style(theme::muted),
             space::horizontal(),
             tooltip(
                 button(icon(Icon::FolderOpen, 16.0)).padding(4).style(theme::ghost).on_press(Message::AddProject),
-                container(text("Add a project folder").size(12)).padding([4, 8]).style(theme::tooltip),
+                container(text(tr("Add a project folder")).size(12)).padding([4, 8]).style(theme::tooltip),
                 tooltip::Position::Bottom,
             ),
         ]
         .align_y(Alignment::Center)
         .padding([0, 4]);
 
-        let search = text_input("Search projects", &self.search)
+        let search = text_input(tr("Search projects"), &self.search)
             .id(PROJECT_SEARCH_ID)
             .on_input(Message::SearchProjects)
             .size(13)
@@ -1319,7 +1365,7 @@ impl App {
         }
         // Chats is listed first, as a project without a folder.
         let general = current.is_none();
-        let chats = button(text("Chats").size(14).font(if general { fonts::ui_bold() } else { fonts::ui() }))
+        let chats = button(text(tr("Chats")).size(14).font(if general { fonts::ui_bold() } else { fonts::ui() }))
             .width(Fill)
             .padding([6, 4])
             .style(theme::row_button)
@@ -1328,7 +1374,7 @@ impl App {
             space::horizontal(),
             tooltip(
                 button(icon(Icon::Plus, 14.0)).padding(4).style(theme::ghost).on_press(Message::NewConversationIn(None)),
-                container(text("New chat").size(12)).padding([4, 8]).style(theme::tooltip),
+                container(text(tr("New chat")).size(12)).padding([4, 8]).style(theme::tooltip),
                 tooltip::Position::Bottom,
             ),
         ]
@@ -1349,7 +1395,7 @@ impl App {
                 space::horizontal(),
                 tooltip(
                     button(icon(Icon::Plus, 14.0)).padding(4).style(theme::ghost).on_press(Message::NewConversationIn(Some(p.path.clone()))),
-                    container(text("New conversation").size(12)).padding([4, 8]).style(theme::tooltip),
+                    container(text(tr("New conversation")).size(12)).padding([4, 8]).style(theme::tooltip),
                     tooltip::Position::Bottom,
                 ),
                 button(icon(Icon::Folder, 14.0)).padding(4).style(theme::ghost).on_press(Message::RevealProject(p.path.clone())),
@@ -1365,7 +1411,7 @@ impl App {
             }
         }
         if self.state.projects.is_empty() {
-            list = list.push(container(text("Add an existing folder with the folder button, or let Scoobert start one.").size(12).style(theme::muted)).padding([4, 4]));
+            list = list.push(container(text(tr("Add an existing folder with the folder button, or let Scoobert start one.")).size(12).style(theme::muted)).padding([4, 4]));
         }
         self.sidebar_frame(new_button.into(), search.into(), list)
     }
@@ -1377,7 +1423,7 @@ impl App {
         let status: Element<'_, Message> = match &self.preparing {
             Some(_) => tooltip(
                 status,
-                container(text("Building a saved prompt so new conversations start quickly. This happens once per model.").size(12).width(260)).padding([4, 8]).style(theme::tooltip),
+                container(text(tr("Building a saved prompt so new conversations start quickly. This happens once per model.")).size(12).width(260)).padding([4, 8]).style(theme::tooltip),
                 tooltip::Position::Top,
             )
             .into(),
@@ -1443,8 +1489,8 @@ impl App {
         let mut col = Column::new().spacing(2);
         let mut found = false;
         let place_row = |label: String, msg: Message| button(text(label).size(14)).width(Fill).padding([6, 4]).style(theme::row_button).on_press(msg);
-        if "chats".contains(&query) {
-            col = col.push(place_row("Chats".into(), Message::SelectNoProject));
+        if "chats".contains(&query) || tr("Chats").to_lowercase().contains(&query) {
+            col = col.push(place_row(tr("Chats").into(), Message::SelectNoProject));
             found = true;
         }
         for p in self.state.projects.iter().filter(|p| p.name().to_lowercase().contains(&query)) {
@@ -1452,15 +1498,15 @@ impl App {
             found = true;
         }
         let Some(index) = &self.search_index else {
-            return col.push(container(text("Searching conversations").size(12).style(theme::muted)).padding([6, 4])).into();
+            return col.push(container(text(tr("Searching conversations")).size(12).style(theme::muted)).padding([6, 4])).into();
         };
         let hits: Vec<&(Option<PathBuf>, Summary)> = index.iter().filter(|(_, s)| s.title.to_lowercase().contains(&query)).take(50).collect();
         if !hits.is_empty() {
-            col = col.push(container(text("Conversations").size(13).style(theme::muted)).padding(iced::Padding { top: 10.0, right: 4.0, bottom: 2.0, left: 4.0 }));
+            col = col.push(container(text(tr("Conversations")).size(13).style(theme::muted)).padding(iced::Padding { top: 10.0, right: 4.0, bottom: 2.0, left: 4.0 }));
             found = true;
         }
         for (place, s) in hits {
-            let project = place.as_deref().map(project_name).unwrap_or_else(|| "Chats".into());
+            let project = place.as_deref().map(project_name).unwrap_or_else(|| tr("Chats").into());
             let label = column![
                 container(text(clip(&s.title, 34)).size(13).wrapping(text::Wrapping::None)).width(Fill).clip(true),
                 row![text(project).size(12).style(theme::muted), space::horizontal(), text(ago(s.modified)).size(12).style(theme::muted)],
@@ -1469,7 +1515,7 @@ impl App {
             col = col.push(button(label).width(Fill).padding([6, 10]).style(theme::list_item(false)).on_press(Message::OpenIn(place.clone(), s.file.clone())));
         }
         if !found {
-            col = col.push(container(text("No projects or conversations match.").size(12).style(theme::muted)).padding([6, 4]));
+            col = col.push(container(text(tr("No projects or conversations match.")).size(12).style(theme::muted)).padding([6, 4]));
         }
         col.into()
     }
@@ -1479,7 +1525,7 @@ impl App {
         if let Some((file, value)) = &self.renaming
             && *file == s.file
         {
-            return text_input("Conversation name", value)
+            return text_input(tr("Conversation name"), value)
                 .id(RENAME_ID)
                 .on_input(Message::RenameInput)
                 .on_submit(Message::CommitRename)
@@ -1513,39 +1559,39 @@ impl App {
         if let Some(m) = self.current_model()
             && !m.provider.is_empty()
         {
-            return (|t| t.ok, format!("Using {}", m.provider));
+            return (|t| t.ok, trf("Using {provider}", &[("provider", &m.provider)]));
         }
         if let Some((m, _)) = &self.preparing {
-            return (|t| t.warn, format!("Preparing {m}"));
+            return (|t| t.warn, trf("Preparing {model}", &[("model", m)]));
         }
         match &self.server {
-            ServerStatus::Stopped => (|t| t.muted, "Model not loaded".into()),
-            ServerStatus::Loading(m) => (|t| t.warn, format!("Loading {m}")),
-            ServerStatus::Ready(m) => (|t| t.ok, format!("{m} loaded")),
-            ServerStatus::Error(_) => (|t| t.danger, "The model stopped".into()),
+            ServerStatus::Stopped => (|t| t.muted, tr("Model not loaded").into()),
+            ServerStatus::Loading(m) => (|t| t.warn, trf("Loading {model}", &[("model", m)])),
+            ServerStatus::Ready(m) => (|t| t.ok, trf("{model} loaded", &[("model", m)])),
+            ServerStatus::Error(_) => (|t| t.danger, tr("The model stopped").into()),
         }
     }
 
     fn main_area(&self, theme: &Theme) -> Element<'_, Message> {
         let general = self.current_project().is_none();
         let intro = if general {
-            "Ask anything. When a task needs its own files, Scoobert starts a project folder for it, or you can pick a project on the left."
+            tr("Ask anything. When a task needs its own files, Scoobert starts a project folder for it, or you can pick a project on the left.")
         } else {
-            "Scoobert reads and edits files in this project, runs commands, and keeps notes as it works."
+            tr("Scoobert reads and edits files in this project, runs commands, and keeps notes as it works.")
         };
         let transcript: Element<'_, Message> = match &self.chat {
             Some(c) if !c.is_empty() => c.view(chat::markdown_settings(theme)),
             Some(_) => center(
                 column![
                     self.logo(96.0),
-                    text("What should Scoobert work on?").size(18).font(fonts::ui_semibold()),
+                    text(tr("What should Scoobert work on?")).size(18).font(fonts::ui_semibold()),
                     text(intro).size(13).style(theme::muted),
                 ]
                 .spacing(10)
                 .align_x(Alignment::Center),
             )
             .into(),
-            None => center(text("Opening...").style(theme::muted)).into(),
+            None => center(text(tr("Opening...")).style(theme::muted)).into(),
         };
         let mut col = column![transcript];
         if let Some(e) = self.server_error() {
@@ -1568,7 +1614,7 @@ impl App {
         let running = self.chat.as_ref().is_some_and(|c| c.running);
         let input = editor(&self.composer)
             .id(COMPOSER_ID)
-            .placeholder("Ask Scoobert")
+            .placeholder(tr("Ask Scoobert"))
             .on_action(Message::Composer)
             .key_binding(|kp| {
                 if !matches!(kp.status, text_editor::Status::Focused { .. }) {
@@ -1589,7 +1635,7 @@ impl App {
         for (i, _) in self.images.iter().enumerate() {
             attachments = attachments.push(
                 container(
-                    row![text(format!("Image {}", i + 1)).size(12), button(icon(Icon::Close, 12.0)).padding(2).style(theme::ghost).on_press(Message::RemoveImage(i))]
+                    row![text(trf("Image {number}", &[("number", &(i + 1))])).size(12), button(icon(Icon::Close, 12.0)).padding(2).style(theme::ghost).on_press(Message::RemoveImage(i))]
                         .spacing(4)
                         .align_y(Alignment::Center),
                 )
@@ -1599,7 +1645,7 @@ impl App {
         }
         let vision = self.current_model().is_some_and(|m| m.vision);
         let action: Element<'_, Message> = if running {
-            button(row![icons::tinted(Icon::Stop, 15.0, |_| iced::Color::WHITE), text("Stop").size(14).font(fonts::ui_semibold())].spacing(6).align_y(Alignment::Center))
+            button(row![icons::tinted(Icon::Stop, 15.0, |_| iced::Color::WHITE), text(tr("Stop")).size(14).font(fonts::ui_semibold())].spacing(6).align_y(Alignment::Center))
                 .padding([7, 18])
                 .style(theme::stop)
                 .on_press(Message::Stop)
@@ -1607,7 +1653,7 @@ impl App {
         } else {
             let can_send = !self.composer.text().trim().is_empty() || !self.images.is_empty();
             let arrow = if can_send { icons::tinted(Icon::ArrowRight, 14.0, |t| t.accent_text) } else { icons::tinted(Icon::ArrowRight, 14.0, |t| t.muted) };
-            button(row![text("Send").size(13), arrow].spacing(6).align_y(Alignment::Center))
+            button(row![text(tr("Send")).size(13), arrow].spacing(6).align_y(Alignment::Center))
                 .padding([6, 14])
                 .style(theme::primary)
                 .on_press_maybe(can_send.then_some(Message::Send))
@@ -1618,12 +1664,12 @@ impl App {
             tools = tools.push(
                 tooltip(
                     button(icon(Icon::Image, 16.0)).padding(4).style(theme::ghost).on_press(Message::AttachImage),
-                    container(text("Attach images").size(12)).padding([4, 8]).style(theme::tooltip),
+                    container(text(tr("Attach images")).size(12)).padding([4, 8]).style(theme::tooltip),
                     tooltip::Position::Top,
                 ),
             );
         }
-        tools = tools.push(text("Enter to send, Shift+Enter for a new line").size(12).style(theme::muted));
+        tools = tools.push(text(tr("Enter to send, Shift+Enter for a new line")).size(12).style(theme::muted));
         tools = tools.push(space::horizontal());
         tools = tools.push(action);
         let mut col = Column::new().spacing(10);
@@ -1631,11 +1677,11 @@ impl App {
             col = col.push(
                 container(
                     column![
-                        text("This sounds like it needs the web, and web search is off.").size(13).font(fonts::ui_semibold()),
-                        text("With it on, Scoobert searches DuckDuckGo and reads pages. Your searches leave your computer.").size(12).style(theme::muted),
+                        text(tr("This sounds like it needs the web, and web search is off.")).size(13).font(fonts::ui_semibold()),
+                        text(tr("With it on, Scoobert searches DuckDuckGo and reads pages. Your searches leave your computer.")).size(12).style(theme::muted),
                         row![
-                            button(text("Turn on web search and send").size(13)).padding([5, 12]).style(theme::primary).on_press(Message::WebOffer(true)),
-                            button(text("Send without it").size(13)).padding([5, 12]).style(theme::secondary).on_press(Message::WebOffer(false)),
+                            button(text(tr("Turn on web search and send")).size(13)).padding([5, 12]).style(theme::primary).on_press(Message::WebOffer(true)),
+                            button(text(tr("Send without it")).size(13)).padding([5, 12]).style(theme::secondary).on_press(Message::WebOffer(false)),
                         ]
                         .spacing(8),
                     ]
@@ -1659,7 +1705,7 @@ impl App {
         let mut r = row![].spacing(10).align_y(Alignment::Center);
         if context > 0 {
             r = r.push(progress_bar(0.0..=context as f32, used.min(context) as f32).length(100).girth(4).style(theme::meter));
-            r = r.push(text(format!("{} of {} context", short_count(used), short_count(context))).size(12).style(theme::muted));
+            r = r.push(text(trf("{used} of {total} context", &[("used", &short_count(used)), ("total", &short_count(context))])).size(12).style(theme::muted));
         }
         r = r.push(space::horizontal());
         r = r.push(
@@ -1727,33 +1773,45 @@ fn resize_edges<'a>() -> Element<'a, Message> {
 fn confirm_dialog<'a>(c: &Confirm, rewind_files: bool) -> Element<'a, Message> {
     if let Confirm::Rewind { files, .. } = c {
         let mut col = column![
-            text("Rewind to this message?").size(16).font(fonts::ui_semibold()),
-            text("Scoobert stops what it is doing and forgets everything after this message. The message goes back into the box so you can change it and send it again.").size(13).style(theme::muted),
+            text(tr("Rewind to this message?")).size(16).font(fonts::ui_semibold()),
+            text(tr("Scoobert stops what it is doing and forgets everything after this message. The message goes back into the box so you can change it and send it again.")).size(13).style(theme::muted),
         ]
         .spacing(12)
         .padding(20);
         if *files > 0 {
-            let label = if *files == 1 { "Also undo the change to 1 file made after this message".to_string() } else { format!("Also undo the changes to {files} files made after this message") };
+            let label = if *files == 1 {
+                tr("Also undo the change to 1 file made after this message").to_string()
+            } else {
+                trf("Also undo the changes to {files} files made after this message", &[("files", files)])
+            };
             col = col.push(iced::widget::checkbox(rewind_files).label(label).on_toggle(Message::RewindFiles).text_size(13).style(theme::check));
-            col = col.push(text("Commands Scoobert ran cannot be undone.").size(12).style(theme::muted));
+            col = col.push(text(tr("Commands Scoobert ran cannot be undone.")).size(12).style(theme::muted));
         }
         col = col.push(
             row![
                 space::horizontal(),
-                button(text("Cancel").size(13)).padding([6, 14]).style(theme::secondary).on_press(Message::CloseModal),
-                button(text("Rewind").size(13)).padding([6, 14]).style(theme::primary).on_press(Message::Confirmed(c.clone())),
+                button(text(tr("Cancel")).size(13)).padding([6, 14]).style(theme::secondary).on_press(Message::CloseModal),
+                button(text(tr("Rewind")).size(13)).padding([6, 14]).style(theme::primary).on_press(Message::Confirmed(c.clone())),
             ]
             .spacing(8),
         );
         return col.into();
     }
     let (title, body, action) = match c {
-        Confirm::DeleteConversation(_) => ("Delete this conversation?", "The conversation file moves to the trash, so you can restore it from there.", "Delete"),
-        Confirm::RemoveProject(_) => ("Remove this project from the list?", "Scoobert forgets the folder but keeps its files, notes, and conversations.", "Remove"),
+        Confirm::DeleteConversation(_) => (
+            tr("Delete this conversation?"),
+            tr("The conversation file moves to the trash, so you can restore it from there."),
+            tr("Delete"),
+        ),
+        Confirm::RemoveProject(_) => (
+            tr("Remove this project from the list?"),
+            tr("Scoobert forgets the folder but keeps its files, notes, and conversations."),
+            tr("Remove"),
+        ),
         Confirm::InstallUpdate => (
-            "Update while Scoobert is working?",
-            "Scoobert downloads the update, then stops the task and restarts to install it. Select Continue afterward to pick the task up again.",
-            "Update",
+            tr("Update while Scoobert is working?"),
+            tr("Scoobert downloads the update, then stops the task and restarts to install it. Select Continue afterward to pick the task up again."),
+            tr("Update"),
         ),
         Confirm::Rewind { .. } => unreachable!("handled above"),
     };
@@ -1762,7 +1820,7 @@ fn confirm_dialog<'a>(c: &Confirm, rewind_files: bool) -> Element<'a, Message> {
         text(body).size(13).style(theme::muted),
         row![
             space::horizontal(),
-            button(text("Cancel").size(13)).padding([6, 14]).style(theme::secondary).on_press(Message::CloseModal),
+            button(text(tr("Cancel")).size(13)).padding([6, 14]).style(theme::secondary).on_press(Message::CloseModal),
             button(text(action).size(13)).padding([6, 14]).style(theme::danger).on_press(Message::Confirmed(c.clone())),
         ]
         .spacing(8),

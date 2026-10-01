@@ -19,6 +19,17 @@ pub fn work_area() -> Option<(f32, f32, f32, f32)> {
     imp::work_area()
 }
 
+/// The language code the Windows installer wrote beside the program, if any.
+pub fn installer_language() -> Option<String> {
+    static FOUND: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let file = std::env::current_exe().ok()?.parent()?.join("language.txt");
+            Some(std::fs::read_to_string(file).ok()?.trim().to_string()).filter(|c| !c.is_empty())
+        })
+        .clone()
+}
+
 #[cfg(windows)]
 mod imp {
     use windows_sys::Win32::Foundation::{CloseHandle, FALSE, RECT};

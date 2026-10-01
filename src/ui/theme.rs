@@ -219,6 +219,18 @@ pub fn tooltip(theme: &Theme) -> container::Style {
     toast(theme)
 }
 
+/// A menu that opens under a top bar button.
+pub fn popover(theme: &Theme) -> container::Style {
+    let t = tokens(theme);
+    container::Style {
+        background: Some(t.surface.into()),
+        border: line_border(t, RADIUS),
+        text_color: Some(t.text),
+        shadow: Shadow { color: t.shadow, offset: Vector::new(0.0, 4.0), blur_radius: 16.0 },
+        ..Default::default()
+    }
+}
+
 /// The project label in the top bar: a filled pill that lightens on hover.
 pub fn place(theme: &Theme, status: button::Status) -> button::Style {
     let t = tokens(theme);

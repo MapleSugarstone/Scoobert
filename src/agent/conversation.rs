@@ -411,7 +411,7 @@ impl Conversation {
     }
 
     pub fn display_title(&self) -> String {
-        self.title.clone().unwrap_or_else(|| first_user_text(&self.messages).unwrap_or_else(|| "New conversation".into()))
+        self.title.clone().unwrap_or_else(|| first_user_text(&self.messages).unwrap_or_else(|| crate::i18n::tr("New conversation").into()))
     }
 
     /// Tokens in the context after the last reply, from the provider's own count.
@@ -511,7 +511,7 @@ pub fn quick_title(text: &str) -> String {
     let mut chars = title.chars();
     match chars.next() {
         Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => "New conversation".into(),
+        None => crate::i18n::tr("New conversation").into(),
     }
 }
 

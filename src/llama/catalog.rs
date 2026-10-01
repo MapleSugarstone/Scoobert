@@ -2,6 +2,8 @@
 //! Scoobert was tested with, and `name` matches the file name the download produces. `kv_bytes_per_token`
 //! estimates memory before the download; afterward Scoobert reads the real value from the file.
 
+use crate::i18n::key;
+
 pub struct CatalogModel {
     pub name: &'static str,
     pub label: &'static str,
@@ -21,7 +23,7 @@ pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         name: "Qwen3.5-9B-Q4_K_M",
         label: "Qwen3.5 9B",
-        tier: "Fast",
+        tier: key("Fast"),
         spec: "unsloth/Qwen3.5-9B-GGUF:Q4_K_M",
         revision: "3885219b6810b007914f3a7950a8d1b469d598a5",
         projector: true,
@@ -30,12 +32,12 @@ pub const CATALOG: &[CatalogModel] = &[
         projector_bytes: 920_000_000,
         kv_bytes_per_token: 32_768,
         context_size: 32_768,
-        summary: "Generates about four words per second on a laptop CPU and reads screenshots, but makes more mistakes than the larger models.",
+        summary: key("Generates about four words per second on a laptop CPU and reads screenshots, but makes more mistakes than the larger models."),
     },
     CatalogModel {
         name: "Qwen3.8-27B-UD-IQ4_XS",
         label: "Qwen3.8 27B",
-        tier: "Smart",
+        tier: key("Smart"),
         spec: "unsloth/Qwen3.8-27B-GGUF:UD-IQ4_XS",
         revision: "4ca720788d1e01f1bff70c033e0d0028fd02e502",
         projector: false,
@@ -44,12 +46,12 @@ pub const CATALOG: &[CatalogModel] = &[
         projector_bytes: 0,
         kv_bytes_per_token: 69_632,
         context_size: 16_384,
-        summary: "The newest Qwen model at 4-bit precision. A much better coder than the 9B, at about one word per second on a laptop CPU.",
+        summary: key("The newest Qwen model at 4-bit precision. A much better coder than the 9B, at about one word per second on a laptop CPU."),
     },
     CatalogModel {
         name: "Qwen3.8-27B-UD-Q6_K",
-        label: "Qwen3.8 27B, high precision",
-        tier: "Smarter",
+        label: key("Qwen3.8 27B, high precision"),
+        tier: key("Smarter"),
         spec: "unsloth/Qwen3.8-27B-GGUF:UD-Q6_K",
         revision: "4ca720788d1e01f1bff70c033e0d0028fd02e502",
         projector: false,
@@ -58,12 +60,12 @@ pub const CATALOG: &[CatalogModel] = &[
         projector_bytes: 0,
         kv_bytes_per_token: 69_632,
         context_size: 32_768,
-        summary: "The same model at 6-bit precision, close to full quality. It is slower than the 4-bit version and suits computers with 32 GB of RAM or more.",
+        summary: key("The same model at 6-bit precision, close to full quality. It is slower than the 4-bit version and suits computers with 32 GB of RAM or more."),
     },
     CatalogModel {
         name: "Qwen3.8-Flash-Next-UD-IQ3_XXS",
         label: "Qwen3.8 Flash-Next 125B",
-        tier: "Best",
+        tier: key("Best"),
         spec: "unsloth/Qwen3.8-Flash-Next-GGUF:UD-IQ3_XXS",
         revision: "38bb39ee97821de2c9009abb7e93950eec396e66",
         projector: true,
@@ -72,7 +74,7 @@ pub const CATALOG: &[CatalogModel] = &[
         projector_bytes: 900_000_000,
         kv_bytes_per_token: 131_072,
         context_size: 32_768,
-        summary: "The largest Qwen model, for workstations with 96 GB of RAM or more. It uses only about 6 billion of its parameters per word, so it can generate faster than the 27B on a desktop with enough memory. Not tested with Scoobert yet.",
+        summary: key("The largest Qwen model, for workstations with 96 GB of RAM or more. It uses only about 6 billion of its parameters per word, so it can generate faster than the 27B on a desktop with enough memory. Not tested with Scoobert yet."),
     },
 ];
 

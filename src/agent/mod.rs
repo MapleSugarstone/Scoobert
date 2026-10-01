@@ -25,6 +25,7 @@ use providers::{Api, Provider};
 use stream::{ChatRequest, Delta, Endpoint};
 use tools::Shell;
 
+use crate::i18n::{tr, trf};
 use crate::llama::{LlamaServer, LocalModel, ServerStatus, SharedSettings};
 use crate::store::{Approvals, HostedModel, Settings, Thinking};
 use crate::util::{is_cancelled, now_millis, thousands};
@@ -160,7 +161,7 @@ const SAVE_DURING_TASK: std::time::Duration = std::time::Duration::from_secs(300
 /// Thinking tokens a local model may spend on a side request before it must answer.
 const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
-const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Check what is already done first, because a file may be only partly written.</interrupted>";
+const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again. If you were writing a file when it stopped, check only that file, because it may be partly written.</interrupted>";
 /// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
 const INTERRUPTED: &str = "<interrupted>The user stopped your previous reply before it finished. Follow this message. Do not resume the stopped work unless this message asks you to.</interrupted>";
 
@@ -222,7 +223,7 @@ impl Host {
         };
         self.keys.lock().unwrap().insert(provider.to_string(), key.map(String::from));
         match (stored, key) {
-            (Err(err), Some(_)) => Some(format!("{err:#}. The key works until Scoobert closes.")),
+            (Err(err), Some(_)) => Some(trf("{error}. The key works until Scoobert closes.", &[("error", &format!("{err:#}"))])),
             (Err(err), None) => Some(format!("{err:#}")),
             (Ok(()), _) => None,
         }
@@ -380,7 +381,7 @@ impl Host {
                 Err(_) => s.model.clone(),
             };
             if file.is_some() && fallback != conv.model {
-                notice = Some(format!("{} is not available, so this conversation now uses {fallback}.", conv.model));
+                notice = Some(trf("{model} is not available, so this conversation now uses {fallback}.", &[("model", &conv.model), ("fallback", &fallback)]));
             }
             let _ = conv.set_model(&fallback);
         }
@@ -608,8 +609,17 @@ impl Host {
         let mut environment = String::new();
         if first {
             environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
-            let session = prompt::session_block(&cwd, &s.notes_folder);
+            let session = prompt::session_block(&cwd, &s.notes_folder, s.language());
             context = if context.is_empty() { session } else { format!("{context}\n\n{session}") };
+        } else {
+            // A language picked after the conversation started is announced on the next message, which keeps the
+            // cached start of the conversation as it is.
+            let language = s.language();
+            let stated = prompt::stated_language(&live.conv.lock().unwrap());
+            if stated.as_deref().unwrap_or("English") != language.english {
+                let note = format!("<language>{}</language>", prompt::language_line(language));
+                context = if context.is_empty() { note } else { format!("{note}\n\n{context}") };
+            }
         }
         // Surrounding whitespace would change how the start of the text tokenizes and miss the saved cache.
         let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, time: now_millis() });
@@ -622,7 +632,7 @@ impl Host {
         if let Target::Local(model) = &target {
             let wait = live.background.try_lock().is_err();
             if wait {
-                self.emit(Event::Activity { conv: id.into(), text: Some("Getting ready...".into()) });
+                self.emit(Event::Activity { conv: id.into(), text: Some(tr("Getting ready...").into()) });
             }
             let _guard = tokio::select! {
                 g = live.background.lock() => g,
@@ -635,7 +645,8 @@ impl Host {
                 self.rt.spawn(async move {
                     let start = std::time::Instant::now();
                     loop {
-                        let _ = events.send(Event::Activity { conv: conv.clone(), text: Some(format!("Loading {name}: {} s", start.elapsed().as_secs())) });
+                        let text = trf("Loading {model}: {secs} s", &[("model", &name), ("secs", &start.elapsed().as_secs())]);
+                        let _ = events.send(Event::Activity { conv: conv.clone(), text: Some(text) });
                         tokio::select! {
                             _ = ticker.cancelled() => break,
                             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
@@ -677,7 +688,7 @@ impl Host {
                 }
                 eprintln!("[cache] {err:#}");
             }
-            self.emit(Event::Activity { conv: id.into(), text: Some("Reading...".into()) });
+            self.emit(Event::Activity { conv: id.into(), text: Some(tr("Reading...").into()) });
             let (system, messages, thinking) = self.request_parts(live);
             let tools = self.tool_specs(live);
             let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
@@ -758,15 +769,28 @@ impl Host {
             let conv = id.to_string();
             let events = self.events.clone();
             let mut started = false;
+            let (mut thinking, mut text) = (String::new(), String::new());
             let result = stream::send(&self.http, ep, body, cancel, |delta| {
                 if !started && !matches!(delta, Delta::Progress { .. }) {
                     started = true;
                     let _ = events.send(Event::Activity { conv: conv.clone(), text: None });
                 }
+                match &delta {
+                    Delta::Thinking(t) => thinking.push_str(t),
+                    Delta::Text(t) => text.push_str(t),
+                    _ => {}
+                }
                 let _ = events.send(Event::Delta { conv: conv.clone(), delta });
             })
             .await;
             ticker.cancel();
+            // A stopped reply keeps what it wrote, so the next turn builds on that reasoning instead of repeating it.
+            let result = match result {
+                Err(err) if is_cancelled(&err) && !(thinking.trim().is_empty() && text.trim().is_empty()) => {
+                    Ok(AssistantMessage { stop: StopReason::Aborted, thinking, text, model: ep.model.clone(), time: now_millis(), ..Default::default() })
+                }
+                other => other,
+            };
             let retry = match &result {
                 Err(err) => !is_cancelled(err) && transient(&format!("{err:#}")),
                 // A connection that dropped before anything arrived is worth another try.
@@ -777,7 +801,7 @@ impl Host {
             }
             attempt += 1;
             let wait = std::time::Duration::from_secs(5 * 3u64.pow(attempt - 1));
-            self.emit(Event::Activity { conv: id.into(), text: Some(format!("The request failed. Trying again in {} seconds...", wait.as_secs())) });
+            self.emit(Event::Activity { conv: id.into(), text: Some(trf("The request failed. Trying again in {secs} seconds...", &[("secs", &wait.as_secs())])) });
             tokio::select! {
                 _ = tokio::time::sleep(wait) => {}
                 _ = cancel.cancelled() => return Err(crate::util::Cancelled.into()),
@@ -833,13 +857,14 @@ impl Host {
         let start = conv.compaction.as_ref().map(|c| c.kept_from).unwrap_or(0);
         let keep_chars = (self.context_window(target) as f64 * KEEP_SHARE * CHARS_PER_TOKEN) as usize;
         let Some(kept_from) = kept_from(&conv.messages, start, keep_chars) else {
-            bail!("The last message is too long for {}'s context. Start a new conversation, or pick a model with a larger context in Settings.", ep.model);
+            bail!(trf("The last message is too long for {model}'s context. Start a new conversation, or pick a model with a larger context in Settings.", &[("model", &ep.model)]));
         };
         let (system, view, _) = self.request_parts(live);
         // The view starts with the previous summary when there is one, and maps conversation indexes after it.
         let offset = if conv.compaction.is_some() { 1 } else { 0 };
         let mut messages: Vec<Message> = if extend { view } else { view[..offset + (kept_from - start)].to_vec() };
-        messages.push(Message::User(UserMessage { text: SUMMARY_PROMPT.into(), ..Default::default() }));
+        let question = in_language(SUMMARY_PROMPT, "Write the summary in {language}, and keep the Title: label in English.", &self.settings());
+        messages.push(Message::User(UserMessage { text: question, ..Default::default() }));
         let tools = self.tool_specs(live);
         let (thinking, thinking_budget) = side_thinking(ep, live);
         let max_tokens = if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED };
@@ -851,7 +876,7 @@ impl Host {
 
         // A local model continues the summary an interrupted attempt started, when it covers the same messages.
         let draft = conv.summary_draft.clone().filter(|d| ep.local && d.start == start && d.kept_from == kept_from);
-        let label = if draft.is_some() { "Continuing the summary of earlier messages" } else { "Summarizing earlier messages to make room" };
+        let label = tr(if draft.is_some() { "Continuing the summary of earlier messages" } else { "Summarizing earlier messages to make room" });
         self.emit(Event::Activity { conv: id.into(), text: Some(label.into()) });
         let written = Mutex::new(draft.as_ref().map(|d| d.text.clone()).unwrap_or_default());
         let pieces = AtomicU64::new(0);
@@ -860,7 +885,7 @@ impl Host {
             let n = pieces.fetch_add(1, Ordering::SeqCst) + 1;
             if n % 8 == 1 {
                 let words = written.lock().unwrap().split_whitespace().count();
-                self.emit(Event::Activity { conv: id.into(), text: Some(format!("{label}: {} words written", thousands(words as u64))) });
+                self.emit(Event::Activity { conv: id.into(), text: Some(trf("{activity}: {count} words written", &[("activity", &label), ("count", &thousands(words as u64))])) });
             }
         };
         let result: anyhow::Result<bool> = match &draft {
@@ -912,7 +937,7 @@ impl Host {
             Err(err) => eprintln!("[notes] {err:#}"),
         }
         let environment = prompt::environment_block(&conv.cwd, &folder, &self.shell);
-        let session = prompt::session_block(&conv.cwd, &folder);
+        let session = prompt::session_block(&conv.cwd, &folder, self.settings().language());
         live.conv.lock().unwrap().set_compaction(summary, kept_from, environment, session)?;
         // Notes attached to the summarized messages are gone from the request, so they can be attached again.
         live.read_notes.lock().unwrap().clear();
@@ -956,7 +981,7 @@ impl Host {
             && comp.environment.is_empty()
         {
             comp.environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
-            comp.context = prompt::session_block(&cwd, &s.notes_folder);
+            comp.context = prompt::session_block(&cwd, &s.notes_folder, s.language());
         }
         let messages = match &c.compaction {
             Some(comp) if comp.kept_from <= c.messages.len() => {
@@ -1208,7 +1233,7 @@ impl Host {
         };
         let _busy = self.llama.busy();
         // The activity appears with the first progress report, so a fill that takes a moment shows nothing.
-        let label = if shared { "Reading Scoobert's instructions" } else { "Reading the conversation" };
+        let label = tr(if shared { "Reading Scoobert's instructions" } else { "Reading the conversation" });
         let mut shown = false;
         let filled = self
             .llama
@@ -1359,7 +1384,8 @@ impl Host {
             if (local || hosted) && conv.title.is_none() && conv.user_messages() == 1 {
                 let cancel = CancellationToken::new();
                 *live.note_cancel.lock().unwrap() = Some(cancel.clone());
-                match host.ask(&live, TITLE_PROMPT, TITLE_MAX_TOKENS, &cancel).await {
+                let question = in_language(TITLE_PROMPT, "Write the title in {language}.", &s);
+                match host.ask(&live, &question, TITLE_MAX_TOKENS, &cancel).await {
                     Ok(answer) => {
                         if let Some(title) = clean_title(&answer) {
                             let saved = live.conv.lock().unwrap().set_title(&title);
@@ -1389,10 +1415,11 @@ impl Host {
             };
             let mut facts = Vec::new();
             if (local || hosted) && s.remember_step && memory::worth_noting(&task) {
-                host.emit(Event::Activity { conv: id.clone(), text: Some("Taking notes...".into()) });
+                host.emit(Event::Activity { conv: id.clone(), text: Some(tr("Taking notes...").into()) });
                 let cancel = CancellationToken::new();
                 *live.note_cancel.lock().unwrap() = Some(cancel.clone());
                 let question = memory::remember_prompt(&memory::topic_names(&crate::notes::Vault::new(conv.cwd.join(&s.notes_folder))));
+                let question = in_language(&question, "Write each topic and fact in {language}, and keep the words Decision, Convention, Problem, and NONE in English.", &s);
                 match host.ask(&live, &question, REMEMBER_MAX_TOKENS, &cancel).await {
                     Ok(answer) => facts = memory::parse_facts(&answer),
                     Err(err) if !is_cancelled(&err) => eprintln!("[notes] {err:#}"),
@@ -1498,6 +1525,15 @@ fn finished_task(conv: &Conversation, notes_folder: &str, related: Vec<String>) 
         changed,
         related,
     })
+}
+
+/// A side step's question, followed by `ask` with the language filled in when the language is not English.
+fn in_language(question: &str, ask: &str, settings: &Settings) -> String {
+    let language = settings.language();
+    if language.code == "en" {
+        return question.to_string();
+    }
+    format!("{question} {}", ask.replace("{language}", language.english))
 }
 
 /// The model's title answer, cleaned of labels, quotes, and trailing punctuation, when it is usable.

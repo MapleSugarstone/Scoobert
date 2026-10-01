@@ -8,6 +8,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context, bail};
 
+use crate::i18n::{tr, trf};
 use links::{extract_links, extract_tags, note_name, rename_links, resolve_link};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +68,7 @@ impl Vault {
             match part {
                 Component::Normal(p) => out.push(p),
                 Component::CurDir => {}
-                _ => bail!("That path is outside the notes folder."),
+                _ => bail!(tr("That path is outside the notes folder.")),
             }
         }
         Ok(out)
@@ -107,7 +108,7 @@ impl Vault {
 
     pub fn read(&self, rel: &str) -> anyhow::Result<String> {
         let p = self.abs(rel)?;
-        std::fs::read_to_string(&p).with_context(|| format!("Could not read {rel}"))
+        std::fs::read_to_string(&p).with_context(|| trf("Could not read {rel}", &[("rel", &rel)]))
     }
 
     pub fn write(&self, rel: &str, content: &str) -> anyhow::Result<String> {
@@ -115,7 +116,7 @@ impl Vault {
         if let Some(dir) = p.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&p, content).with_context(|| format!("Could not write {rel}"))?;
+        std::fs::write(&p, content).with_context(|| trf("Could not write {rel}", &[("rel", &rel)]))?;
         Ok(self.rel(&p))
     }
 
@@ -146,7 +147,7 @@ impl Vault {
         let src = self.abs(from)?;
         let dst = self.abs(to)?;
         if dst.exists() {
-            bail!("{to} already exists.");
+            bail!(trf("{to} already exists.", &[("to", &to)]));
         }
         if let Some(dir) = dst.parent() {
             std::fs::create_dir_all(dir)?;
@@ -172,9 +173,9 @@ impl Vault {
     pub fn delete(&self, rel: &str) -> anyhow::Result<()> {
         let p = self.abs(rel)?;
         if p == self.root {
-            bail!("The notes folder itself cannot be deleted here.");
+            bail!(tr("The notes folder itself cannot be deleted here."));
         }
-        trash::delete(&p).map_err(|err| anyhow::anyhow!("Could not move {rel} to the trash: {err}"))
+        trash::delete(&p).map_err(|err| anyhow::anyhow!(trf("Could not move {rel} to the trash: {err}", &[("rel", &rel), ("err", &err)])))
     }
 
     pub fn search(&self, query: &str) -> Vec<SearchHit> {

@@ -65,7 +65,9 @@ fn openai_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
             Message::Assistant(a) => {
                 let mut msg = Map::new();
                 msg.insert("role".into(), "assistant".into());
-                msg.insert("content".into(), if a.text.is_empty() { Value::Null } else { a.text.clone().into() });
+                // A reply stopped while thinking has reasoning and nothing else, and still needs a content field.
+                let reasoning_only = ep.local && !a.thinking.is_empty() && a.text.is_empty() && a.tool_calls.is_empty();
+                msg.insert("content".into(), if a.text.is_empty() && !reasoning_only { Value::Null } else { a.text.clone().into() });
                 // Qwen's template keeps earlier reasoning in the prompt, so history re-renders byte for byte
                 // and the cached prompt stays usable.
                 if ep.local && !a.thinking.is_empty() {
@@ -81,7 +83,7 @@ fn openai_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
                         .collect();
                     msg.insert("tool_calls".into(), calls.into());
                 }
-                if a.text.is_empty() && a.tool_calls.is_empty() {
+                if a.text.is_empty() && a.tool_calls.is_empty() && !reasoning_only {
                     continue;
                 }
                 messages.push(Value::Object(msg));

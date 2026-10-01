@@ -4512,7 +4512,7 @@ dependencies = [
 
 [[package]]
 name = "scoobert"
-version = "0.1.9"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4532,6 +4532,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "similar",
+ "sys-locale",
  "tokio",
  "tokio-util",
  "trash",

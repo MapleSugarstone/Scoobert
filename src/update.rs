@@ -8,6 +8,8 @@ use anyhow::{Context, bail};
 use futures::StreamExt;
 use tokio::io::AsyncWriteExt;
 
+use crate::i18n::{tr, trf};
+
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 /// The GitHub "owner/name" from the package's repository field, when one is set.
@@ -59,24 +61,24 @@ fn client() -> Option<reqwest::Client> {
 
 /// The newest release when it is newer than this build.
 pub async fn check() -> anyhow::Result<Option<Release>> {
-    let repo = repository().context("This build of Scoobert has no release page to check.")?;
+    let repo = repository().context(tr("This build of Scoobert has no release page to check."))?;
     let res = client()
-        .context("Could not start the update check.")?
+        .context(tr("Could not start the update check."))?
         .get(format!("https://api.github.com/repos/{repo}/releases/latest"))
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .context("Could not reach GitHub.")?;
+        .context(tr("Could not reach GitHub."))?;
     // GitHub answers 404 until the first release is published.
     if res.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
     if !res.status().is_success() {
-        bail!("GitHub returned {} for the update check.", res.status());
+        bail!(trf("GitHub returned {status} for the update check.", &[("status", &res.status())]));
     }
-    let body: serde_json::Value = res.json().await.context("GitHub sent a release description Scoobert could not read.")?;
-    let version = body["tag_name"].as_str().context("The latest release has no version.")?.trim_start_matches('v').to_string();
-    let page = body["html_url"].as_str().filter(|u| u.starts_with("https://github.com/")).context("The latest release has no page.")?.to_string();
+    let body: serde_json::Value = res.json().await.context(tr("GitHub sent a release description Scoobert could not read."))?;
+    let version = body["tag_name"].as_str().context(tr("The latest release has no version."))?.trim_start_matches('v').to_string();
+    let page = body["html_url"].as_str().filter(|u| u.starts_with("https://github.com/")).context(tr("The latest release has no page."))?.to_string();
     if !is_newer(&version, env!("CARGO_PKG_VERSION")) {
         return Ok(None);
     }
@@ -110,12 +112,12 @@ pub async fn download(asset: &Asset, kind: &Kind, on_progress: impl Fn(u64, u64)
         // Next to the running AppImage, so the finished file can replace it with a rename.
         Kind::AppImage(current) => current.with_extension("AppImage.new"),
     };
-    let res = client().context("Could not start the download")?.get(&asset.url).send().await?;
+    let res = client().context(tr("Could not start the download"))?.get(&asset.url).send().await?;
     if !res.status().is_success() {
-        bail!("GitHub returned {} for the update.", res.status());
+        bail!(trf("GitHub returned {status} for the update.", &[("status", &res.status())]));
     }
     let total = res.content_length().unwrap_or(asset.size);
-    let mut file = tokio::fs::File::create(&target).await.with_context(|| format!("Could not write {}", target.display()))?;
+    let mut file = tokio::fs::File::create(&target).await.with_context(|| trf("Could not write {path}", &[("path", &target.display())]))?;
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     let mut done = 0u64;
     let mut stream = res.bytes_stream();
@@ -133,7 +135,7 @@ pub async fn download(asset: &Asset, kind: &Kind, on_progress: impl Fn(u64, u64)
         && *expected != actual
     {
         let _ = tokio::fs::remove_file(&target).await;
-        bail!("The update did not match its published checksum and was deleted. Try again later.");
+        bail!(tr("The update did not match its published checksum and was deleted. Try again later."));
     }
     Ok(target)
 }
@@ -143,7 +145,7 @@ pub async fn download(asset: &Asset, kind: &Kind, on_progress: impl Fn(u64, u64)
 pub fn install(file: &Path, kind: &Kind) -> anyhow::Result<()> {
     match kind {
         Kind::WindowsInstaller => {
-            std::process::Command::new(file).args(["/S", "/relaunch"]).spawn().context("Could not start the installer")?;
+            std::process::Command::new(file).args(["/S", "/relaunch"]).spawn().context(tr("Could not start the installer"))?;
         }
         Kind::AppImage(current) => {
             #[cfg(unix)]
@@ -151,8 +153,8 @@ pub fn install(file: &Path, kind: &Kind) -> anyhow::Result<()> {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755))?;
             }
-            std::fs::rename(file, current).context("Could not replace the AppImage")?;
-            std::process::Command::new(current).spawn().context("Could not start the new version")?;
+            std::fs::rename(file, current).context(tr("Could not replace the AppImage"))?;
+            std::process::Command::new(current).spawn().context(tr("Could not start the new version"))?;
         }
     }
     Ok(())

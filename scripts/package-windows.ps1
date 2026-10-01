@@ -21,7 +21,8 @@ try {
 		$nsis = Get-ChildItem "$env:ProgramFiles*\NSIS", "$env:LOCALAPPDATA\electron-builder\Cache" -Recurse -Filter makensis.exe -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object FullName
 	}
 	if (-not $nsis) { throw 'NSIS is not installed. Run: winget install NSIS.NSIS' }
-	& $nsis "/DVERSION=$version" "/DSOURCE=$stage" 'packaging\windows\scoobert.nsi'
+	# The installer's translations are UTF-8 without a byte order mark, which makensis would otherwise read as ANSI.
+	& $nsis '/INPUTCHARSET' 'UTF8' "/DVERSION=$version" "/DSOURCE=$stage" 'packaging\windows\scoobert.nsi'
 	if ($LASTEXITCODE -ne 0) { throw 'makensis failed' }
 	$setup = Get-Item "dist\Scoobert-Setup-$version.exe"
 	Write-Output ("Built {0} ({1:N0} MB)" -f $setup.FullName, ($setup.Length / 1MB))

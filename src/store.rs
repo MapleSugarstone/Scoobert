@@ -29,18 +29,19 @@ impl Thinking {
     }
 
     pub fn label(self) -> &'static str {
+        use crate::i18n::key;
         match self {
-            Thinking::Off => "Off",
-            Thinking::Low => "Low",
-            Thinking::Medium => "Medium",
-            Thinking::High => "High",
+            Thinking::Off => key("Off"),
+            Thinking::Low => key("Low"),
+            Thinking::Medium => key("Medium"),
+            Thinking::High => key("High"),
         }
     }
 }
 
 impl std::fmt::Display for Thinking {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.label())
+        f.write_str(crate::i18n::tr(self.label()))
     }
 }
 
@@ -62,11 +63,11 @@ impl Approvals {
 
 impl std::fmt::Display for Approvals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        f.write_str(crate::i18n::tr(match self {
             Approvals::Ask => "Ask before changes",
             Approvals::Project => "Work unattended in the project",
             Approvals::Auto => "Allow everything",
-        })
+        }))
     }
 }
 
@@ -85,11 +86,11 @@ impl ThemeChoice {
 
 impl std::fmt::Display for ThemeChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+        f.write_str(crate::i18n::tr(match self {
             ThemeChoice::System => "Match the system",
             ThemeChoice::Light => "Light",
             ThemeChoice::Dark => "Dark",
-        })
+        }))
     }
 }
 
@@ -141,6 +142,8 @@ pub struct Settings {
     pub hosted_models: Vec<HostedModel>,
     pub custom_providers: Vec<CustomProvider>,
     pub theme: ThemeChoice,
+    /// The interface and reply language code, or empty until the user or the installer picks one.
+    pub language: String,
 }
 
 impl Default for Settings {
@@ -161,11 +164,18 @@ impl Default for Settings {
             hosted_models: Vec::new(),
             custom_providers: Vec::new(),
             theme: ThemeChoice::System,
+            language: String::new(),
         }
     }
 }
 
 impl Settings {
+    /// The language in use: the one picked, else the one chosen in the Windows installer, else the computer's own.
+    pub fn language(&self) -> &'static crate::i18n::Language {
+        let picked = Some(self.language.as_str()).filter(|c| !c.is_empty()).and_then(crate::i18n::find);
+        picked.or_else(|| crate::sys::installer_language().as_deref().and_then(crate::i18n::find)).or_else(|| crate::i18n::system().and_then(crate::i18n::find)).unwrap_or(&crate::i18n::LANGUAGES[0])
+    }
+
     pub fn models_dir(&self) -> PathBuf {
         if self.models_dir.trim().is_empty() {
             paths::get().default_models_dir()

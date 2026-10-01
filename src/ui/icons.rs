@@ -42,14 +42,15 @@ pub enum Icon {
     Minimize,
     Maximize,
     Restore,
+    Globe,
 }
 
-const ALL: [Icon; 32] = [
+const ALL: [Icon; 33] = [
     Icon::Plus, Icon::Close, Icon::ChevronRight, Icon::ChevronDown, Icon::ArrowRight, Icon::ArrowLeft, Icon::Search,
     Icon::Folder, Icon::FolderOpen, Icon::Calendar, Icon::Expand, Icon::Shrink, Icon::More, Icon::Copy, Icon::Trash,
     Icon::Pencil, Icon::Stop, Icon::Image, Icon::Panel, Icon::Graph, Icon::Gear, Icon::Check, Icon::Download, Icon::Eye,
     Icon::Refresh, Icon::External, Icon::File, Icon::Key, Icon::Undo,
-    Icon::Minimize, Icon::Maximize, Icon::Restore,
+    Icon::Minimize, Icon::Maximize, Icon::Restore, Icon::Globe,
 ];
 
 fn body(icon: Icon) -> String {
@@ -73,6 +74,7 @@ fn body(icon: Icon) -> String {
         Icon::Stop => r#"<rect x="7" y="7" width="10" height="10" rx="1.5" fill="black"/>"#,
         Icon::Image => r#"<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="m20.5 16-5-5-9.5 8.5"/>"#,
         Icon::Panel => r#"<rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M14.5 4.5v15"/>"#,
+        Icon::Globe => r#"<circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.6 5.2 3.6 8.5s-1.2 6.1-3.6 8.5M12 3.5C9.6 5.9 8.4 8.7 8.4 12s1.2 6.1 3.6 8.5"/>"#,
         Icon::Graph => r#"<circle cx="6" cy="7" r="2.3"/><circle cx="18" cy="8" r="2.3"/><circle cx="11" cy="18" r="2.3"/><path d="M8.2 7.4l7.5.4M7.2 9l2.7 6.9M16.5 9.9l-4 6.2"/>"#,
         Icon::Gear => return gear(),
         Icon::Check => r#"<path d="m5 12.5 4.5 4.5L19 7.5"/>"#,

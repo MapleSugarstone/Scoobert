@@ -23,26 +23,35 @@ BrandingText "Scoobert ${VERSION}"
 !define MUI_UNICON "..\..\assets\icon.ico"
 !define MUI_ABORTWARNING
 
-!define MUI_WELCOMEPAGE_TITLE "Install Scoobert"
-!define MUI_WELCOMEPAGE_TEXT "Scoobert is a coding assistant that runs AI models on your own computer.$\r$\n$\r$\nIt installs for your Windows account only, so you don't need an administrator password.$\r$\n$\r$\nSelect Next to continue."
+; The language picker opens first on every interactive install, and its choice also sets Scoobert's language.
+!define MUI_LANGDLL_ALWAYSSHOW
+!define MUI_LANGDLL_WINDOWTITLE "Scoobert"
+!define MUI_LANGDLL_INFO "Choose a language for Scoobert."
+!define MUI_LANGDLL_REGISTRY_ROOT HKCU
+!define MUI_LANGDLL_REGISTRY_KEY "Software\Scoobert"
+!define MUI_LANGDLL_REGISTRY_VALUENAME "InstallerLanguage"
+
+!define MUI_WELCOMEPAGE_TITLE "$(WelcomeTitle)"
+!define MUI_WELCOMEPAGE_TEXT "$(WelcomeText)"
 !insertmacro MUI_PAGE_WELCOME
-!define MUI_DIRECTORYPAGE_TEXT_TOP "Scoobert will be installed in the folder below. To put it somewhere else, such as on another drive, select Browse."
+!define MUI_DIRECTORYPAGE_TEXT_TOP "$(DirectoryText)"
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE CheckFolder
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_TITLE "Scoobert is installed"
-!define MUI_FINISHPAGE_TEXT "You can open Scoobert from its shortcut on the desktop or in the Start menu.$\r$\n$\r$\nTo remove it later, open Settings in Scoobert and select Uninstall, or use Installed apps in Windows Settings."
+!define MUI_FINISHPAGE_TITLE "$(FinishTitle)"
+!define MUI_FINISHPAGE_TEXT "$(FinishText)"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\scoobert.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Open Scoobert now"
+!define MUI_FINISHPAGE_RUN_TEXT "$(FinishRun)"
 !insertmacro MUI_PAGE_FINISH
 
-!define MUI_UNCONFIRMPAGE_TEXT_TOP "Scoobert will be removed from this folder. Your projects and their notes are never touched."
+!define MUI_UNCONFIRMPAGE_TEXT_TOP "$(UnConfirmText)"
 !insertmacro MUI_UNPAGE_CONFIRM
-!define MUI_COMPONENTSPAGE_TEXT_TOP "Choose what else to remove. Anything you leave checked off stays, so a reinstall continues where you left off."
+!define MUI_COMPONENTSPAGE_TEXT_TOP "$(UnComponentsText)"
 !insertmacro MUI_UNPAGE_COMPONENTS
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_UNPAGE_FINISH
-!insertmacro MUI_LANGUAGE "English"
+!include "languages.nsh"
+!insertmacro MUI_RESERVEFILE_LANGDLL
 
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Scoobert"
 !define MODELS "$PROFILE\models"
@@ -53,11 +62,18 @@ Function CheckFolder
   CreateDirectory "$INSTDIR"
   FileOpen $0 "$INSTDIR\.scoobert-write-test" w
   ${If} ${Errors}
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Windows does not let Scoobert install in that folder without an administrator. Pick a folder inside your own user folder, or keep the one Scoobert suggested."
+    MessageBox MB_OK|MB_ICONEXCLAMATION "$(FolderError)"
     Abort
   ${EndIf}
   FileClose $0
   Delete "$INSTDIR\.scoobert-write-test"
+FunctionEnd
+
+; An update started from inside Scoobert installs silently and keeps the language already chosen.
+Function .onInit
+  ${IfNot} ${Silent}
+    !insertmacro MUI_LANGDLL_DISPLAY
+  ${EndIf}
 FunctionEnd
 
 ; An update started from inside Scoobert passes /relaunch, so Scoobert opens again after the silent install.
@@ -94,6 +110,12 @@ Section "Scoobert"
   SetOutPath "$INSTDIR"
   File /r "${SOURCE}\*.*"
   Delete "$INSTDIR\portable.txt"
+  ; Scoobert starts in this language until the user picks another one inside it.
+  ${IfNot} ${Silent}
+    FileOpen $0 "$INSTDIR\language.txt" w
+    FileWrite $0 "$(LangCode)"
+    FileClose $0
+  ${EndIf}
   WriteUninstaller "$INSTDIR\Uninstall Scoobert.exe"
   CreateShortCut "$SMPROGRAMS\Scoobert.lnk" "$INSTDIR\scoobert.exe"
   CreateShortCut "$DESKTOP\Scoobert.lnk" "$INSTDIR\scoobert.exe"
@@ -120,6 +142,7 @@ Section "un.Scoobert" UnApp
   RMDir /r "$INSTDIR\llama"
   Delete "$INSTDIR\scoobert.exe"
   Delete "$INSTDIR\LICENSE"
+  Delete "$INSTDIR\language.txt"
   Delete "$INSTDIR\Uninstall Scoobert.exe"
   RMDir "$INSTDIR"
   Delete "$SMPROGRAMS\Scoobert.lnk"
@@ -144,13 +167,15 @@ Section /o "un.Downloaded models" UnModels
 SectionEnd
 
 !insertmacro MUI_UNFUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${UnApp} "The Scoobert program, its shortcuts, and its saved prompt caches."
-  !insertmacro MUI_DESCRIPTION_TEXT ${UnData} "Your project list, settings, and past conversations. Project notes stay in your projects."
-  !insertmacro MUI_DESCRIPTION_TEXT ${UnModels} "The Qwen models Scoobert downloaded to your models folder. Downloading them again takes a while."
+  !insertmacro MUI_DESCRIPTION_TEXT ${UnApp} "$(UnAppDesc)"
+  !insertmacro MUI_DESCRIPTION_TEXT ${UnData} "$(UnDataDesc)"
+  !insertmacro MUI_DESCRIPTION_TEXT ${UnModels} "$(UnModelsDesc)"
 !insertmacro MUI_UNFUNCTION_DESCRIPTION_END
 
 ; Shows how much space the models take, and hides the option when there are none.
 Function un.onInit
+  !insertmacro MUI_UNGETLANGUAGE
+  SectionSetText ${UnData} "$(UnDataName)"
   StrCpy $R0 0
   ${ForEach} $R1 1 4 + 1
     ${If} $R1 == 1
@@ -171,6 +196,6 @@ Function un.onInit
     SectionSetText ${UnModels} ""
   ${Else}
     IntOp $R3 $R0 / 1024
-    SectionSetText ${UnModels} "Downloaded models (about $R3 GB)"
+    SectionSetText ${UnModels} "$(UnModelsName)"
   ${EndIf}
 FunctionEnd

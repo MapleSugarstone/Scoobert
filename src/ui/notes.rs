@@ -12,6 +12,7 @@ use super::fonts;
 use super::graph::GraphView;
 use super::icons::{Icon, icon};
 use super::theme;
+use crate::i18n::tr;
 use crate::notes::links::{WIKILINK, note_name, parse_link, resolve_link};
 use crate::notes::{Backlink, Entry, Graph, SearchHit, Vault};
 
@@ -478,8 +479,8 @@ impl Pane {
         let width = self.width();
         if self.root.is_none() {
             let body = column![
-                text("Notes").size(14).font(fonts::ui_semibold()),
-                text("Notes belong to a project. Pick a project in the sidebar or ask Scoobert to start one, and its notes appear here.").size(13).style(theme::muted),
+                text(tr("Notes")).size(14).font(fonts::ui_semibold()),
+                text(tr("Notes belong to a project. Pick a project in the sidebar or ask Scoobert to start one, and its notes appear here.")).size(13).style(theme::muted),
             ]
             .spacing(10)
             .padding(20);
@@ -505,14 +506,14 @@ impl Pane {
             )
         };
         let header = row![
-            tab("Files", Icon::Folder, Tab::Files),
-            tab("Search", Icon::Search, Tab::Search),
-            tab("Graph", Icon::Graph, Tab::Graph),
+            tab(tr("Files"), Icon::Folder, Tab::Files),
+            tab(tr("Search"), Icon::Search, Tab::Search),
+            tab(tr("Graph"), Icon::Graph, Tab::Graph),
             space::horizontal(),
-            action(Icon::Plus, "New note", Msg::New),
-            action(Icon::Calendar, "Today's note", Msg::Daily),
-            action(if self.wide { Icon::Shrink } else { Icon::Expand }, if self.wide { "Narrower" } else { "Wider" }, Msg::ToggleWide),
-            action(Icon::External, "Show the notes folder", Msg::Reveal),
+            action(Icon::Plus, tr("New note"), Msg::New),
+            action(Icon::Calendar, tr("Today's note"), Msg::Daily),
+            action(if self.wide { Icon::Shrink } else { Icon::Expand }, if self.wide { tr("Narrower") } else { tr("Wider") }, Msg::ToggleWide),
+            action(Icon::External, tr("Show the notes folder"), Msg::Reveal),
         ]
         .spacing(2)
         .align_y(Alignment::End)
@@ -526,8 +527,8 @@ impl Pane {
             Tab::Search => self.search_view(),
             Tab::Graph => match &self.graph {
                 Some(g) if !g.is_empty() => canvas(g).width(Fill).height(Fill).into(),
-                Some(_) => container(text("Notes that link to each other with [[wikilinks]] appear here.").size(13).style(theme::muted)).padding(20).into(),
-                None => container(text("Loading...").size(13).style(theme::muted)).padding(20).into(),
+                Some(_) => container(text(tr("Notes that link to each other with [[wikilinks]] appear here.")).size(13).style(theme::muted)).padding(20).into(),
+                None => container(text(tr("Loading...")).size(13).style(theme::muted)).padding(20).into(),
             },
         };
         let mut col = column![header, rule::horizontal(1).style(theme::divider)];
@@ -543,11 +544,11 @@ impl Pane {
         if notes.iter().all(|f| f.is_dir) {
             return container(
                 column![
-                    text("No notes yet.").size(14),
-                    text("Scoobert reads these notes before it works and adds to them when it finishes a task. You can write them too.")
+                    text(tr("No notes yet.")).size(14),
+                    text(tr("Scoobert reads these notes before it works and adds to them when it finishes a task. You can write them too."))
                         .size(13)
                         .style(theme::muted),
-                    button(text("New note").size(13)).padding([6, 12]).style(theme::secondary).on_press(Message::Notes(Msg::New)),
+                    button(text(tr("New note")).size(13)).padding([6, 12]).style(theme::secondary).on_press(Message::Notes(Msg::New)),
                 ]
                 .spacing(10),
             )
@@ -584,7 +585,7 @@ impl Pane {
     }
 
     fn search_view(&self) -> Element<'_, Message> {
-        let input = text_input("Search notes", &self.query)
+        let input = text_input(tr("Search notes"), &self.query)
             .id(SEARCH_ID)
             .on_input(|q| Message::Notes(Msg::Query(q)))
             .padding([6, 10])
@@ -599,14 +600,14 @@ impl Pane {
             list = list.push(button(c).width(Fill).padding([6, 8]).style(theme::row_button).on_press(Message::Notes(Msg::Open(hit.path.clone()))));
         }
         if self.results.is_empty() && !self.query.trim().is_empty() {
-            list = list.push(text("No matches.").size(13).style(theme::muted));
+            list = list.push(text(tr("No matches.")).size(13).style(theme::muted));
         }
         column![input, scrollable(list).height(Fill).style(theme::scrollbar)].spacing(10).padding(12).into()
     }
 
     fn editor_view<'a>(&'a self, e: &'a Editor, theme: &Theme) -> Element<'a, Message> {
         let title: Element<'a, Message> = match &e.rename {
-            Some(v) => text_input("Note name", v)
+            Some(v) => text_input(tr("Note name"), v)
                 .id(NOTE_RENAME_ID)
                 .on_input(|v| Message::Notes(Msg::RenameInput(v)))
                 .on_submit(Message::Notes(Msg::RenameCommit))
@@ -620,12 +621,12 @@ impl Pane {
                 .on_press(Message::Notes(Msg::RenameStart))
                 .into(),
         };
-        let status = if e.edited.is_some() { "Saving..." } else { "" };
+        let status = if e.edited.is_some() { tr("Saving...") } else { "" };
         let bar = row![
             button(icon(Icon::ArrowLeft, 16.0)).padding(5).style(theme::ghost).on_press(Message::Notes(Msg::Back)),
             container(title).width(Fill),
             text(status).size(12).style(theme::muted),
-            button(row![icon(if e.preview { Icon::Pencil } else { Icon::Check }, 15.0), text(if e.preview { "Edit" } else { "Done" }).size(13)].spacing(6).align_y(Alignment::Center))
+            button(row![icon(if e.preview { Icon::Pencil } else { Icon::Check }, 15.0), text(if e.preview { tr("Edit") } else { tr("Done") }).size(13)].spacing(6).align_y(Alignment::Center))
                 .padding([4, 10])
                 .style(theme::secondary)
                 .on_press(Message::Notes(Msg::TogglePreview)),
@@ -667,7 +668,7 @@ impl Pane {
         };
         let mut col = column![bar, rule::horizontal(1).style(theme::divider), body];
         if !e.backlinks.is_empty() {
-            let mut links = Column::new().spacing(2).push(text("Linked from").size(12).style(theme::muted));
+            let mut links = Column::new().spacing(2).push(text(tr("Linked from")).size(12).style(theme::muted));
             for b in &e.backlinks {
                 links = links.push(
                     button(column![text(note_name(&b.path)).size(13), text(plain_links(&b.context)).size(12).style(theme::muted)])

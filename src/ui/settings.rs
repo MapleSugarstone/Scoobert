@@ -13,6 +13,7 @@ use super::setup::{self, Download, Job};
 use super::theme;
 use crate::agent::providers::{self, Provider};
 use crate::agent::{Host, ModelOption};
+use crate::i18n::{tr, trf};
 use crate::llama::catalog::{CATALOG, memory_needed};
 use crate::store::{Approvals, CustomProvider, HostedModel, State, ThemeChoice};
 use crate::util::gb;
@@ -33,9 +34,9 @@ pub struct KeepAlive(u32);
 impl std::fmt::Display for KeepAlive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.0 {
-            0 => f.write_str("Until Scoobert closes"),
-            m if m < 60 => write!(f, "{m} minutes"),
-            m => write!(f, "{} hours", m / 60),
+            0 => f.write_str(tr("Until Scoobert closes")),
+            m if m < 60 => f.write_str(&trf("{minutes} minutes", &[("minutes", &m)])),
+            m => f.write_str(&trf("{hours} hours", &[("hours", &(m / 60))])),
         }
     }
 }
@@ -54,7 +55,7 @@ pub struct ContextChoice(pub u32);
 
 impl std::fmt::Display for ContextChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}K tokens", self.0 / 1024)
+        f.write_str(&trf("{size}K tokens", &[("size", &(self.0 / 1024))]))
     }
 }
 
@@ -101,6 +102,7 @@ pub enum Msg {
     Init,
     Section(Section),
     Theme(ThemeChoice),
+    Language(&'static crate::i18n::Language),
     Approvals(Approvals),
     NotesFolder(String),
     CommitNotesFolder,
@@ -193,6 +195,11 @@ impl Panel {
                 s.theme = t;
                 return (Task::none(), Effect::Saved);
             }
+            Msg::Language(language) => {
+                crate::i18n::set(language.code);
+                s.language = language.code.to_string();
+                return (Task::none(), Effect::Saved);
+            }
             Msg::Approvals(a) => {
                 s.approvals = a;
                 return (Task::none(), Effect::Saved);
@@ -234,7 +241,7 @@ impl Panel {
             Msg::BrowseModelsDir => {
                 return (
                     Task::perform(
-                        async { rfd::AsyncFileDialog::new().set_title("Choose the models folder").pick_folder().await.map(|h| h.path().to_path_buf()) },
+                        async { rfd::AsyncFileDialog::new().set_title(tr("Choose the models folder")).pick_folder().await.map(|h| h.path().to_path_buf()) },
                         |p| Message::Settings(Msg::ModelsDirPicked(p)),
                     ),
                     Effect::None,
@@ -333,7 +340,7 @@ impl Panel {
                 let url = self.custom_url.trim().trim_end_matches('/').to_string();
                 let name = self.custom_name.trim().to_string();
                 if name.is_empty() || !(url.starts_with("https://") || url.starts_with("http://")) {
-                    self.error = Some("Give the provider a name and an address that starts with https:// or http://.".into());
+                    self.error = Some(tr("Give the provider a name and an address that starts with https:// or http://.").into());
                     return (Task::none(), Effect::None);
                 }
                 let id = format!("custom-{}", crate::util::random_hex(4));
@@ -359,7 +366,7 @@ impl Panel {
                 if let Some(uninstaller) = crate::paths::uninstaller() {
                     match std::process::Command::new(&uninstaller).spawn() {
                         Ok(_) => return (Task::done(Message::Quit), Effect::None),
-                        Err(e) => return (Task::none(), Effect::Toast(format!("Could not start the uninstaller: {e}"))),
+                        Err(e) => return (Task::none(), Effect::Toast(trf("Could not start the uninstaller: {error}", &[("error", &e)]))),
                     }
                 }
             }
@@ -381,11 +388,11 @@ impl Panel {
                 .on_press(Msg::Section(section))
         };
         let sidebar = column![
-            text("Settings").size(18).font(fonts::ui_semibold()),
+            text(tr("Settings")).size(18).font(fonts::ui_semibold()),
             space().height(8),
-            nav("General", Section::General),
-            nav("Models on this computer", Section::Local),
-            nav("Hosted models", Section::Hosted),
+            nav(tr("General"), Section::General),
+            nav(tr("Models on this computer"), Section::Local),
+            nav(tr("Hosted models"), Section::Hosted),
         ]
         .spacing(4)
         .width(210)
@@ -403,15 +410,18 @@ impl Panel {
     fn general<'a>(&'a self, state: &'a State, isolation: &'a str) -> Element<'a, Msg> {
         let s = &state.settings;
         let mode_help = match s.approvals {
-            Approvals::Ask => "Scoobert asks before it edits a file or runs a command. Edits to the notes folder never ask.".to_string(),
-            Approvals::Project => format!("For leaving a task running. Edits inside the project run without asking, and edits elsewhere are refused. {isolation} Every command's memory is capped."),
-            Approvals::Auto => "Everything runs without asking, including commands that download or install software.".to_string(),
+            Approvals::Ask => tr("Scoobert asks before it edits a file or runs a command. Edits to the notes folder never ask.").to_string(),
+            Approvals::Project => trf(
+                "For leaving a task running. Edits inside the project run without asking, and edits elsewhere are refused. {isolation} Every command's memory is capped.",
+                &[("isolation", &isolation)],
+            ),
+            Approvals::Auto => tr("Everything runs without asking, including commands that download or install software.").to_string(),
         };
         column![
-            heading("General"),
+            heading(tr("General")),
             column![
                 field(
-                    "When Scoobert makes changes",
+                    tr("When Scoobert makes changes"),
                     None,
                     pick_list(Approvals::ALL, Some(s.approvals), Msg::Approvals).padding([5, 10]).text_size(13).style(theme::select).menu_style(theme::menu).into(),
                 ),
@@ -419,13 +429,23 @@ impl Panel {
             ]
             .spacing(4),
             field(
-                "Appearance",
+                tr("Language"),
+                Some(tr("Scoobert's menus and labels, and the language the model writes in.")),
+                pick_list(crate::i18n::LANGUAGES.iter().collect::<Vec<_>>(), Some(crate::i18n::current()), Msg::Language)
+                    .padding([5, 10])
+                    .text_size(13)
+                    .style(theme::select)
+                    .menu_style(theme::menu)
+                    .into(),
+            ),
+            field(
+                tr("Appearance"),
                 None,
                 pick_list(ThemeChoice::ALL, Some(s.theme), Msg::Theme).padding([5, 10]).text_size(13).style(theme::select).menu_style(theme::menu).into(),
             ),
             field(
-                "Notes folder",
-                Some("The folder inside each project where Scoobert keeps its notes."),
+                tr("Notes folder"),
+                Some(tr("The folder inside each project where Scoobert keeps its notes.")),
                 text_input("Notes", &self.notes_folder)
                     .on_input(Msg::NotesFolder)
                     .on_submit(Msg::CommitNotesFolder)
@@ -435,16 +455,21 @@ impl Panel {
                     .style(theme::input)
                     .into(),
             ),
-            switch_row("Log finished tasks in today's note", "Adds what changed to the Daily folder after a task that edited files.", s.activity_log, Msg::ActivityLog),
             switch_row(
-                "Ask the model what to remember",
-                "After a task that changed several files or stated a preference, the model picks up to three facts, and Scoobert files them in the notes. With a local model this takes about a minute.",
+                tr("Log finished tasks in today's note"),
+                tr("Adds what changed to the Daily folder after a task that edited files."),
+                s.activity_log,
+                Msg::ActivityLog
+            ),
+            switch_row(
+                tr("Ask the model what to remember"),
+                tr("After a task that changed several files or stated a preference, the model picks up to three facts, and Scoobert files them in the notes. With a local model this takes about a minute."),
                 s.remember_step,
                 Msg::RememberStep
             ),
             switch_row(
-                "Let Scoobert search the web with DuckDuckGo",
-                "Off until you turn it on. When you ask it to research something, it searches DuckDuckGo and reads pages. Searches and page addresses leave your computer, even with a local model.",
+                tr("Let Scoobert search the web with DuckDuckGo"),
+                tr("Off until you turn it on. When you ask it to research something, it searches DuckDuckGo and reads pages. Searches and page addresses leave your computer, even with a local model."),
                 s.web_access,
                 Msg::WebAccess
             ),
@@ -466,9 +491,9 @@ impl Panel {
             }
             let free = crate::sys::available_memory();
             let warn = if m.memory_needed > free {
-                text(format!("Needs about {} of free memory; {} is free now.", gb(m.memory_needed), gb(free))).size(12).style(theme::warn_text)
+                text(trf("Needs about {memory} of free memory; {free} is free now.", &[("memory", &gb(m.memory_needed)), ("free", &gb(free))])).size(12).style(theme::warn_text)
             } else {
-                text(format!("Needs about {} of free memory.", gb(m.memory_needed))).size(12).style(theme::muted)
+                text(trf("Needs about {memory} of free memory.", &[("memory", &gb(m.memory_needed))])).size(12).style(theme::muted)
             };
             let name = m.name.clone();
             list = list.push(
@@ -476,12 +501,12 @@ impl Panel {
                     row![
                         column![
                             text(m.label.clone()).size(14).font(fonts::ui_semibold()),
-                            text(format!("{}{}", gb(m.size), if m.vision { ", reads images" } else { "" })).size(12).style(theme::muted),
+                            text(if m.vision { trf("{size}, reads images", &[("size", &gb(m.size))]) } else { gb(m.size) }).size(12).style(theme::muted),
                             warn,
                         ]
                         .spacing(2)
                         .width(Fill),
-                        text("Context").size(12).style(theme::muted),
+                        text(tr("Context")).size(12).style(theme::muted),
                         pick_list(sizes, Some(ContextChoice(m.context)), move |c| Msg::Context(name.clone(), c))
                             .padding([4, 8])
                             .text_size(12)
@@ -496,46 +521,46 @@ impl Panel {
             );
         }
         if installed.is_empty() {
-            list = list.push(text("No models yet. Download one below.").size(13).style(theme::muted));
+            list = list.push(text(tr("No models yet. Download one below.")).size(13).style(theme::muted));
         }
 
         let mut catalog = Column::new().spacing(8);
         for (i, m) in CATALOG.iter().enumerate() {
             let have = installed.iter().any(|x| x.name == m.name);
             let status: Element<'a, Msg> = if have {
-                text("Downloaded").size(12).style(theme::accent_text).into()
+                text(tr("Downloaded")).size(12).style(theme::accent_text).into()
             } else if let Some(d) = ctx.download.as_ref().filter(|d| d.job == Job::Catalog(i)) {
                 let (done, total) = d.progress.as_ref().map(|p| (p.done, p.total.max(1))).unwrap_or((0, 1));
                 row![
                     progress_bar(0.0..=total as f32, done as f32).length(120).girth(6).style(theme::meter),
-                    text(format!("{} of {}", gb(done), gb(total))).size(12).style(theme::muted),
-                    button(text("Stop").size(12)).padding([3, 10]).style(theme::secondary).on_press(Msg::CancelDownload),
+                    text(trf("{done} of {total}", &[("done", &gb(done)), ("total", &gb(total))])).size(12).style(theme::muted),
+                    button(text(tr("Stop")).size(12)).padding([3, 10]).style(theme::secondary).on_press(Msg::CancelDownload),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .into()
             } else if ctx.queue.contains(&Job::Catalog(i)) {
-                text("Waiting...").size(12).style(theme::muted).into()
+                text(tr("Waiting...")).size(12).style(theme::muted).into()
             } else {
-                button(row![icon(Icon::Download, 14.0), text(format!("Download {}", gb(m.download_bytes))).size(12)].spacing(6).align_y(Alignment::Center))
+                button(row![icon(Icon::Download, 14.0), text(trf("Download {size}", &[("size", &gb(m.download_bytes))])).size(12)].spacing(6).align_y(Alignment::Center))
                     .padding([4, 10])
                     .style(theme::secondary)
                     .on_press(Msg::Download(i))
                     .into()
             };
             let fit = if setup::fits(i) {
-                text(format!("Needs about {} of free memory.", gb(memory_needed(m)))).size(12).style(theme::muted)
+                text(trf("Needs about {memory} of free memory.", &[("memory", &gb(memory_needed(m)))])).size(12).style(theme::muted)
             } else {
-                text(format!("Needs about {} of free memory, more than this computer has.", gb(memory_needed(m)))).size(12).style(theme::warn_text)
+                text(trf("Needs about {memory} of free memory, more than this computer has.", &[("memory", &gb(memory_needed(m)))])).size(12).style(theme::warn_text)
             };
             catalog = catalog.push(
                 container(
                     row![
                         column![
-                            row![text(m.label).size(14).font(fonts::ui_semibold()), container(text(m.tier).size(11)).padding([1, 6]).style(theme::chip)]
+                            row![text(tr(m.label)).size(14).font(fonts::ui_semibold()), container(text(tr(m.tier)).size(11)).padding([1, 6]).style(theme::chip)]
                                 .spacing(8)
                                 .align_y(Alignment::Center),
-                            text(m.summary).size(12).style(theme::muted),
+                            text(tr(m.summary)).size(12).style(theme::muted),
                             fit,
                         ]
                         .spacing(3)
@@ -551,12 +576,12 @@ impl Panel {
         }
 
         column![
-            heading("Models on this computer"),
+            heading(tr("Models on this computer")),
             list,
-            subheading("Download"),
+            subheading(tr("Download")),
             catalog,
-            subheading("Download another model"),
-            text("Any GGUF model on Hugging Face, as owner/repository:quantization.").size(12).style(theme::muted),
+            subheading(tr("Download another model")),
+            text(tr("Any GGUF model on Hugging Face, as owner/repository:quantization.")).size(12).style(theme::muted),
             row![
                 text_input("unsloth/Qwen3.5-9B-GGUF:Q4_K_M", &self.custom_spec)
                     .on_input(Msg::CustomSpec)
@@ -564,12 +589,12 @@ impl Panel {
                     .size(13)
                     .padding([6, 10])
                     .style(theme::input),
-                button(text("Download").size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::DownloadCustom),
+                button(text(tr("Download")).size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::DownloadCustom),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
             custom_progress(ctx.download),
-            subheading("Where models are stored"),
+            subheading(tr("Where models are stored")),
             row![
                 text_input(&crate::paths::display(&crate::paths::get().default_models_dir()), &self.models_dir)
                     .on_input(Msg::ModelsDir)
@@ -577,14 +602,14 @@ impl Panel {
                     .size(13)
                     .padding([6, 10])
                     .style(theme::input),
-                button(text("Browse").size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::BrowseModelsDir),
+                button(text(tr("Browse")).size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::BrowseModelsDir),
                 button(icon(Icon::External, 15.0)).padding(6).style(theme::ghost).on_press(Msg::RevealModels),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
             field(
-                "Unload the model after",
-                Some("An idle model still holds its memory. Saved caches make the next load quick."),
+                tr("Unload the model after"),
+                Some(tr("An idle model still holds its memory. Saved caches make the next load quick.")),
                 pick_list(&KEEP_ALIVE[..], Some(KeepAlive(s.keep_alive_minutes)), Msg::KeepAlive)
                     .padding([5, 10])
                     .text_size(13)
@@ -593,15 +618,15 @@ impl Panel {
                     .into(),
             ),
             switch_row(
-                "Load the model when Scoobert starts",
-                "The first reply starts sooner, but the model holds its memory from the start until it has been idle for the time above.",
+                tr("Load the model when Scoobert starts"),
+                tr("The first reply starts sooner, but the model holds its memory from the start until it has been idle for the time above."),
                 s.preload_model,
                 Msg::PreloadModel
             ),
             field(
-                "llama-server program",
-                Some("Leave empty to use the copy that comes with Scoobert."),
-                text_input("Bundled", &self.server_path)
+                tr("llama-server program"),
+                Some(tr("Leave empty to use the copy that comes with Scoobert.")),
+                text_input(tr("Bundled"), &self.server_path)
                     .on_input(Msg::ServerPath)
                     .on_submit(Msg::CommitServerPath)
                     .size(13)
@@ -620,12 +645,12 @@ impl Panel {
         let choices: Vec<ProviderChoice> = all.iter().cloned().map(ProviderChoice).collect();
         let selected = self.provider.clone().map(ProviderChoice);
         let mut col = column![
-            heading("Hosted models"),
-            text("Hosted models run on the provider's servers, so Scoobert sends them your conversations and the files it reads. Keys are kept in the system credential store.")
+            heading(tr("Hosted models")),
+            text(tr("Hosted models run on the provider's servers, so Scoobert sends them your conversations and the files it reads. Keys are kept in the system credential store."))
                 .size(13)
                 .style(theme::muted),
             row![
-                text("Provider").size(13).width(90),
+                text(tr("Provider")).size(13).width(90),
                 pick_list(choices, selected, Msg::Provider).padding([5, 10]).text_size(13).style(theme::select).menu_style(theme::menu).width(Length::Fixed(260.0)),
             ]
             .spacing(10)
@@ -636,38 +661,38 @@ impl Panel {
             let key_row: Element<'a, Msg> = if self.has_key {
                 row![
                     icons_ok(),
-                    text("Key saved").size(13),
+                    text(tr("Key saved")).size(13),
                     space::horizontal(),
-                    button(text("Remove key").size(13)).padding([5, 12]).style(theme::danger).on_press(Msg::RemoveKey),
+                    button(text(tr("Remove key")).size(13)).padding([5, 12]).style(theme::danger).on_press(Msg::RemoveKey),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .into()
             } else {
                 let mut r = row![
-                    text_input("Paste an API key", &self.key_input)
+                    text_input(tr("Paste an API key"), &self.key_input)
                         .secure(true)
                         .on_input(Msg::KeyInput)
                         .on_submit(Msg::SaveKey)
                         .size(13)
                         .padding([6, 10])
                         .style(theme::input),
-                    button(text("Save key").size(13)).padding([6, 12]).style(theme::primary).on_press_maybe((!self.key_input.trim().is_empty()).then_some(Msg::SaveKey)),
+                    button(text(tr("Save key")).size(13)).padding([6, 12]).style(theme::primary).on_press_maybe((!self.key_input.trim().is_empty()).then_some(Msg::SaveKey)),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center);
                 if !p.key_url.is_empty() {
-                    r = r.push(button(text("Get a key").size(13)).style(theme::link).on_press(Msg::OpenUrl(p.key_url.clone())));
+                    r = r.push(button(text(tr("Get a key")).size(13)).style(theme::link).on_press(Msg::OpenUrl(p.key_url.clone())));
                 }
                 r.into()
             };
-            col = col.push(row![text("API key").size(13).width(90), key_row].spacing(10).align_y(Alignment::Center));
+            col = col.push(row![text(tr("API key")).size(13).width(90), key_row].spacing(10).align_y(Alignment::Center));
             if p.id.starts_with("custom-") {
                 col = col.push(
                     row![
                         text(p.base_url.clone()).size(12).style(theme::muted).font(fonts::mono()),
                         space::horizontal(),
-                        button(text("Remove this provider").size(12)).padding([4, 10]).style(theme::danger).on_press(Msg::RemoveCustom(p.id.clone())),
+                        button(text(tr("Remove this provider")).size(12)).padding([4, 10]).style(theme::danger).on_press(Msg::RemoveCustom(p.id.clone())),
                     ]
                     .align_y(Alignment::Center),
                 );
@@ -687,16 +712,16 @@ impl Panel {
                     .align_y(Alignment::Center),
                 );
             }
-            col = col.push(subheading("In the model menu"));
+            col = col.push(subheading(tr("In the model menu")));
             col = col.push(list);
         }
-        col = col.push(subheading("Add a provider by address"));
-        col = col.push(text("Any server that accepts OpenAI-style chat requests, such as a model server on another computer.").size(12).style(theme::muted));
+        col = col.push(subheading(tr("Add a provider by address")));
+        col = col.push(text(tr("Any server that accepts OpenAI-style chat requests, such as a model server on another computer.")).size(12).style(theme::muted));
         col = col.push(
             row![
-                text_input("Name", &self.custom_name).on_input(Msg::CustomName).size(13).padding([6, 10]).width(160).style(theme::input),
+                text_input(tr("Name"), &self.custom_name).on_input(Msg::CustomName).size(13).padding([6, 10]).width(160).style(theme::input),
                 text_input("https://example.com/v1", &self.custom_url).on_input(Msg::CustomUrl).on_submit(Msg::AddCustom).size(13).padding([6, 10]).style(theme::input),
-                button(text("Add").size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::AddCustom),
+                button(text(tr("Add")).size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::AddCustom),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -709,10 +734,10 @@ impl Panel {
             return container(text(e.clone()).size(13)).padding([8, 12]).width(Fill).style(theme::error_box).into();
         }
         if self.listing {
-            return text("Loading the model list...").size(13).style(theme::muted).into();
+            return text(tr("Loading the model list...")).size(13).style(theme::muted).into();
         }
         if self.available.is_empty() {
-            let hint = if self.has_key { "Refresh the list to see this provider's models." } else { "Save a key to see this provider's models." };
+            let hint = if self.has_key { tr("Refresh the list to see this provider's models.") } else { tr("Save a key to see this provider's models.") };
             return row![
                 text(hint).size(13).style(theme::muted),
                 button(icon(Icon::Refresh, 14.0)).padding(4).style(theme::ghost).on_press(Msg::ListModels),
@@ -734,12 +759,12 @@ impl Panel {
             }
             let on = state.settings.hosted_models.iter().any(|h| h.provider == p.id && h.id == m.id);
             let model = m.clone();
-            let mut tags = vec![format!("{}K context", m.context / 1000)];
+            let mut tags = vec![trf("{size}K context", &[("size", &(m.context / 1000))])];
             if m.vision {
-                tags.push("images".into());
+                tags.push(tr("images").into());
             }
             if m.reasoning {
-                tags.push("thinking".into());
+                tags.push(tr("thinking").into());
             }
             list = list.push(
                 row![
@@ -751,12 +776,12 @@ impl Panel {
         }
         column![
             row![
-                text_input("Search models", &self.filter).on_input(Msg::Filter).size(13).padding([6, 10]).style(theme::input),
+                text_input(tr("Search models"), &self.filter).on_input(Msg::Filter).size(13).padding([6, 10]).style(theme::input),
                 button(icon(Icon::Refresh, 14.0)).padding(6).style(theme::ghost).on_press(Msg::ListModels),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
-            text("Tick the models to show in the model menu.").size(12).style(theme::muted),
+            text(tr("Tick the models to show in the model menu.")).size(12).style(theme::muted),
             container(scrollable(list.padding([4, 8])).style(theme::scrollbar)).height(260).style(theme::card),
         ]
         .spacing(8)
@@ -771,8 +796,8 @@ fn custom_progress<'a>(download: &'a Option<Download>) -> Element<'a, Msg> {
     row![
         text(spec.clone()).size(12).font(fonts::mono()),
         progress_bar(0.0..=total as f32, done as f32).length(120).girth(6).style(theme::meter),
-        text(format!("{} of {}", gb(done), gb(total))).size(12).style(theme::muted),
-        button(text("Stop").size(12)).padding([3, 10]).style(theme::secondary).on_press(Msg::CancelDownload),
+        text(trf("{done} of {total}", &[("done", &gb(done)), ("total", &gb(total))])).size(12).style(theme::muted),
+        button(text(tr("Stop")).size(12)).padding([3, 10]).style(theme::secondary).on_press(Msg::CancelDownload),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
@@ -783,28 +808,28 @@ fn custom_progress<'a>(download: &'a Option<Download>) -> Element<'a, Msg> {
 fn version<'a>() -> Element<'a, Msg> {
     let mut control = row![text(env!("CARGO_PKG_VERSION")).size(13).style(theme::muted)].spacing(12).align_y(Alignment::Center);
     if crate::update::repository().is_some() {
-        control = control.push(button(text("Check for updates").size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::CheckUpdates));
+        control = control.push(button(text(tr("Check for updates")).size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::CheckUpdates));
     }
-    field("Version", None, control.into())
+    field(tr("Version"), None, control.into())
 }
 
 /// How to remove this copy of Scoobert: its uninstaller, its folder when portable, or its AppImage file.
 fn removal<'a>() -> Element<'a, Msg> {
     let (help, button_label, msg): (String, &str, Msg) = if crate::paths::uninstaller().is_some() {
         (
-            "Removes Scoobert from this computer. You choose whether to also remove your conversations and downloaded models. Project notes always stay.".into(),
-            "Uninstall Scoobert",
+            tr("Removes Scoobert from this computer. You choose whether to also remove your conversations and downloaded models. Project notes always stay.").into(),
+            tr("Uninstall Scoobert"),
             Msg::Uninstall,
         )
     } else if let Some(folder) = crate::paths::portable_folder() {
-        ("This is a portable copy. To remove it, close Scoobert and delete its folder.".into(), "Show the folder", Msg::ShowFile(folder))
+        (tr("This is a portable copy. To remove it, close Scoobert and delete its folder.").into(), tr("Show the folder"), Msg::ShowFile(folder))
     } else if let Some(appimage) = std::env::var_os("APPIMAGE").map(PathBuf::from) {
-        ("To remove Scoobert, close it and delete its AppImage file.".into(), "Show the file", Msg::ShowFile(appimage))
+        (tr("To remove Scoobert, close it and delete its AppImage file.").into(), tr("Show the file"), Msg::ShowFile(appimage))
     } else {
         return space().into();
     };
     let control = button(text(button_label).size(13)).padding([6, 12]).style(theme::secondary).on_press(msg);
-    column![field("Remove Scoobert", None, control.into()), text(help).size(12).style(theme::muted)].spacing(4).into()
+    column![field(tr("Remove Scoobert"), None, control.into()), text(help).size(12).style(theme::muted)].spacing(4).into()
 }
 
 fn icons_ok<'a>() -> Element<'a, Msg> {

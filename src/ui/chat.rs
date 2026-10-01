@@ -13,11 +13,12 @@ use super::theme::{self, tokens};
 use crate::agent::conversation::{AssistantMessage, Message as AgentMessage, StopReason, ToolCall, ToolResult};
 use crate::agent::stream::Delta;
 use crate::agent::{ConvId, Decision, Snapshot};
+use crate::i18n::{key, tr, trf};
 use crate::store::Thinking;
 use crate::util::{about_duration, clip, thousands};
 
 pub const TRANSCRIPT_ID: &str = "transcript";
-const COMPACTED: &str = "Scoobert summarized the messages above to make room and continued from the summary. The summary is in the Tasks folder of the notes.";
+const COMPACTED: &str = key("Scoobert summarized the messages above to make room and continued from the summary. The summary is in the Tasks folder of the notes.");
 pub const MAX_WIDTH: f32 = 820.0;
 
 pub struct ToolCard {
@@ -29,7 +30,8 @@ pub enum Entry {
     /// `index` is the message's position in the conversation, which a rewind goes back to.
     User { text: String, notes: Vec<String>, images: usize, time: i64, index: usize },
     Assistant { key: String, thinking: String, text: String, md: markdown::Content, tools: Vec<ToolCard>, error: Option<String>, stop: StopReason, time: i64 },
-    Notice(String),
+    /// Text kept in English and translated where it is shown.
+    Notice(&'static str),
 }
 
 #[derive(Default)]
@@ -100,7 +102,7 @@ impl Chat {
         };
         for (i, m) in s.messages.into_iter().enumerate() {
             if s.compacted_at == Some(i) {
-                chat.entries.push(Entry::Notice(COMPACTED.into()));
+                chat.entries.push(Entry::Notice(COMPACTED));
             }
             chat.push(m);
         }
@@ -117,7 +119,7 @@ impl Chat {
         match m {
             AgentMessage::User(u) => {
                 let notes = note_paths(&u.context);
-                if self.entries.is_empty() && self.title == "New conversation" {
+                if self.entries.is_empty() && self.title == tr("New conversation") {
                     self.title = crate::agent::conversation::quick_title(&u.text);
                 }
                 self.entries.push(Entry::User { text: u.text, notes, images: u.images.len(), time: u.time, index });
@@ -233,7 +235,7 @@ impl Chat {
                 }
             }
             E::Error { message, .. } => self.error = Some(message),
-            E::Compacted { .. } => self.entries.push(Entry::Notice(COMPACTED.into())),
+            E::Compacted { .. } => self.entries.push(Entry::Notice(COMPACTED)),
             E::Titled { title, .. } => self.title = title,
             _ => {}
         }
@@ -243,15 +245,19 @@ impl Chat {
     fn activity_label(&self, activity: &str) -> String {
         let Some((done, total)) = self.progress.filter(|(_, t)| *t > 0) else { return activity.to_string() };
         let activity = activity.trim_end_matches("...");
-        let mut label = format!("{activity}: {} of {} tokens", thousands(done), thousands(total));
+        let (done_text, total_text) = (thousands(done), thousands(total));
         if let Some((since, from)) = self.progress_since
             && done > from
             && total > done
         {
             let rate = (done - from) as f64 / since.elapsed().as_secs_f64().max(0.001);
-            label.push_str(&format!(", {} left", about_duration(((total - done) as f64 / rate) as u64)));
+            let left = about_duration(((total - done) as f64 / rate) as u64);
+            return trf(
+                "{activity}: {done} of {total} tokens, {time} left",
+                &[("activity", &activity), ("done", &done_text), ("total", &total_text), ("time", &left)],
+            );
         }
-        label
+        trf("{activity}: {done} of {total} tokens", &[("activity", &activity), ("done", &done_text), ("total", &total_text)])
     }
 
     pub fn view<'a>(&'a self, md_settings: markdown::Settings) -> Element<'a, Message> {
@@ -273,7 +279,7 @@ impl Chat {
         }
         // A view opened partway through a read missed its activity, and only the progress arrives.
         let reading = self.running && self.progress.is_some_and(|(_, t)| t > 0);
-        if let Some(a) = self.activity.as_deref().or(reading.then_some("Reading...")) {
+        if let Some(a) = self.activity.as_deref().or(reading.then_some(tr("Reading..."))) {
             let mut line = column![row![working_dot(), text(self.activity_label(a)).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center)].spacing(6);
             if let Some((done, total)) = self.progress.filter(|(_, t)| *t > 0) {
                 let bar = progress_bar(0.0..=total as f32, done.min(total) as f32).girth(4).style(theme::meter);
@@ -282,7 +288,7 @@ impl Chat {
             items = items.push(line);
         } else if self.running && self.approvals.is_empty() && self.live_output.is_empty() && self.stream.as_ref().is_none_or(|s| s.text.is_empty() && s.thinking.is_empty() && s.tool.is_none()) {
             let generated = self.stream.as_ref().map(|s| s.generated).unwrap_or(0);
-            let label = if generated > 0 { format!("Working... {} tokens written so far", thousands(generated)) } else { "Working...".to_string() };
+            let label = if generated > 0 { trf("Working... {count} tokens written so far", &[("count", &thousands(generated))]) } else { tr("Working...").to_string() };
             items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
         }
         if self.interrupted && !self.running && self.pending.is_none() {
@@ -290,12 +296,12 @@ impl Chat {
                 container(
                     row![
                         column![
-                            text("This task stopped before it finished.").size(14).font(fonts::ui_semibold()),
-                            text("Scoobert was closed or stopped partway through. Continue picks up from the last saved step.").size(12).style(theme::muted),
+                            text(tr("This task stopped before it finished.")).size(14).font(fonts::ui_semibold()),
+                            text(tr("Scoobert was closed or stopped partway through. Continue picks up from the last saved step.")).size(12).style(theme::muted),
                         ]
                         .spacing(2)
                         .width(Fill),
-                        button(text("Continue").size(13)).padding([6, 16]).style(theme::primary).on_press(Message::Continue),
+                        button(text(tr("Continue")).size(13)).padding([6, 16]).style(theme::primary).on_press(Message::Continue),
                     ]
                     .spacing(12)
                     .align_y(Alignment::Center),
@@ -321,7 +327,7 @@ impl Chat {
             Entry::User { text, notes, images, time, index } => sent_at(user_bubble(text, notes, *images, Some(*index)), *time),
             Entry::Notice(n) => row![
                 rule::horizontal(1).style(theme::divider),
-                text(n.clone()).size(12).style(theme::muted).width(Length::Shrink),
+                text(tr(*n)).size(12).style(theme::muted).width(Length::Shrink),
                 rule::horizontal(1).style(theme::divider),
             ]
             .spacing(10)
@@ -340,10 +346,10 @@ impl Chat {
                     col = col.push(self.tool_card(&format!("{key}-t{i}"), card));
                 }
                 if *stop == StopReason::Aborted {
-                    col = col.push(text("Stopped.").size(13).style(theme::muted));
+                    col = col.push(text(tr("Stopped.")).size(13).style(theme::muted));
                 }
                 if *stop == StopReason::Length {
-                    col = col.push(text("The reply reached its length limit.").size(13).style(theme::warn_text));
+                    col = col.push(text(tr("The reply reached its length limit.")).size(13).style(theme::warn_text));
                 }
                 if let Some(e) = error
                     && self.error.as_deref() != Some(e.as_str())
@@ -359,7 +365,7 @@ impl Chat {
         let id = format!("{key}-think");
         let open = self.expanded.contains(&id);
         let header = button(
-            row![icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 14.0), text("Thinking").size(13)]
+            row![icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 14.0), text(tr("Thinking")).size(13)]
                 .spacing(6)
                 .align_y(Alignment::Center),
         )
@@ -390,7 +396,7 @@ impl Chat {
                 }
             };
             let open = self.expanded.contains("stream-think");
-            let label = if s.text.is_empty() && s.tool.is_none() { "Thinking..." } else { "Thinking" };
+            let label = if s.text.is_empty() && s.tool.is_none() { tr("Thinking...") } else { tr("Thinking") };
             let header = button(
                 row![icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 14.0), text(label).size(13)]
                     .spacing(6)
@@ -415,8 +421,8 @@ impl Chat {
             col = col.push(
                 row![
                     working_dot(),
-                    text(format!("{} ...", verb(tool))).size(13).font(fonts::ui_semibold()),
-                    text(if s.tool_chars > 0 { format!("{} characters so far", thousands(s.tool_chars as u64)) } else { String::new() })
+                    text(preparing(tool)).size(13).font(fonts::ui_semibold()),
+                    text(if s.tool_chars > 0 { trf("{count} characters written", &[("count", &thousands(s.tool_chars as u64))]) } else { String::new() })
                         .size(12)
                         .style(theme::muted),
                 ]
@@ -439,7 +445,7 @@ impl Chat {
         let detail = card
             .result
             .as_ref()
-            .and_then(|r| r.diff.as_ref().map(|d| diff_stats(d)).or_else(|| (card.call.name == "read" && !r.is_error).then(|| format!("{} lines", r.output.lines().count()))))
+            .and_then(|r| r.diff.as_ref().map(|d| diff_stats(d)).or_else(|| (card.call.name == "read" && !r.is_error).then(|| trf("{count} lines", &[("count", &r.output.lines().count())]))))
             .unwrap_or_default();
         let header = button(
             row![
@@ -489,10 +495,10 @@ fn user_bubble<'a>(message: &str, notes: &[String], images: usize, index: Option
     let mut col = column![text(message.to_string()).size(15)].spacing(8);
     let mut chips = row![].spacing(6);
     for n in notes {
-        chips = chips.push(container(text(format!("Note: {n}")).size(12).font(fonts::mono())).padding([2, 8]).style(theme::chip));
+        chips = chips.push(container(text(trf("Note: {note}", &[("note", n)])).size(12).font(fonts::mono())).padding([2, 8]).style(theme::chip));
     }
     if images > 0 {
-        let label = if images == 1 { "1 image".to_string() } else { format!("{images} images") };
+        let label = if images == 1 { tr("1 image").to_string() } else { trf("{count} images", &[("count", &images)]) };
         chips = chips.push(container(text(label).size(12)).padding([2, 8]).style(theme::chip));
     }
     if !notes.is_empty() || images > 0 {
@@ -504,7 +510,7 @@ fn user_bubble<'a>(message: &str, notes: &[String], images: usize, index: Option
         let rewind = button(icon(Icon::Undo, 14.0)).padding(4).style(theme::ghost).on_press(Message::AskRewind(index, message.to_string()));
         actions = actions.push(iced::widget::tooltip(
             rewind,
-            container(text("Rewind to this message").size(12)).padding([4, 8]).style(theme::tooltip),
+            container(text(tr("Rewind to this message")).size(12)).padding([4, 8]).style(theme::tooltip),
             iced::widget::tooltip::Position::Top,
         ));
     }
@@ -516,8 +522,8 @@ fn reply_actions<'a>(raw: &str) -> Element<'a, Message> {
         button(row![icon(i, 13.0), text(label).size(12)].spacing(4).align_y(Alignment::Center)).padding([2, 6]).style(theme::ghost).on_press(m)
     };
     row![
-        action(Icon::Copy, "Copy", Message::Copy(raw.to_string())),
-        action(Icon::File, "Save as note", Message::SaveAsNote(raw.to_string())),
+        action(Icon::Copy, tr("Copy"), Message::Copy(raw.to_string())),
+        action(Icon::File, tr("Save as note"), Message::SaveAsNote(raw.to_string())),
     ]
     .spacing(4)
     .into()
@@ -525,10 +531,10 @@ fn reply_actions<'a>(raw: &str) -> Element<'a, Message> {
 
 fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {
     let what = match call.name.as_str() {
-        "edit" => format!("Scoobert wants to edit {}", call.arg("path")),
-        "write" => format!("Scoobert wants to write {}", call.arg("path")),
-        "bash" | "powershell" => "Scoobert wants to run a command".to_string(),
-        other => format!("Scoobert wants to use {other}"),
+        "edit" => trf("Scoobert wants to edit {path}", &[("path", &call.arg("path"))]),
+        "write" => trf("Scoobert wants to write {path}", &[("path", &call.arg("path"))]),
+        "bash" | "powershell" => tr("Scoobert wants to run a command").to_string(),
+        other => trf("Scoobert wants to use {tool}", &[("tool", &other)]),
     };
     let preview: Element<'a, Message> = match call.name.as_str() {
         "edit" => diff_view(&crate::agent::tools::unified_diff(
@@ -540,13 +546,13 @@ fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {
         _ => output_view(&serde_json::to_string_pretty(&call.arguments).unwrap_or_default()),
     };
     let buttons = row![
-        button(text("Allow").size(13)).padding([6, 14]).style(theme::primary).on_press(Message::Approve(id, Decision::Allow)),
-        button(text(format!("Allow {} for this conversation", verb(&call.name).to_lowercase())).size(13))
+        button(text(tr("Allow")).size(13)).padding([6, 14]).style(theme::primary).on_press(Message::Approve(id, Decision::Allow)),
+        button(text(trf("Allow {verb} for this conversation", &[("verb", &verb(&call.name).to_lowercase())])).size(13))
             .padding([6, 14])
             .style(theme::secondary)
             .on_press(Message::Approve(id, Decision::Always)),
         space::horizontal(),
-        button(text("Deny").size(13)).padding([6, 14]).style(theme::danger).on_press(Message::Approve(id, Decision::Deny)),
+        button(text(tr("Deny")).size(13)).padding([6, 14]).style(theme::danger).on_press(Message::Approve(id, Decision::Deny)),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -563,16 +569,30 @@ fn working_dot<'a>() -> Element<'a, Message> {
 
 pub fn verb(tool: &str) -> String {
     match tool {
-        "read" => "Read",
-        "edit" => "Edit",
-        "write" => "Write",
-        "bash" | "powershell" => "Run",
-        "web_search" => "Search",
-        "web_read" => "Read page",
-        "new_project" => "Start project",
+        "read" => tr("Read"),
+        "edit" => tr("Edit"),
+        "write" => tr("Write"),
+        "bash" | "powershell" => tr("Run"),
+        "web_search" => tr("Search"),
+        "web_read" => tr("Read page"),
+        "new_project" => tr("Start project"),
         other => other,
     }
     .to_string()
+}
+
+/// What the model is doing while it writes a call to `tool`, before the call runs.
+fn preparing(tool: &str) -> String {
+    match tool {
+        "read" => tr("Choosing a file to read").to_string(),
+        "edit" => tr("Writing an edit").to_string(),
+        "write" => tr("Writing a file").to_string(),
+        "bash" | "powershell" => tr("Writing a command").to_string(),
+        "web_search" => tr("Writing a search").to_string(),
+        "web_read" => tr("Choosing a page to read").to_string(),
+        "new_project" => tr("Setting up a project").to_string(),
+        other => trf("Preparing {tool}", &[("tool", &other)]),
+    }
 }
 
 fn target(call: &ToolCall) -> String {
@@ -580,7 +600,7 @@ fn target(call: &ToolCall) -> String {
         "bash" | "powershell" => call.arg("command").lines().next().unwrap_or_default().to_string(),
         "web_search" => call.arg("query").to_string(),
         "web_read" => match call.arguments.get("find").and_then(|v| v.as_str()) {
-            Some(find) => format!("{} (looking for {find})", call.arg("url")),
+            Some(find) => trf("{url} (looking for {find})", &[("url", &call.arg("url")), ("find", &find)]),
             None => call.arg("url").to_string(),
         },
         "new_project" => call.arg("name").to_string(),
@@ -638,7 +658,7 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
         let header = row![
             text(language.unwrap_or("text")).size(12).style(theme::muted),
             space::horizontal(),
-            button(row![icon(Icon::Copy, 13.0), text("Copy").size(12)].spacing(4).align_y(Alignment::Center))
+            button(row![icon(Icon::Copy, 13.0), text(tr("Copy")).size(12)].spacing(4).align_y(Alignment::Center))
                 .padding([2, 6])
                 .style(theme::ghost)
                 .on_press(Message::Copy(code.to_string())),

@@ -36,7 +36,8 @@ pub fn clip(text: &str, max: usize) -> String {
 }
 
 pub fn gb(bytes: u64) -> String {
-    format!("{:.1} GB", bytes as f64 / 1e9)
+    let n = format!("{:.1}", bytes as f64 / 1e9).replace('.', &crate::i18n::current().decimal.to_string());
+    crate::i18n::trf("{size} GB", &[("size", &n)])
 }
 
 /// "2.1K" style token counts for the context meter.
@@ -65,27 +66,30 @@ fn age_unit(secs: i64) -> Option<(i64, usize)> {
 
 /// A short age for lists, such as "5 min ago" or "3 wk ago".
 pub fn ago(millis: i64) -> String {
-    const UNITS: [&str; 6] = ["min", "h", "d", "wk", "mo", "yr"];
+    use crate::i18n::key;
+    const UNITS: [&str; 6] = [key("{n} min ago"), key("{n} h ago"), key("{n} d ago"), key("{n} wk ago"), key("{n} mo ago"), key("{n} yr ago")];
     match age_unit((now_millis() - millis).max(0) / 1000) {
-        Some((n, i)) => format!("{n} {} ago", UNITS[i]),
-        None => "just now".into(),
+        Some((n, i)) => crate::i18n::trf(UNITS[i], &[("n", &n)]),
+        None => crate::i18n::tr("just now").into(),
     }
 }
 
 /// A spelled-out age, such as "5 minutes ago" or "2 years ago".
 pub fn ago_long(millis: i64) -> String {
-    const UNITS: [&str; 6] = ["minute", "hour", "day", "week", "month", "year"];
+    use crate::i18n::key;
+    const ONE: [&str; 6] = [key("1 minute ago"), key("1 hour ago"), key("1 day ago"), key("1 week ago"), key("1 month ago"), key("1 year ago")];
+    const MANY: [&str; 6] = [key("{n} minutes ago"), key("{n} hours ago"), key("{n} days ago"), key("{n} weeks ago"), key("{n} months ago"), key("{n} years ago")];
     match age_unit((now_millis() - millis).max(0) / 1000) {
-        Some((1, i)) => format!("1 {} ago", UNITS[i]),
-        Some((n, i)) => format!("{n} {}s ago", UNITS[i]),
-        None => "Just now".into(),
+        Some((1, i)) => crate::i18n::tr(ONE[i]).into(),
+        Some((n, i)) => crate::i18n::trf(MANY[i], &[("n", &n)]),
+        None => crate::i18n::tr("Just now").into(),
     }
 }
 
-/// The local date and time, such as "Sep 30, 2026, 8:41 AM".
+/// The local date and time in the interface language's format, such as "Sep 30, 2026, 8:41 AM".
 pub fn date_time(millis: i64) -> String {
     chrono::DateTime::from_timestamp_millis(millis)
-        .map(|d| d.with_timezone(&chrono::Local).format("%b %-d, %Y, %-I:%M %p").to_string())
+        .map(|d| d.with_timezone(&chrono::Local).format(crate::i18n::current().date_time).to_string())
         .unwrap_or_default()
 }
 
@@ -106,13 +110,14 @@ mod tests {
     }
 }
 
-/// A count with commas between groups of three digits, such as 12,345.
+/// A count with the interface language's separator between groups of three digits, such as 12,345.
 pub fn thousands(n: u64) -> String {
+    let group = crate::i18n::current().group;
     let s = n.to_string();
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
         if i > 0 && (s.len() - i) % 3 == 0 {
-            out.push(',');
+            out.push(group);
         }
         out.push(ch);
     }
@@ -121,10 +126,14 @@ pub fn thousands(n: u64) -> String {
 
 /// A rough length of time for a progress line, such as about 9 minutes.
 pub fn about_duration(secs: u64) -> String {
+    use crate::i18n::{tr, trf};
     match secs {
-        0..50 => "less than a minute".into(),
-        50..90 => "about a minute".into(),
-        90..3_300 => format!("about {} minutes", (secs + 30) / 60),
-        _ => format!("about {:.1} hours", secs as f64 / 3600.0),
+        0..50 => tr("less than a minute").into(),
+        50..90 => tr("about a minute").into(),
+        90..3_300 => trf("about {n} minutes", &[("n", &((secs + 30) / 60))]),
+        _ => {
+            let hours = format!("{:.1}", secs as f64 / 3600.0).replace('.', &crate::i18n::current().decimal.to_string());
+            trf("about {n} hours", &[("n", &hours)])
+        }
     }
 }
