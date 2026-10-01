@@ -28,7 +28,7 @@ use crate::agent::conversation::{Conversation, Image, Summary};
 use crate::agent::{Decision, Event, Host, ModelOption, Snapshot};
 use crate::i18n::{tr, trf};
 use crate::llama::{ServerStatus, SharedSettings};
-use crate::store::{Approvals, State, ThemeChoice, Thinking};
+use crate::store::{Approvals, PlanFirst, State, ThemeChoice, Thinking};
 use crate::update::Release;
 use crate::util::{ago, clip, short_count};
 use chat::Chat;
@@ -42,8 +42,18 @@ const NOTES_MIN: f32 = 300.0;
 const COMPACT_WIDTH: f32 = 1100.0;
 /// The top bar's sidebar button and logo when the sidebar is hidden.
 const BRAND_COMPACT: f32 = 104.0;
+/// One of the minimize, maximize, and close buttons.
+const CAPTION_BUTTON: f32 = 48.0;
+const CAPTION_HEIGHT: f32 = 40.0;
+/// The glyphs fill about a quarter of a button's width, as most programs draw them.
+const CAPTION_GLYPH: f32 = 22.0;
+
+/// Between the muted and the text color, so the window buttons are easy to find without standing out.
+fn caption_glyph(t: &theme::Tokens) -> iced::Color {
+    theme::mix(t.muted, t.text, 0.35)
+}
 /// The minimize, maximize, and close buttons.
-const CAPTION_WIDTH: f32 = 138.0;
+const CAPTION_WIDTH: f32 = 3.0 * CAPTION_BUTTON;
 /// Below this window width the top bar shows the project without the conversation title, and tightens the rest.
 const LOCATION_WIDTH: f32 = 900.0;
 const COMPOSER_ID: &str = "composer";
@@ -175,6 +185,8 @@ pub enum Message {
 
     Composer(text_editor::Action),
     Send,
+    /// Gives the queued messages to the model while it thinks, instead of after its current step.
+    SendNow,
     /// Resumes an interrupted task with a hidden note that explains what happened.
     Continue,
     Stop,
@@ -186,9 +198,11 @@ pub enum Message {
     SetThinking(Thinking),
     SetLanguage(&'static crate::i18n::Language),
     LanguageMenu(bool),
+    ApprovalsMenu(bool),
     ToggleSidebar,
     CloseDrawer,
     SetApprovals(Approvals),
+    SetPlanFirst(PlanFirst),
     Approve(u64, Decision),
     Toggle(String),
     Link(String),
@@ -251,6 +265,7 @@ pub struct App {
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
     language_menu: bool,
+    approvals_menu: bool,
     /// The sidebar open over the chat, in a window too narrow to show it beside the chat.
     sidebar_drawer: bool,
     /// The interface font when the window was built, which text without its own font keeps until a restart.
@@ -326,6 +341,7 @@ impl App {
             update_progress: None,
             web_offer: false,
             language_menu: false,
+            approvals_menu: false,
             sidebar_drawer: false,
             start_font: fonts::ui(),
             font_noted: false,
@@ -803,6 +819,13 @@ impl App {
                 self.composer.perform(action);
             }
             Message::Send => return self.send(true),
+            Message::SendNow => {
+                if let (Some(host), Some(chat)) = (&self.host, &self.chat)
+                    && !host.deliver_now(&chat.id)
+                {
+                    self.toast(tr("Scoobert is writing a tool call, so the message waits until that step finishes."));
+                }
+            }
             Message::Continue => {
                 let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut()) else { return Task::none() };
                 match host.prompt(&chat.id, tr("Continue").into(), Vec::new(), true) {
@@ -907,7 +930,13 @@ impl App {
                 }
             }
             Message::SetApprovals(a) => {
+                self.approvals_menu = false;
                 self.state.settings.approvals = a;
+                self.save();
+            }
+            Message::ApprovalsMenu(open) => self.approvals_menu = open,
+            Message::SetPlanFirst(plan) => {
+                self.state.settings.plan_first = plan;
                 self.save();
             }
             Message::SetLanguage(language) => {
@@ -1158,7 +1187,11 @@ impl App {
             return Task::none();
         }
         let images = std::mem::take(&mut self.images);
-        match host.prompt(&chat.id, text.clone(), images, false) {
+        let sent = match self.state.settings.plan_first {
+            PlanFirst::Discuss | PlanFirst::Build if plans_first(chat) => host.plan(&chat.id, text.clone(), images, self.state.settings.plan_first == PlanFirst::Build),
+            _ => host.prompt(&chat.id, text.clone(), images, false),
+        };
+        match sent {
             Ok(()) => {
                 chat.pending = Some(text);
                 chat.running = true;
@@ -1456,9 +1489,12 @@ impl App {
             notes_label = notes_label.push(text(tr("Notes")).size(13));
         }
         right = right.push(button(notes_label).padding([6, 12]).style(notes_style).on_press(Message::Notes(notes::Msg::TogglePane)));
-        let caption = |i: Icon, m: Message| button(center(icon(i, 16.0))).width(46).height(36).padding(0).style(theme::caption).on_press(m);
-        let close_glyph: Element<'_, Message> = if self.close_hover { icons::tinted(Icon::Close, 16.0, |_| iced::Color::WHITE).into() } else { icon(Icon::Close, 16.0).into() };
-        let close = mouse_area(button(center(close_glyph)).width(46).height(36).padding(0).style(theme::caption_close).on_press(Message::Quit))
+        let caption = |i: Icon, m: Message| {
+            button(center(icons::tinted(i, CAPTION_GLYPH, caption_glyph))).width(CAPTION_BUTTON).height(CAPTION_HEIGHT).padding(0).style(theme::caption).on_press(m)
+        };
+        let close_glyph =
+            if self.close_hover { icons::tinted(Icon::Close, CAPTION_GLYPH, |_| iced::Color::WHITE) } else { icons::tinted(Icon::Close, CAPTION_GLYPH, caption_glyph) };
+        let close = mouse_area(button(center(close_glyph)).width(CAPTION_BUTTON).height(CAPTION_HEIGHT).padding(0).style(theme::caption_close).on_press(Message::Quit))
             .on_enter(Message::CloseHover(true))
             .on_exit(Message::CloseHover(false));
         let controls = row![
@@ -1494,7 +1530,7 @@ impl App {
             crumbs = crumbs.push(icons::tinted(Icon::ChevronRight, 14.0, |t| t.muted));
             // A long project name leaves less room, and the title is shortened with an ellipsis before it reaches the model menu.
             let room = 46usize.saturating_sub(name.chars().count()).max(12);
-            crumbs = crumbs.push(text(clip(&c.title, room)).size(13).style(theme::muted).wrapping(text::Wrapping::None));
+            crumbs = crumbs.push(text(clip(&c.title, room)).size(13).font(fonts::for_text(&c.title)).style(theme::muted).wrapping(text::Wrapping::None));
         }
         // Lines the label up with the messages, which sit 24 in from the chat column and center once it is wider than they are.
         let (docked, notes_width) = self.panes();
@@ -1685,7 +1721,7 @@ impl App {
         for (place, s) in hits {
             let project = place.as_deref().map(project_name).unwrap_or_else(|| tr("Chats").into());
             let label = column![
-                container(text(clip(&s.title, 34)).size(13).wrapping(text::Wrapping::None)).width(Fill).clip(true),
+                container(text(clip(&s.title, 34)).size(13).font(fonts::for_text(&s.title)).wrapping(text::Wrapping::None)).width(Fill).clip(true),
                 row![text(project).size(12).style(theme::muted), space::horizontal(), text(ago(s.modified)).size(12).style(theme::muted)],
             ]
             .spacing(2);
@@ -1712,14 +1748,19 @@ impl App {
                 .into();
         }
         // The title gets the space the time leaves and is cut there, so the two never overlap.
+        let when = ago(s.modified);
         let label = row![
-            container(text(clip(&s.title, 30)).size(13).wrapping(text::Wrapping::None)).width(Fill).clip(true),
-            text(ago(s.modified)).size(12).style(theme::muted).wrapping(text::Wrapping::None),
+            container(text(clip(&s.title, 30)).size(13).font(fonts::for_text(&s.title)).wrapping(text::Wrapping::None)).width(Fill).clip(true),
+            text(when.clone()).size(12).style(theme::muted).wrapping(text::Wrapping::None),
         ]
         .spacing(8)
         .align_y(Alignment::Center);
         let item = button(label).width(Fill).padding([6, 10]).style(theme::list_item(selected)).on_press(Message::OpenConversation(s.file.clone()));
         let base = container(item).height(32);
+        // The buttons hide the whole time and fade over the end of the title, as on a project row, instead of
+        // leaving half of the time showing through the fade.
+        const FADE: f32 = 20.0;
+        let solid = (estimated_width(&when, 12.0) + 10.0 + 8.0).max(46.0);
         let actions = container(
             row![
                 button(icon(Icon::Pencil, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::StartRename(s.file.clone(), s.title.clone())),
@@ -1727,10 +1768,12 @@ impl App {
             ]
             .align_y(Alignment::Center),
         )
+        .width(FADE + solid)
         .height(Fill)
+        .align_x(Alignment::End)
         .align_y(Alignment::Center)
-        .padding(iced::Padding { left: 20.0, right: 6.0, ..iced::Padding::ZERO })
-        .style(theme::conversation_actions(selected));
+        .padding(iced::Padding { left: FADE, right: 6.0, ..iced::Padding::ZERO })
+        .style(theme::conversation_actions(selected, FADE / (FADE + solid)));
         hover(base, container(actions).width(Fill).height(Fill).align_x(Alignment::End)).into()
     }
 
@@ -1778,7 +1821,29 @@ impl App {
         }
         col = col.push(container(self.composer_view()).padding(iced::Padding { top: 8.0, right: 24.0, bottom: 4.0, left: 24.0 }).center_x(Fill));
         col = col.push(container(self.footer()).padding(iced::Padding { top: 0.0, right: 24.0, bottom: 10.0, left: 24.0 }).center_x(Fill));
-        col.width(Fill).height(Fill).into()
+        let pane: Element<'_, Message> = col.width(Fill).height(Fill).into();
+        if !self.approvals_menu {
+            return pane;
+        }
+        let mut list = Column::new().spacing(2);
+        for a in Approvals::ALL {
+            let mark: Element<'_, Message> =
+                if a == self.state.settings.approvals { icons::tinted(Icon::Check, 14.0, |t| t.accent_ink).into() } else { space().width(14).into() };
+            list = list.push(
+                button(row![text(a.to_string()).size(13).width(Fill), mark].spacing(8).align_y(Alignment::Center))
+                    .width(Fill)
+                    .padding([6, 10])
+                    .style(theme::row_button)
+                    .on_press(Message::SetApprovals(a)),
+            );
+        }
+        // The menu opens above the footer's right end, laid out like the footer so the two line up at any width.
+        let menu = container(container(container(list).width(260).padding(4).style(theme::popover)).max_width(820).width(Fill).align_x(Alignment::End))
+            .center_x(Fill)
+            .height(Fill)
+            .align_y(Alignment::End)
+            .padding(iced::Padding { top: 0.0, right: 24.0, bottom: 38.0, left: 24.0 });
+        stack![pane, mouse_area(container(space()).width(Fill).height(Fill)).on_press(Message::ApprovalsMenu(false)), menu].into()
     }
 
     fn server_error(&self) -> Option<String> {
@@ -1897,10 +1962,55 @@ impl App {
                 .style(theme::banner),
             );
         }
+        // Shown before any typing, because a task here could not run beside the one that holds the local model.
+        if !running
+            && let (Some(host), Some(chat)) = (&self.host, &self.chat)
+            && let Some(other) = host.local_task_elsewhere(&chat.id).filter(|o| o.running)
+        {
+            let body = if other.same_model {
+                tr("Both conversations use the same model, so a message you send here waits until that task finishes.")
+            } else {
+                tr("That task uses another model. Stop it before you send a message here.")
+            };
+            let place = (!crate::agent::is_general(&other.cwd)).then(|| other.cwd.clone());
+            col = col.push(
+                container(
+                    row![
+                        column![
+                            text(trf("Scoobert is working in “{title}”.", &[("title", &clip(&other.title, 60))])).size(13).font(fonts::ui_semibold()),
+                            text(body).size(12).style(theme::muted),
+                        ]
+                        .spacing(4)
+                        .width(Fill),
+                        button(text(tr("Go to it")).size(13)).padding([5, 12]).style(theme::secondary).on_press(Message::OpenIn(place, other.file.clone())),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+                )
+                .padding(10)
+                .width(Fill)
+                .style(theme::banner),
+            );
+        }
         if !self.images.is_empty() {
             col = col.push(attachments);
         }
-        col = col.push(input).push(tools);
+        col = col.push(input);
+        if !running && self.chat.as_ref().is_some_and(plans_first) {
+            let mut choices = row![text(tr("Before it builds:")).size(12).style(theme::muted)].spacing(4).align_y(Alignment::Center);
+            for plan in PlanFirst::ALL {
+                let style = if plan == self.state.settings.plan_first { theme::secondary } else { theme::ghost };
+                choices = choices.push(button(text(plan.to_string()).size(12)).padding([3, 8]).style(style).on_press(Message::SetPlanFirst(plan)));
+            }
+            col = col.push(tooltip(
+                choices,
+                container(text(tr("With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.")).size(12).width(300))
+                    .padding([4, 8])
+                    .style(theme::tooltip),
+                tooltip::Position::Top,
+            ));
+        }
+        col = col.push(tools);
         container(col).padding([12, 16]).max_width(820).width(Fill).style(theme::composer(false)).into()
     }
 
@@ -1913,12 +2023,16 @@ impl App {
             r = r.push(text(trf("{used} of {total} context", &[("used", &short_count(used)), ("total", &short_count(context))])).size(12).style(theme::muted));
         }
         r = r.push(space::horizontal());
+        // A button sized to the current choice, since a pick list keeps the width of its longest option.
         r = r.push(
-            pick_list(Approvals::ALL, Some(self.state.settings.approvals), Message::SetApprovals)
-                .text_size(12)
-                .padding([3, 8])
-                .style(theme::quiet_select)
-                .menu_style(theme::menu),
+            button(
+                row![text(self.state.settings.approvals.to_string()).size(12), icons::tinted(Icon::ChevronDown, 12.0, |t| t.muted)]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+            )
+            .padding([3, 8])
+            .style(theme::quiet_button)
+            .on_press(Message::ApprovalsMenu(!self.approvals_menu)),
         );
         container(r).max_width(820).width(Fill).into()
     }
@@ -1936,6 +2050,16 @@ static NEEDS_WEB: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|
 
 fn project_name(p: &std::path::Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| crate::paths::display(p))
+}
+
+/// Whether the next message can plan first: the first message of a conversation in a project.
+fn plans_first(chat: &chat::Chat) -> bool {
+    chat.is_empty() && !crate::agent::is_general(&chat.cwd)
+}
+
+/// A rough width for short UI text, wide enough for the UI font, with CJK characters counted at full width.
+fn estimated_width(s: &str, size: f32) -> f32 {
+    s.chars().map(|c| if c.is_ascii() { 0.58 } else { 1.0 }).sum::<f32>() * size
 }
 
 /// The buttons a hovered sidebar row shows, on a fade that hides the end of a long name under them.

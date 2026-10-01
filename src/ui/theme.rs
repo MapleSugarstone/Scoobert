@@ -382,19 +382,20 @@ pub fn link(theme: &Theme, status: button::Status) -> button::Style {
 /// name runs out under them instead of showing through them.
 pub fn row_actions(theme: &Theme) -> container::Style {
     let t = tokens(theme);
-    fade_into(mix(t.surface, t.surface2, 0.5))
+    fade_into(mix(t.surface, t.surface2, 0.5), 0.3)
 }
 
-/// The same fade for a conversation row, in the color of the selected row or of a hovered one.
-pub fn conversation_actions(selected: bool) -> impl Fn(&Theme) -> container::Style {
+/// The same fade for a conversation row, in the color of the selected row or of a hovered one. `ramp` is the
+/// fraction of the width the fade takes, and the rest is solid.
+pub fn conversation_actions(selected: bool, ramp: f32) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let t = tokens(theme);
-        fade_into(if selected { t.surface2 } else { mix(t.surface, t.surface2, 0.6) })
+        fade_into(if selected { t.surface2 } else { mix(t.surface, t.surface2, 0.6) }, ramp)
     }
 }
 
-fn fade_into(row: Color) -> container::Style {
-    let fade = iced::gradient::Linear::new(iced::Degrees(90.0)).add_stop(0.0, Color { a: 0.0, ..row }).add_stop(0.3, row).add_stop(1.0, row);
+fn fade_into(row: Color, ramp: f32) -> container::Style {
+    let fade = iced::gradient::Linear::new(iced::Degrees(90.0)).add_stop(0.0, Color { a: 0.0, ..row }).add_stop(ramp, row).add_stop(1.0, row);
     container::Style { background: Some(iced::Background::Gradient(fade.into())), border: border::rounded(RADIUS), ..Default::default() }
 }
 
@@ -451,6 +452,16 @@ pub fn select(theme: &Theme, status: pick_list::Status) -> pick_list::Style {
         background: t.input.into(),
         border: Border { color: border_color, width: 1.0, radius: Radius::new(RADIUS) },
     }
+}
+
+/// A button in muted text with no background, for a choice shown in a line of other text. Hovering adds a border.
+pub fn quiet_button(theme: &Theme, status: button::Status) -> button::Style {
+    let t = tokens(theme);
+    let (fg, edge) = match status {
+        button::Status::Hovered | button::Status::Pressed => (t.text, t.line),
+        _ => (t.muted, Color::TRANSPARENT),
+    };
+    button::Style { background: None, text_color: fg, border: Border { color: edge, width: 1.0, radius: Radius::new(RADIUS) }, ..Default::default() }
 }
 
 pub fn quiet_select(theme: &Theme, status: pick_list::Status) -> pick_list::Style {

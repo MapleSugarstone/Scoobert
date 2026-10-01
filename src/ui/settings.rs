@@ -20,6 +20,7 @@ use crate::util::gb;
 
 const KEEP_ALIVE: [KeepAlive; 4] = [KeepAlive(5), KeepAlive(30), KeepAlive(120), KeepAlive(0)];
 const CONTEXT_SIZES: [u32; 6] = [8192, 16_384, 32_768, 65_536, 131_072, 262_144];
+const SUPPORT_URL: &str = "https://ko-fi.com/krazvalt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -404,15 +405,25 @@ impl Panel {
                 .style(theme::list_item(self.section == section))
                 .on_press(Msg::Section(section))
         };
+        // The author's wording, kept as written in every language.
+        let support = iced::widget::rich_text![
+            iced::widget::span("Support my free games and software!: "),
+            iced::widget::span(SUPPORT_URL).link(SUPPORT_URL.to_string()).underline(true),
+        ]
+        .size(12)
+        .on_link_click(Msg::OpenUrl);
         let sidebar = column![
             text(tr("Settings")).size(18).font(fonts::ui_semibold()),
             space().height(8),
             nav(tr("General"), Section::General),
             nav(tr("Models on this computer"), Section::Local),
             nav(tr("Hosted models"), Section::Hosted),
+            space::vertical(),
+            support,
         ]
         .spacing(4)
         .width(210)
+        .height(Fill)
         .padding(16);
         let content = match self.section {
             Section::General => self.general(ctx.state, ctx.isolation),

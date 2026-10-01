@@ -498,15 +498,20 @@ impl Pane {
                 iced::widget::tooltip::Position::Bottom,
             )
         };
+        let actions = row![
+            action(Icon::Plus, tr("New note"), Msg::New),
+            action(Icon::Calendar, tr("Today's note"), Msg::Daily),
+            action(if self.wide { Icon::Shrink } else { Icon::Expand }, if self.wide { tr("Narrower") } else { tr("Wider") }, Msg::ToggleWide),
+            action(Icon::External, tr("Show the notes folder"), Msg::Reveal),
+        ]
+        .spacing(2);
+        // The tabs end with their underline, so the buttons sit above it, level with the tab labels.
         let header = row![
             tab(tr("Files"), Icon::Folder, Tab::Files),
             tab(tr("Search"), Icon::Search, Tab::Search),
             tab(tr("Graph"), Icon::Graph, Tab::Graph),
             space::horizontal(),
-            action(Icon::Plus, tr("New note"), Msg::New),
-            action(Icon::Calendar, tr("Today's note"), Msg::Daily),
-            action(if self.wide { Icon::Shrink } else { Icon::Expand }, if self.wide { tr("Narrower") } else { tr("Wider") }, Msg::ToggleWide),
-            action(Icon::External, tr("Show the notes folder"), Msg::Reveal),
+            container(actions).padding(iced::Padding { bottom: 4.5, ..iced::Padding::ZERO }),
         ]
         .spacing(2)
         .align_y(Alignment::End)

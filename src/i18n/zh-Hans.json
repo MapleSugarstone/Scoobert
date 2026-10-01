@@ -313,5 +313,18 @@
   "less than a minute": "不到 1 分钟",
   "about a minute": "约 1 分钟",
   "about {n} minutes": "约 {n} 分钟",
-  "about {n} hours": "约 {n} 小时"
+  "about {n} hours": "约 {n} 小时",
+  "Waiting for “{title}” to finish": "正在等待“{title}”完成",
+  "Scoobert is working in “{title}”.": "Scoobert 正在“{title}”中工作。",
+  "That task uses another model. Stop it before you send a message here.": "该任务使用另一个模型。请先停止它，再在这里发送消息。",
+  "Send now": "立即发送",
+  "Scoobert pauses its thinking, reads this, and carries on from where it was. A tool call it is already writing finishes first.": "Scoobert 会暂停思考，读取这条消息，然后从中断处继续。正在编写的工具调用会先完成。",
+  "Scoobert is writing a tool call, so the message waits until that step finishes.": "Scoobert 正在编写工具调用，因此消息会等到该步骤完成。",
+  "Both conversations use the same model, so a message you send here waits until that task finishes.": "两个对话使用同一个模型，因此在这里发送的消息会等到该任务完成。",
+  "Go to it": "前往",
+  "No plan": "不做计划",
+  "Plan, then discuss": "先计划再讨论",
+  "Plan, then build": "先计划再构建",
+  "Before it builds:": "开始构建前：",
+  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "启用计划后，Scoobert 会先把要构建的功能写进项目笔记，以便后续步骤和对话可以按计划进行。"
 }

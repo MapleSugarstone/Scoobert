@@ -66,6 +66,8 @@ pub enum Event {
     /// Scoobert is building a saved prompt for this model ahead of time, with the percent read so far. `None` means
     /// it finished or stopped.
     Preparing(Option<(String, u64)>),
+    /// A task finished with the local model, so a task in another conversation can use it.
+    ModelFree,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +120,35 @@ struct Live {
     queued: Mutex<Vec<(String, Vec<conversation::Image>)>>,
     /// The running task updates the notes, so the note step after it is skipped.
     notes_update: AtomicBool,
+    /// This conversation's hold on the local model, from the start of a task to the end of the steps after it.
+    turn: Mutex<Option<Turn>>,
+    /// Stops only the request in flight, so a message sent while the model thinks reaches it without ending the task.
+    step_cancel: Mutex<Option<CancellationToken>>,
+    /// When the request in flight last streamed thinking.
+    last_thought: Mutex<Option<std::time::Instant>>,
+}
+
+/// A conversation's hold on the local model. Dropping it lets the next waiting task start.
+struct Turn {
+    holder: Arc<Mutex<Option<ConvId>>>,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *self.holder.lock().unwrap() = None;
+    }
+}
+
+/// Another conversation's task that holds the local model.
+#[derive(Debug, Clone)]
+pub struct Elsewhere {
+    pub title: String,
+    pub cwd: PathBuf,
+    pub file: PathBuf,
+    /// The task is still running, rather than saving its cache and taking notes after it.
+    pub running: bool,
+    pub same_model: bool,
 }
 
 enum Target {
@@ -134,6 +165,11 @@ pub struct Host {
     convs: Mutex<HashMap<ConvId, Arc<Live>>>,
     /// Stops the saved prompts being built ahead of time.
     bake_cancel: Mutex<Option<CancellationToken>>,
+    /// Held by one task on the local model at a time. The server has one slot, so two tasks would take turns on it
+    /// and read their whole conversation again at every turn.
+    local_turn: Arc<tokio::sync::Mutex<()>>,
+    /// The conversation that holds `local_turn`.
+    turn_holder: Arc<Mutex<Option<ConvId>>>,
     approvals: Mutex<HashMap<u64, (ConvId, oneshot::Sender<Decision>)>>,
     next_approval: AtomicU64,
     keys: Mutex<HashMap<String, Option<String>>>,
@@ -160,6 +196,9 @@ const KEEP_SHARE: f64 = 0.35;
 /// Characters per token when estimating, set low so the estimate errs toward summarizing early.
 const CHARS_PER_TOKEN: f64 = 3.2;
 const MAX_RETRIES: u32 = 3;
+/// Thinking streams a token every second or so, even on a CPU. A longer pause means the model is writing a tool call,
+/// which the server sends only once it is complete, so stopping then would lose it.
+const THOUGHT_GAP: std::time::Duration = std::time::Duration::from_secs(3);
 /// How long a task runs between saves of its prompt cache. A save of a large model's cache writes about a gigabyte.
 const SAVE_DURING_TASK: std::time::Duration = std::time::Duration::from_secs(300);
 /// Thinking tokens a local model may spend on a side request before it must answer.
@@ -169,6 +208,11 @@ const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the las
 /// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
 /// Instructions for the Update notes button. `{notes}` is the notes folder.
 const NOTES_UPDATE: &str = "<notes_update>Update the project notes from this whole conversation, then stop. Read {notes}/Features.md first if it exists. Keep it in this form: a # Features heading, a ## Done section, and a ## To do section, with one line per feature written as - **Short name**: one sentence about what it does or what it still needs. Add every feature this conversation finished to Done, and every feature it planned, started, or left unfinished to To do. Move an item from To do to Done when it is finished instead of listing it twice, and keep the items from earlier conversations. Link a feature to its topic page with [[Topic]] when one exists. Then add each decision, convention, or known problem a later conversation needs to the topic page it belongs to, or to Decisions.md, Conventions.md, or Problems.md in {notes}/. Use edit for small changes and write for new files, change only files in {notes}/, and reply with a short list of what you changed.</notes_update>";
+/// The planning half of the Plan first option, which keeps the plan in notes that later conversations and summaries
+/// can read. `{notes}` is the notes folder.
+const PLAN: &str = "Before you write any code, plan this project in its notes. Think through the features the request needs, including the ones it implies but does not name. Write {notes}/Features.md with a # Features heading, an empty ## Done section, and a ## To do section with one line per feature, written as - **Short name**: one sentence about what it does, linked to its page as [[Short name]]. For each feature that needs more than a few lines of code, write {notes}/Short name.md with what it does, the files it will add or change, how it connects to other features through [[links]], and how to check that it works. Put decisions that affect the whole project in {notes}/Decisions.md, with the reason for each. Keep each page short, since you will read them again later instead of the whole conversation.";
+const PLAN_DISCUSS: &str = "Then stop without writing code, and reply with a short summary of the plan and the questions the user should answer before you build.";
+const PLAN_BUILD: &str = "Then build the project from the plan, one feature at a time, in an order where each step can be checked. After each feature works, move its line from To do to Done in Features.md, and correct its page where the build differs from the plan.";
 /// Context for a message the user sent while a task ran.
 pub const QUEUED: &str = "<queued>The user sent this while you were working. Take it into account, and carry on with the task unless it asks you to change course.</queued>";
 const INTERRUPTED: &str = "<interrupted>The user stopped your previous reply before it finished. Follow this message. Do not resume the stopped work unless this message asks you to.</interrupted>";
@@ -195,6 +239,8 @@ impl Host {
             events,
             convs: Mutex::new(HashMap::new()),
             bake_cancel: Mutex::new(None),
+            local_turn: Arc::new(tokio::sync::Mutex::new(())),
+            turn_holder: Arc::new(Mutex::new(None)),
             approvals: Mutex::new(HashMap::new()),
             next_approval: AtomicU64::new(1),
             keys: Mutex::new(HashMap::new()),
@@ -406,6 +452,9 @@ impl Host {
             run_notes: Mutex::new(Vec::new()),
             queued: Mutex::new(Vec::new()),
             notes_update: AtomicBool::new(false),
+            turn: Mutex::new(None),
+            step_cancel: Mutex::new(None),
+            last_thought: Mutex::new(None),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -420,6 +469,10 @@ impl Host {
     pub fn warm(self: &Arc<Self>, id: &str) {
         let Ok(live) = self.live(id) else { return };
         if live.running.load(Ordering::SeqCst) {
+            return;
+        }
+        // Reading this conversation into the slot, or loading its model, would undo the work of the task that holds it.
+        if self.turn_holder.lock().unwrap().as_deref().is_some_and(|holder| holder != id) {
             return;
         }
         self.stop_baking();
@@ -569,6 +622,22 @@ impl Host {
         Ok(())
     }
 
+    /// Delivers the held messages now when the model is thinking. The request stops, its thinking so far stays in
+    /// the conversation, and the next request adds the messages. Returns whether it did.
+    pub fn deliver_now(&self, id: &str) -> bool {
+        let Ok(live) = self.live(id) else { return false };
+        if !live.last_thought.lock().unwrap().is_some_and(|t| t.elapsed() < THOUGHT_GAP) {
+            return false;
+        }
+        match live.step_cancel.lock().unwrap().as_ref() {
+            Some(step) => {
+                step.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Takes back the messages a task ended without reading.
     pub fn take_queued(&self, id: &str) -> Vec<(String, Vec<conversation::Image>)> {
         self.live(id).map(|l| std::mem::take(&mut *l.queued.lock().unwrap())).unwrap_or_default()
@@ -589,19 +658,112 @@ impl Host {
     }
 
     pub fn prompt(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool) -> anyhow::Result<()> {
-        self.start(id, text, images, resume, None)
+        self.start(id, text, images, resume, None, false)
+    }
+
+    /// Sends the first message of a conversation with instructions to plan the project in its notes first, and then
+    /// either stop for the user or build from the plan.
+    pub fn plan(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, then_build: bool) -> anyhow::Result<()> {
+        let folder = self.settings().notes_folder;
+        let next = if then_build { PLAN_BUILD } else { PLAN_DISCUSS };
+        let instructions = format!("<plan_first>{PLAN} {next}</plan_first>").replace("{notes}", &folder);
+        // A plan that stops for the user wrote the notes already, so the note step after it has nothing to add.
+        self.start(id, text, images, false, Some(instructions), !then_build)
+    }
+
+    /// The task in another conversation that holds the local model, which a task in `id` would wait for or, on
+    /// another model, would have to stop first. `None` when this conversation uses a hosted model.
+    pub fn local_task_elsewhere(&self, id: &str) -> Option<Elsewhere> {
+        let holder = self.turn_holder.lock().unwrap().clone()?;
+        if holder == id {
+            return None;
+        }
+        let (mine, other) = {
+            let convs = self.convs.lock().unwrap();
+            (convs.get(id).cloned()?, convs.get(&holder).cloned()?)
+        };
+        let model = mine.conv.lock().unwrap().model.clone();
+        if self.settings().hosted_models.iter().any(|h| h.reference() == model) {
+            return None;
+        }
+        let c = other.conv.lock().unwrap();
+        Some(Elsewhere {
+            title: c.display_title(),
+            cwd: c.cwd.clone(),
+            file: c.file.clone(),
+            running: other.running.load(Ordering::SeqCst),
+            same_model: c.model == model,
+        })
+    }
+
+    /// Waits until no other conversation's task holds the local model, then holds it for this task and the steps
+    /// after it.
+    async fn take_turn(&self, live: &Live, id: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
+        if live.turn.lock().unwrap().is_some() {
+            return Ok(());
+        }
+        let guard = match self.local_turn.clone().try_lock_owned() {
+            Ok(guard) => guard,
+            Err(_) => {
+                // The holder is another conversation's task, or this conversation's steps after its last task.
+                let text = match self.local_task_elsewhere(id) {
+                    Some(other) => trf("Waiting for “{title}” to finish", &[("title", &other.title)]),
+                    None => tr("Getting ready...").into(),
+                };
+                self.emit(Event::Activity { conv: id.into(), text: Some(text) });
+                tokio::select! {
+                    guard = self.local_turn.clone().lock_owned() => guard,
+                    _ = cancel.cancelled() => return Err(crate::util::Cancelled.into()),
+                }
+            }
+        };
+        *self.turn_holder.lock().unwrap() = Some(id.to_string());
+        *live.turn.lock().unwrap() = Some(Turn { holder: self.turn_holder.clone(), _guard: guard });
+        // Reads that only prepare other conversations would take turns with this task on the slot.
+        self.stop_baking();
+        for (other, l) in self.convs.lock().unwrap().iter() {
+            if other != id
+                && let Some(t) = l.cache_cancel.lock().unwrap().as_ref()
+            {
+                t.cancel();
+            }
+        }
+        Ok(())
+    }
+
+    /// Lets the next waiting task use the local model.
+    fn release_turn(&self, live: &Live) {
+        if live.turn.lock().unwrap().take().is_some() {
+            self.emit(Event::ModelFree);
+        }
     }
 
     /// Asks the model to update the project's notes from the whole conversation: the features it finished and the
     /// ones still to do on the Features page, and other lasting facts on their topic pages.
     pub fn update_notes(self: &Arc<Self>, id: &str) -> anyhow::Result<()> {
         let folder = self.settings().notes_folder;
-        self.start(id, tr("Update the notes from this conversation.").into(), Vec::new(), false, Some(NOTES_UPDATE.replace("{notes}", &folder)))
+        self.start(id, tr("Update the notes from this conversation.").into(), Vec::new(), false, Some(NOTES_UPDATE.replace("{notes}", &folder)), true)
     }
 
-    /// Starts a task. `instructions` go with the message for the model only.
-    fn start(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, resume: bool, instructions: Option<String>) -> anyhow::Result<()> {
+    /// Starts a task. `instructions` go with the message for the model only. `notes_written` skips the note step
+    /// after the task, because the task itself wrote the notes.
+    fn start(
+        self: &Arc<Self>,
+        id: &str,
+        text: String,
+        images: Vec<conversation::Image>,
+        resume: bool,
+        instructions: Option<String>,
+        notes_written: bool,
+    ) -> anyhow::Result<()> {
         let live = self.live(id)?;
+        // Loading another model would stop the task that runs on the loaded one.
+        if let Some(other) = self.local_task_elsewhere(id)
+            && other.running
+            && !other.same_model
+        {
+            bail!("{} {}", trf("Scoobert is working in “{title}”.", &[("title", &other.title)]), tr("That task uses another model. Stop it before you send a message here."));
+        }
         if live.running.swap(true, Ordering::SeqCst) {
             bail!("Scoobert is still working on the last message.");
         }
@@ -613,8 +775,7 @@ impl Host {
         }
         let host = self.clone();
         let conv_id = id.to_string();
-        // A notes update already writes what the note step would ask for.
-        live.notes_update.store(instructions.is_some(), Ordering::SeqCst);
+        live.notes_update.store(notes_written, Ordering::SeqCst);
         self.rt.spawn(async move {
             let result = host.run(&live, &conv_id, text, images, resume, instructions, &cancel).await;
             if let Err(err) = &result
@@ -630,6 +791,8 @@ impl Host {
             host.emit(Event::Settled { conv: conv_id.clone(), context, interrupted });
             if result.is_ok() {
                 host.after_run(live, conv_id);
+            } else {
+                host.release_turn(&live);
             }
         });
         Ok(())
@@ -692,6 +855,9 @@ impl Host {
 
         let target = self.target(&model_name)?;
         let ep = self.endpoint(&target);
+        if matches!(target, Target::Local(_)) {
+            self.take_turn(live, id, cancel).await?;
+        }
         let _busy = matches!(target, Target::Local(_)).then(|| self.llama.busy());
         if let Target::Local(model) = &target {
             let wait = live.background.try_lock().is_err();
@@ -761,7 +927,25 @@ impl Host {
             if ep.local {
                 body["return_progress"] = true.into();
             }
-            let result = self.send_with_retries(id, &target, &ep, &body, cancel).await;
+            let step = cancel.child_token();
+            *live.step_cancel.lock().unwrap() = Some(step.clone());
+            let result = self.send_with_retries(id, &target, &ep, &body, &step).await;
+            *live.step_cancel.lock().unwrap() = None;
+            *live.last_thought.lock().unwrap() = None;
+            // The user sent a message while the model thought. The thinking so far stays, and the next request
+            // adds the message after it.
+            if step.is_cancelled() && !cancel.is_cancelled() {
+                if let Ok(mut thought) = result
+                    && !thought.thinking.is_empty()
+                {
+                    thought.tool_calls.clear();
+                    thought.resend_thinking = true;
+                    let message = Message::Assistant(thought);
+                    live.conv.lock().unwrap().push(message.clone())?;
+                    self.emit(Event::Message { conv: id.to_string(), message });
+                }
+                continue;
+            }
             let mut reply = match result {
                 Ok(r) => r,
                 Err(err) if is_cancelled(&err) => AssistantMessage { stop: StopReason::Aborted, model: ep.model.clone(), time: now_millis(), ..Default::default() },
@@ -883,7 +1067,15 @@ impl Host {
             let conv = id.to_string();
             let events = self.events.clone();
             let mut started = false;
+            let live = self.live(id).ok();
             let result = stream::send(&self.http, ep, body, cancel, |delta| {
+                if let Some(live) = &live {
+                    match &delta {
+                        Delta::Thinking(_) => *live.last_thought.lock().unwrap() = Some(std::time::Instant::now()),
+                        Delta::Text(_) | Delta::ToolCall(_) | Delta::ToolInput(_) => *live.last_thought.lock().unwrap() = None,
+                        _ => {}
+                    }
+                }
                 if !started && !matches!(delta, Delta::Progress { .. }) {
                     started = true;
                     let _ = events.send(Event::Activity { conv: conv.clone(), text: None });
@@ -1387,6 +1579,10 @@ impl Host {
     /// Returns false when the model is not on this computer or does not fit in free memory.
     pub fn preload(self: &Arc<Self>, model: &str, places: Vec<PathBuf>) -> bool {
         let Ok(Target::Local(m)) = self.target(model) else { return false };
+        // Loading a model while a task runs would stop the task's model.
+        if self.turn_holder.lock().unwrap().is_some() {
+            return false;
+        }
         let loaded = self.llama.loaded_model().as_deref() == Some(&m.name);
         if !loaded && self.llama.memory_needed(&m, self.llama.context_for(&m)) > crate::sys::available_memory() {
             return false;
@@ -1427,7 +1623,9 @@ impl Host {
     /// Builds and saves the prompt new conversations in `cwd` start from, unless it is saved already. Does nothing
     /// while a conversation is using the server or when another model is loaded.
     async fn bake(&self, cwd: &Path, model: &LocalModel, cancel: &CancellationToken) -> anyhow::Result<()> {
-        let busy = self.llama.in_use() || self.convs.lock().unwrap().values().any(|l| l.running.load(Ordering::SeqCst));
+        let busy = self.llama.in_use()
+            || self.turn_holder.lock().unwrap().is_some()
+            || self.convs.lock().unwrap().values().any(|l| l.running.load(Ordering::SeqCst));
         if busy || self.llama.loaded_model().as_deref() != Some(&model.name) {
             return Ok(());
         }
@@ -1445,7 +1643,7 @@ impl Host {
         // A bake that was stopped partway saved what it had read, and continues from there.
         let held = self.llama.restore_longest(&tokens).await;
         let result = if held == tokens.len() {
-            self.llama.save(&name).await
+            self.llama.save(&name, &tokens).await
         } else {
             self.llama
                 .fill(&tokens, Some(held), &name, cancel, |done, total| {
@@ -1466,6 +1664,24 @@ impl Host {
     fn after_run(self: &Arc<Self>, live: Arc<Live>, id: ConvId) {
         let host = self.clone();
         self.rt.spawn(async move {
+            let turn = live.turn.lock().unwrap().take();
+            let local = host.after_steps(&live, id).await;
+            if turn.is_some() {
+                drop(turn);
+                host.emit(Event::ModelFree);
+            }
+            // The model is loaded and idle now, so this is when saved prompts for new conversations get built.
+            if local {
+                let conv = live.conv.lock().unwrap().clone();
+                host.bake_soon(&conv.model, vec![conv.cwd.clone(), crate::paths::projects_root()]);
+            }
+        });
+    }
+
+    /// Saves the cache, names the conversation, and takes notes after a task. Returns whether it ran on the local model.
+    async fn after_steps(self: &Arc<Self>, live: &Arc<Live>, id: ConvId) -> bool {
+        let host = self;
+        {
             let _guard = live.background.lock().await;
             let s = host.settings();
             let conv = live.conv.lock().unwrap().clone();
@@ -1503,16 +1719,9 @@ impl Host {
                     host.llama.set_slot_owner(None);
                 }
             }
-            // The model is loaded and idle now, so this is when saved prompts for new conversations get built.
-            let bake = || {
-                if local {
-                    host.bake_soon(&conv.model, vec![conv.cwd.clone(), crate::paths::projects_root()]);
-                }
-            };
             let related = live.run_notes.lock().unwrap().clone();
             let Some(task) = finished_task(&conv, &s.notes_folder, related) else {
-                bake();
-                return;
+                return local;
             };
             let mut facts = Vec::new();
             let updated_notes = live.notes_update.swap(false, Ordering::SeqCst);
@@ -1544,8 +1753,8 @@ impl Host {
                 }
                 Err(err) => eprintln!("[notes] {err:#}"),
             }
-            bake();
-        });
+            local
+        }
     }
 
     /// Asks one short question at the end of the conversation, with thinking off. The request extends the cached

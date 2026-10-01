@@ -53,7 +53,32 @@ fn pick() -> &'static Fonts {
 /// A font made for the interface language's script. Japanese, Korean, and Chinese need one, because a Latin UI
 /// font leaves their characters to fallback fonts that mix weights and pick Han glyph shapes by the system locale.
 fn script_font() -> Option<&'static str> {
-    let code = crate::i18n::current().code;
+    cjk_family(crate::i18n::current().code)
+}
+
+/// The interface font for `text`, which may be in another language than the interface. Text with Japanese, Korean,
+/// or Chinese characters gets a font made for its script, for the same reason as `script_font`.
+pub fn for_text(text: &str) -> Font {
+    if script_font().is_some() {
+        return ui();
+    }
+    let code = if text.chars().any(|c| matches!(c, '\u{3040}'..='\u{30ff}')) {
+        "ja"
+    } else if text.chars().any(|c| matches!(c, '\u{1100}'..='\u{11ff}' | '\u{ac00}'..='\u{d7af}')) {
+        "ko"
+    } else if text.chars().any(|c| matches!(c, '\u{4e00}'..='\u{9fff}')) {
+        // Han characters alone do not say which language they are, so the system's language decides.
+        match crate::i18n::system() {
+            Some(code @ ("ko" | "zh-Hans")) => code,
+            _ => "ja",
+        }
+    } else {
+        return ui();
+    };
+    cjk_family(code).map(Font::with_name).unwrap_or_else(ui)
+}
+
+fn cjk_family(code: &str) -> Option<&'static str> {
     if cfg!(windows) {
         return match code {
             "ja" => Some("Yu Gothic UI"),

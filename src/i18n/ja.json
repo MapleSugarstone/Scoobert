@@ -313,5 +313,18 @@
   "less than a minute": "1分未満",
   "about a minute": "約1分",
   "about {n} minutes": "約{n}分",
-  "about {n} hours": "約{n}時間"
+  "about {n} hours": "約{n}時間",
+  "Waiting for “{title}” to finish": "「{title}」の完了を待っています",
+  "Scoobert is working in “{title}”.": "Scoobertは「{title}」で作業中です。",
+  "That task uses another model. Stop it before you send a message here.": "そのタスクは別のモデルを使っています。ここでメッセージを送る前に停止してください。",
+  "Send now": "今すぐ送信",
+  "Scoobert pauses its thinking, reads this, and carries on from where it was. A tool call it is already writing finishes first.": "Scoobertは思考を一時停止してこれを読み、中断したところから続けます。書き始めているツール呼び出しは先に完了します。",
+  "Scoobert is writing a tool call, so the message waits until that step finishes.": "Scoobertはツール呼び出しを書いているため、メッセージはそのステップが終わるまで待ちます。",
+  "Both conversations use the same model, so a message you send here waits until that task finishes.": "両方の会話が同じモデルを使っているため、ここで送ったメッセージはそのタスクが終わるまで待ちます。",
+  "Go to it": "移動",
+  "No plan": "計画なし",
+  "Plan, then discuss": "計画して相談",
+  "Plan, then build": "計画して作成",
+  "Before it builds:": "作成する前に：",
+  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "計画ありの場合、Scoobertはまず作成する機能をプロジェクトのノートに書き出し、後のステップや会話がそれに従えるようにします。"
 }

@@ -635,18 +635,24 @@ impl LlamaServer {
             .await?;
             let rate = (end - done) as f64 / began.elapsed().as_secs_f64().max(0.001);
             done = end;
-            self.save(filename).await?;
+            self.save(filename, &tokens[..end]).await?;
             step = ((rate * SAVE_EVERY.as_secs_f64()) as usize).clamp(FIRST_STEP, MAX_STEP);
         }
         Ok(())
     }
 
-    /// Saves the slot under `filename`. The server writes to a temporary name first, so closing Scoobert during a
-    /// save leaves the previous file whole.
-    pub async fn save(&self, filename: &str) -> anyhow::Result<()> {
+    /// Saves the slot under `filename`, which must hold `expected`. The server writes to a temporary name first, so
+    /// closing Scoobert during a save leaves the previous file whole.
+    pub async fn save(&self, filename: &str, expected: &[i32]) -> anyhow::Result<()> {
         let partial = format!("{PARTIAL}{filename}");
         self.request("/slots/0?action=save", Some(&json!({ "filename": partial })), Duration::from_secs(120), None).await?;
         let dir = paths::get().slots();
+        // A request from another conversation can run between a read and its save, and saving that conversation's
+        // state here would replace this file's good copy.
+        if !saved_tokens(&dir.join(&partial)).is_some_and(|saved| saved.starts_with(expected)) {
+            let _ = std::fs::remove_file(dir.join(&partial));
+            bail!("Another request changed the slot before {filename} was saved, so the earlier copy was kept.");
+        }
         std::fs::rename(dir.join(&partial), dir.join(filename)).context("Could not keep the saved prompt")?;
         self.shared.lock().unwrap().last_save = Instant::now();
         prune();

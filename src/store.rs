@@ -150,6 +150,34 @@ pub struct Settings {
     pub gpu_failed: Vec<String>,
     /// Lets a mixture-of-experts model larger than free memory run with its weights read from disk, slowly.
     pub models_from_disk: bool,
+    /// What the first message of a new conversation in a project does before any code.
+    pub plan_first: PlanFirst,
+}
+
+/// Whether a new conversation's first task plans the project in its notes before it writes code.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanFirst {
+    #[default]
+    Off,
+    /// Writes the plan, then stops for the user to change it.
+    Discuss,
+    /// Writes the plan, then builds from it.
+    Build,
+}
+
+impl PlanFirst {
+    pub const ALL: [PlanFirst; 3] = [PlanFirst::Off, PlanFirst::Discuss, PlanFirst::Build];
+}
+
+impl std::fmt::Display for PlanFirst {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::i18n::tr(match self {
+            PlanFirst::Off => "No plan",
+            PlanFirst::Discuss => "Plan, then discuss",
+            PlanFirst::Build => "Plan, then build",
+        }))
+    }
 }
 
 impl Default for Settings {
@@ -174,6 +202,7 @@ impl Default for Settings {
             use_gpu: false,
             gpu_failed: Vec::new(),
             models_from_disk: false,
+            plan_first: PlanFirst::Off,
         }
     }
 }

@@ -313,5 +313,18 @@
  "less than a minute": "meno di un minuto",
  "about a minute": "circa un minuto",
  "about {n} minutes": "circa {n} minuti",
- "about {n} hours": "circa {n} ore"
+ "about {n} hours": "circa {n} ore",
+ "Waiting for “{title}” to finish": "In attesa che «{title}» finisca",
+ "Scoobert is working in “{title}”.": "Scoobert sta lavorando in «{title}».",
+ "That task uses another model. Stop it before you send a message here.": "Quell'attività usa un altro modello. Fermala prima di inviare un messaggio qui.",
+ "Send now": "Invia ora",
+ "Scoobert pauses its thinking, reads this, and carries on from where it was. A tool call it is already writing finishes first.": "Scoobert mette in pausa il ragionamento, legge questo e riprende da dove era. Una chiamata a uno strumento che sta già scrivendo viene completata prima.",
+ "Scoobert is writing a tool call, so the message waits until that step finishes.": "Scoobert sta scrivendo una chiamata a uno strumento, quindi il messaggio attende la fine di quel passaggio.",
+ "Both conversations use the same model, so a message you send here waits until that task finishes.": "Le due conversazioni usano lo stesso modello, quindi un messaggio inviato qui attende la fine di quell'attività.",
+ "Go to it": "Vai lì",
+ "No plan": "Nessun piano",
+ "Plan, then discuss": "Pianifica, poi discuti",
+ "Plan, then build": "Pianifica, poi costruisci",
+ "Before it builds:": "Prima di costruire:",
+ "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "Con un piano, Scoobert scrive prima nelle note del progetto le funzionalità che costruirà, così i passaggi e le conversazioni successive possono seguirlo."
 }

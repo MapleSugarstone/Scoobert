@@ -302,8 +302,19 @@ impl Chat {
             let label = if generated > 0 { trf("Working... {count} tokens written so far", &[("count", &thousands(generated))]) } else { tr("Working...").to_string() };
             items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
         }
-        for q in &self.queued {
-            items = items.push(column![user_bubble(q, &[], 0, None), text(tr("Sends when the current step finishes")).size(12).style(theme::muted)].spacing(4));
+        for (i, q) in self.queued.iter().enumerate() {
+            let mut note = row![text(tr("Sends when the current step finishes")).size(12).style(theme::muted)].spacing(10).align_y(Alignment::Center);
+            // One button sends every waiting message, so it sits under the last one.
+            if i + 1 == self.queued.len() {
+                note = note.push(iced::widget::tooltip(
+                    button(text(tr("Send now")).size(12)).padding([3, 10]).style(theme::secondary).on_press(Message::SendNow),
+                    container(text(tr("Scoobert pauses its thinking, reads this, and carries on from where it was. A tool call it is already writing finishes first.")).size(12).width(280))
+                        .padding([4, 8])
+                        .style(theme::tooltip),
+                    iced::widget::tooltip::Position::Top,
+                ));
+            }
+            items = items.push(column![user_bubble(q, &[], 0, None), note].spacing(4));
         }
         if self.interrupted && !self.running && self.pending.is_none() {
             items = items.push(
@@ -353,7 +364,7 @@ impl Chat {
                     col = col.push(self.thinking_block(key, thinking));
                 }
                 if !md.items().is_empty() {
-                    col = col.push(markdown::view_with(md.items(), md_settings, &Viewer));
+                    col = col.push(markdown::view_with(md.items(), with_font(md_settings, raw), &Viewer));
                     col = col.push(reply_actions(raw));
                 }
                 for (i, card) in tools.iter().enumerate() {
@@ -388,7 +399,7 @@ impl Chat {
         .on_press(Message::Toggle(id));
         let mut col = column![header].spacing(6);
         if open {
-            col = col.push(text(thinking.trim()).size(13).style(theme::muted));
+            col = col.push(text(thinking.trim()).size(13).font(fonts::for_text(thinking)).style(theme::muted));
         }
         row![container(space()).width(2).height(Length::Shrink).style(theme::thread_line), col].spacing(10).into()
     }
@@ -420,16 +431,16 @@ impl Chat {
             .style(theme::ghost)
             .on_press(Message::Toggle("stream-think".into()));
             let body: Element<'a, Message> = if open {
-                text(s.thinking.trim()).size(13).style(theme::muted).into()
+                text(s.thinking.trim()).size(13).font(fonts::for_text(&s.thinking)).style(theme::muted).into()
             } else if s.text.is_empty() {
-                text(tail).size(12).style(theme::muted).into()
+                text(tail).size(12).font(fonts::for_text(&s.thinking)).style(theme::muted).into()
             } else {
                 space().into()
             };
             col = col.push(row![container(space()).width(2).style(theme::thread_line), column![header, body].spacing(6)].spacing(10));
         }
         if !s.md.items().is_empty() {
-            col = col.push(markdown::view_with(s.md.items(), md_settings, &Viewer));
+            col = col.push(markdown::view_with(s.md.items(), with_font(md_settings, &s.text), &Viewer));
         }
         if let Some(tool) = &s.tool {
             col = col.push(
@@ -513,7 +524,7 @@ fn sent_at<'a>(content: Element<'a, Message>, time: i64) -> Element<'a, Message>
 }
 
 fn user_bubble<'a>(message: &str, notes: &[String], images: usize, index: Option<usize>) -> Element<'a, Message> {
-    let mut col = column![text(message.to_string()).size(15)].spacing(8);
+    let mut col = column![text(message.to_string()).size(15).font(fonts::for_text(message))].spacing(8);
     let mut chips = row![].spacing(6);
     for n in notes {
         chips = chips.push(container(text(trf("Note: {note}", &[("note", n)])).size(12).font(fonts::mono())).padding([2, 8]).style(theme::chip));
@@ -656,11 +667,12 @@ fn diff_view<'a>(diff: &str) -> Element<'a, Message> {
             '@' => theme::muted,
             _ => |t: &Theme| iced::widget::text::Style { color: Some(tokens(t).text) },
         };
-        col = col.push(container(text(line.to_string()).size(12.5).font(fonts::mono()).style(color)).width(Fill).padding([0, 6]).style(theme::diff_line(kind)));
+        let line = text(line.to_string()).size(12.5).font(fonts::mono()).wrapping(iced::widget::text::Wrapping::WordOrGlyph).style(color);
+        col = col.push(container(line).width(Fill).padding([0, 6]).style(theme::diff_line(kind)));
     }
-    let body = scrollable(col)
-        .direction(scrollable::Direction::Both { vertical: scrollable::Scrollbar::new(), horizontal: scrollable::Scrollbar::new() })
-        .style(theme::scrollbar);
+    // Lines wrap instead of scrolling sideways, because a horizontal scrollable lays out Fill children at infinite width
+    // and then draws nothing.
+    let body = scrollable(col).direction(scrollable::Direction::Vertical(scrollable::Scrollbar::new().spacing(4))).style(theme::scrollbar);
     container(body).padding([8, 4]).width(Fill).max_height(360).style(theme::code_block).into()
 }
 
@@ -699,6 +711,12 @@ impl<'a> markdown::Viewer<'a, Message> for Viewer {
             .style(theme::scrollbar);
         container(column![header, scroll].spacing(4)).padding([8, 12]).width(Fill).style(theme::code_block).into()
     }
+}
+
+/// `settings` with the interface font that suits the language of `text`.
+fn with_font(mut settings: markdown::Settings, text: &str) -> markdown::Settings {
+    settings.style.font = fonts::for_text(text);
+    settings
 }
 
 /// Markdown settings in the app's fonts and colors.
