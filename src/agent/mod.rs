@@ -51,6 +51,8 @@ pub enum Event {
     ToolStarted { conv: ConvId, call: ToolCall },
     ToolOutput { conv: ConvId, call_id: String, tail: String },
     Approval { conv: ConvId, id: u64, call: ToolCall },
+    /// The stopped reply at the end of the conversation is being continued, and the next reply takes its place.
+    Replacing { conv: ConvId },
     /// The run ended. `interrupted` is true when the task did not finish, so the window can offer Continue.
     Settled { conv: ConvId, context: u64, interrupted: bool },
     /// Messages before `kept_from` were replaced by a summary.
@@ -217,7 +219,11 @@ const SAVE_DURING_TASK: std::time::Duration = std::time::Duration::from_secs(300
 /// Thinking tokens a local model may spend on a side request before it must answer.
 const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
-const RESUME: &str = "<interrupted>Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again. A file you were writing when it stopped was saved up to its last complete line, as its result above says.</interrupted>";
+const RESUME: &str = "Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again.";
+/// Added to RESUME when the last reply was stopped while it wrote a file.
+const RESUME_WRITE: &str = "A file you were writing when it stopped was saved up to its last complete line, as its result above says.";
+/// Added to RESUME when the last reply was stopped before it called a tool.
+const RESUME_CUT: &str = "Your last reply above was cut off partway, so its reasoning and text end where it stopped. Pick up from there.";
 /// Attached to the first message after the user pressed Stop, which otherwise only shows a reply cut short.
 /// Instructions for the Update notes button. `{notes}` is the notes folder.
 const NOTES_UPDATE: &str = "<notes_update>Update the project notes from this whole conversation, then stop. Read {notes}/Features.md first if it exists. Keep it in this form: a # Features heading, a ## Done section, and a ## To do section, with one line per feature written as - **Short name**: one sentence about what it does or what it still needs. Add every feature this conversation finished to Done, and every feature it planned, started, or left unfinished to To do. Move an item from To do to Done when it is finished instead of listing it twice, and keep the items from earlier conversations. Link a feature to its topic page with [[Topic]] when one exists. Then add each decision, convention, or known problem a later conversation needs to the topic page it belongs to, or to Decisions.md, Conventions.md, or Problems.md in {notes}/. Use edit for small changes and write for new files, change only files in {notes}/, and reply with a short list of what you changed.</notes_update>";
@@ -849,56 +855,27 @@ impl Host {
         instructions: Option<String>,
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        let s = self.settings();
-        let interrupted = was_stopped(&live.conv.lock().unwrap().messages);
-        self.save_stopped_writes(live, id, cancel).await?;
-        let (cwd, first, model_name) = {
-            let mut c = live.conv.lock().unwrap();
-            answer_dangling_calls(&mut c)?;
-            (c.cwd.clone(), !c.has_user_message(), c.model.clone())
+        let (model_name, last, summarized) = {
+            let c = live.conv.lock().unwrap();
+            // A reply that is the first one a summary kept cannot be replaced without dropping the summary.
+            let summarized = c.compaction.as_ref().is_some_and(|k| k.kept_from + 1 >= c.messages.len());
+            (c.model.clone(), c.messages.last().cloned(), summarized)
         };
-        let notes = {
-            let mut read = live.read_notes.lock().unwrap();
-            memory::attach(&crate::notes::Vault::new(cwd.join(&s.notes_folder)), &s.notes_folder, &text, &mut read)
-        };
-        *live.run_notes.lock().unwrap() = notes.related.clone();
-        let mut context = notes.text;
-        if let Some(list) = past_conversations(&cwd, id, &text) {
-            context = if context.is_empty() { list } else { format!("{context}\n\n{list}") };
-        }
-        if resume || interrupted {
-            let note = if resume { RESUME } else { INTERRUPTED };
-            context = [note, &context].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
-        }
-        if let Some(instructions) = instructions {
-            context = if context.is_empty() { instructions } else { format!("{instructions}\n\n{context}") };
-        }
-        let mut environment = String::new();
-        if first {
-            environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
-            let session = prompt::session_block(&cwd, &s.notes_folder, s.language());
-            context = if context.is_empty() { session } else { format!("{context}\n\n{session}") };
-        } else {
-            // A language picked after the conversation started is announced on the next message, which keeps the
-            // cached start of the conversation as it is.
-            let language = s.language();
-            let stated = prompt::stated_language(&live.conv.lock().unwrap());
-            if stated.as_deref().unwrap_or("English") != language.english {
-                let note = format!("<language>{}</language>", prompt::language_line(language));
-                context = if context.is_empty() { note } else { format!("{note}\n\n{context}") };
-            }
-        }
-        // Surrounding whitespace would change how the start of the text tokenizes and miss the saved cache.
-        let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, time: now_millis() });
-        live.conv.lock().unwrap().push(user.clone())?;
-        self.emit(Event::Message { conv: id.to_string(), message: user });
-
+        // A message whose run failed before the model answered it is answered now rather than sent again.
+        let unanswered = resume && matches!(last, Some(Message::User(_)));
         let target = self.target(&model_name)?;
         let ep = self.endpoint(&target);
+        // A local model can start its reply with given text, so Continue picks up a stopped reply where it stopped.
+        let try_continue = resume && !summarized && matches!(target, Target::Local(_)) && matches!(&last, Some(Message::Assistant(a)) if continuable(a));
+        let mut message = (!unanswered).then_some((text, images, instructions));
+        if !try_continue && let Some((text, images, instructions)) = message.take() {
+            self.add_message(live, id, text, images, resume, instructions, last.as_ref(), cancel).await?;
+        }
         if matches!(target, Target::Local(_)) {
             self.take_turn(live, id, cancel).await?;
         }
         let _busy = matches!(target, Target::Local(_)).then(|| self.llama.busy());
+        let mut continuing = false;
         if let Target::Local(model) = &target {
             let wait = live.background.try_lock().is_err();
             if wait {
@@ -930,6 +907,10 @@ impl Host {
                 stop.cancel();
                 loaded?;
             }
+            continuing = try_continue && self.can_continue(live, id, &target).await;
+            if !continuing && let Some((text, images, instructions)) = message.take() {
+                self.add_message(live, id, text, images, resume, instructions, last.as_ref(), cancel).await?;
+            }
             let cache = CancellationToken::new();
             *live.cache_cancel.lock().unwrap() = Some(cache.clone());
             let prepared = tokio::select! {
@@ -939,11 +920,94 @@ impl Host {
             *live.cache_cancel.lock().unwrap() = None;
             prepared?;
         }
+        self.steps(live, id, &target, &ep, continuing, cancel).await
+    }
+
+    /// Adds the user's message, with the notes that match it and what the model needs to know about the last run.
+    #[allow(clippy::too_many_arguments)]
+    async fn add_message(
+        &self,
+        live: &Arc<Live>,
+        id: &str,
+        text: String,
+        images: Vec<conversation::Image>,
+        resume: bool,
+        instructions: Option<String>,
+        last: Option<&Message>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let s = self.settings();
+        let interrupted = was_stopped(&live.conv.lock().unwrap().messages);
+        self.save_stopped_writes(live, id, cancel).await?;
+        let (cwd, first) = {
+            let mut c = live.conv.lock().unwrap();
+            answer_dangling_calls(&mut c)?;
+            (c.cwd.clone(), !c.has_user_message())
+        };
+        let notes = {
+            let mut read = live.read_notes.lock().unwrap();
+            memory::attach(&crate::notes::Vault::new(cwd.join(&s.notes_folder)), &s.notes_folder, &text, &mut read)
+        };
+        *live.run_notes.lock().unwrap() = notes.related.clone();
+        let mut context = notes.text;
+        if let Some(list) = past_conversations(&cwd, id, &text) {
+            context = if context.is_empty() { list } else { format!("{context}\n\n{list}") };
+        }
+        if resume || interrupted {
+            let note = if resume { resume_note(last) } else { INTERRUPTED.to_string() };
+            context = [note.as_str(), &context].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n");
+        }
+        if let Some(instructions) = instructions {
+            context = if context.is_empty() { instructions } else { format!("{instructions}\n\n{context}") };
+        }
+        let mut environment = String::new();
+        if first {
+            environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
+            let session = prompt::session_block(&cwd, &s.notes_folder, s.language());
+            context = if context.is_empty() { session } else { format!("{context}\n\n{session}") };
+        } else {
+            // A language picked after the conversation started is announced on the next message, which keeps the
+            // cached start of the conversation as it is.
+            let language = s.language();
+            let stated = prompt::stated_language(&live.conv.lock().unwrap());
+            if stated.as_deref().unwrap_or("English") != language.english {
+                let note = format!("<language>{}</language>", prompt::language_line(language));
+                context = if context.is_empty() { note } else { format!("{note}\n\n{context}") };
+            }
+        }
+        // Surrounding whitespace would change how the start of the text tokenizes and miss the saved cache.
+        let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, time: now_millis() });
+        live.conv.lock().unwrap().push(user.clone())?;
+        self.emit(Event::Message { conv: id.to_string(), message: user });
+        Ok(())
+    }
+
+    /// Whether continuing the stopped reply at the end reads about as little as a new message would. A prompt saved
+    /// before Scoobert closed may hold that reply already closed, which a continued reply cannot start from.
+    async fn can_continue(&self, live: &Live, id: &str, target: &Target) -> bool {
+        if self.llama.slot_owner().as_deref() == Some(id) {
+            return true;
+        }
+        let (Ok(Some(before)), Ok(Some(with))) = (self.history_tokens(live, target, true).await, self.history_tokens(live, target, false).await) else {
+            return false;
+        };
+        let unread = |tokens: &[i32]| tokens.len().saturating_sub(self.llama.longest_saved(tokens));
+        // One batch of slack, since a continued reply reads its own text again.
+        unread(&before) <= unread(&with) + 512
+    }
+
+    /// Requests the model's replies and runs their tool calls until the task ends. `continuing` sends the stopped
+    /// reply at the end of the conversation for the model to carry on, and the first reply takes its place.
+    async fn steps(self: &Arc<Self>, live: &Arc<Live>, id: &str, target: &Target, ep: &Endpoint, mut continuing: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let mut compacted_for_error = false;
         // One summary per state of the conversation; summarizing again without new messages cannot help.
         let mut compacted_at = None;
         loop {
             self.deliver_queued(live, id)?;
+            // A message the user sent meanwhile follows the stopped reply, so the model reads that reply as it is.
+            if continuing && !matches!(live.conv.lock().unwrap().messages.last(), Some(Message::Assistant(a)) if continuable(a)) {
+                continuing = false;
+            }
             let len = live.conv.lock().unwrap().messages.len();
             if compacted_at != Some(len) && self.too_long(live, &target) {
                 self.compact(live, id, &target, &ep, true, cancel).await?;
@@ -969,9 +1033,22 @@ impl Host {
             }
             let step = cancel.child_token();
             *live.step_cancel.lock().unwrap() = Some(step.clone());
+            let continued = std::mem::take(&mut continuing);
+            if continued {
+                self.emit(Event::Replacing { conv: id.into() });
+            }
             let result = self.send_with_retries(id, &target, &ep, &body, &step).await;
             *live.step_cancel.lock().unwrap() = None;
             *live.last_thought.lock().unwrap() = None;
+            // A continued reply starts with everything the stopped one held, so it takes that reply's place. Without
+            // anything new, the stopped reply stays and the window shows it again.
+            let replaces = continued && result.as_ref().is_ok_and(|r| r.stop != StopReason::Error && !(r.thinking.is_empty() && r.text.is_empty() && r.tool_calls.is_empty()));
+            if continued && !replaces {
+                let stopped = live.conv.lock().unwrap().messages.last().cloned();
+                if let Some(message) = stopped {
+                    self.emit(Event::Message { conv: id.to_string(), message });
+                }
+            }
             // A write that grew past one part was stopped. Its complete lines are saved, and the model writes the rest
             // in the next part.
             if live.split.swap(false, Ordering::SeqCst) && !cancel.is_cancelled() {
@@ -980,9 +1057,7 @@ impl Host {
                 {
                     cut.resend_thinking = false;
                     let calls = cut.tool_calls.clone();
-                    let message = Message::Assistant(cut);
-                    live.conv.lock().unwrap().push(message.clone())?;
-                    self.emit(Event::Message { conv: id.to_string(), message });
+                    self.add_reply(live, id, cut, replaces)?;
                     self.save_cut_writes(live, id, calls, Cut::Split, cancel).await?;
                 }
                 continue;
@@ -991,13 +1066,11 @@ impl Host {
             // adds the message after it.
             if step.is_cancelled() && !cancel.is_cancelled() {
                 if let Ok(mut thought) = result
-                    && !thought.thinking.is_empty()
+                    && (!thought.thinking.is_empty() || replaces)
                 {
                     thought.tool_calls.clear();
                     thought.resend_thinking = true;
-                    let message = Message::Assistant(thought);
-                    live.conv.lock().unwrap().push(message.clone())?;
-                    self.emit(Event::Message { conv: id.to_string(), message });
+                    self.add_reply(live, id, thought, replaces)?;
                 }
                 continue;
             }
@@ -1009,6 +1082,7 @@ impl Host {
                     compacted_for_error = true;
                     self.compact(live, id, &target, &ep, false, cancel).await?;
                     compacted_at = Some(len);
+                    continuing = continued;
                     continue;
                 }
                 Err(err) => AssistantMessage { stop: StopReason::Error, error: Some(format!("{err:#}")), model: ep.model.clone(), time: now_millis(), ..Default::default() },
@@ -1018,12 +1092,14 @@ impl Host {
             }
             // The next turn builds on a stopped reply's reasoning instead of repeating it.
             reply.resend_thinking = reply.stop == StopReason::Aborted;
+            // A continued reply stopped before it added anything leaves the stopped reply as it was.
+            if continued && !replaces && reply.stop == StopReason::Aborted {
+                return Ok(());
+            }
             let calls = reply.tool_calls.clone();
             let stop = reply.stop;
             let error = reply.error.clone();
-            let message = Message::Assistant(reply);
-            live.conv.lock().unwrap().push(message.clone())?;
-            self.emit(Event::Message { conv: id.to_string(), message });
+            self.add_reply(live, id, reply, replaces)?;
             if let Some(err) = error {
                 self.emit(Event::Error { conv: Some(id.to_string()), message: err });
                 return Ok(());
@@ -1057,6 +1133,21 @@ impl Host {
                 return Ok(());
             }
         }
+    }
+
+    /// Adds a reply to the conversation and the window. `replaces` puts it in place of the stopped reply it continues.
+    fn add_reply(&self, live: &Live, id: &str, reply: AssistantMessage, replaces: bool) -> anyhow::Result<()> {
+        let message = Message::Assistant(reply);
+        {
+            let mut c = live.conv.lock().unwrap();
+            if replaces {
+                let at = c.messages.len().saturating_sub(1);
+                c.rewind(at)?;
+            }
+            c.push(message.clone())?;
+        }
+        self.emit(Event::Message { conv: id.to_string(), message });
+        Ok(())
     }
 
     /// Saves the complete lines of file writes that Stop cut off, which the reply before this run left.
@@ -1552,7 +1643,8 @@ impl Host {
         if self.llama.slot_owner().as_deref() == Some(id) {
             return Ok(());
         }
-        // The new user message is already in the conversation; the cache covers what came before it.
+        // The newest message, the user's or a stopped reply being continued, goes with the request, and the cache
+        // covers what came before it.
         let history = conv.messages.len() > 1;
         let cancel = live.cache_cancel.lock().unwrap().clone().unwrap_or_default();
         self.persist(live, !history, true, &cancel).await
@@ -1596,16 +1688,7 @@ impl Host {
             let name = self.llama.slot_file("shared", &LlamaServer::hash(&prefix));
             (prefix, name)
         } else {
-            let (system, mut messages, thinking) = self.request_parts(live);
-            if exclude_last {
-                messages.pop();
-            }
-            if messages.iter().any(|m| matches!(m, Message::User(u) if !u.images.is_empty())) {
-                return Ok(());
-            }
-            let tools = self.tool_specs(live);
-            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
-            let prefix = self.llama.shared_prefix(&stream::payload(&self.endpoint(&target), &req), "").await?;
+            let Some(prefix) = self.history_prefix(live, &target, exclude_last).await? else { return Ok(()) };
             (prefix, self.llama.slot_file("chat", &conv.id))
         };
         let tokens = self.llama.tokenize(&prefix).await?;
@@ -1642,6 +1725,28 @@ impl Host {
         filled?;
         self.llama.set_slot_owner(Some(conv.id.clone()));
         Ok(())
+    }
+
+    /// The rendered start of the next request: instructions, tools, and messages, without the newest message when
+    /// `exclude_last`. None when a message has images, which the saved prompts leave out.
+    async fn history_prefix(&self, live: &Live, target: &Target, exclude_last: bool) -> anyhow::Result<Option<String>> {
+        let (system, mut messages, thinking) = self.request_parts(live);
+        if exclude_last {
+            messages.pop();
+        }
+        if messages.iter().any(|m| matches!(m, Message::User(u) if !u.images.is_empty())) {
+            return Ok(None);
+        }
+        let tools = self.tool_specs(live);
+        let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(target) };
+        Ok(Some(self.llama.shared_prefix(&stream::payload(&self.endpoint(target), &req), "").await?))
+    }
+
+    async fn history_tokens(&self, live: &Live, target: &Target, exclude_last: bool) -> anyhow::Result<Option<Vec<i32>>> {
+        match self.history_prefix(live, target, exclude_last).await? {
+            Some(prefix) => Ok(Some(self.llama.tokenize(&prefix).await?)),
+            None => Ok(None),
+        }
     }
 
     /// The prompt every new conversation in `cwd` starts with: instructions, tools, and the environment block that
@@ -1789,8 +1894,10 @@ impl Host {
             let local = matches!(host.target(&conv.model), Ok(Target::Local(_))) && host.llama.loaded_model().is_some();
             let cancel = CancellationToken::new();
             *live.cache_cancel.lock().unwrap() = Some(cancel.clone());
+            // Continue carries on a stopped reply from where it starts, which a save that holds it closed cannot give.
+            let stopped = matches!(conv.messages.last(), Some(Message::Assistant(a)) if continuable(a));
             if local
-                && let Err(err) = host.persist(&live, false, false, &cancel).await
+                && let Err(err) = host.persist(&live, false, stopped, &cancel).await
                 && !is_cancelled(&err)
             {
                 eprintln!("[cache] {err:#}");
@@ -2109,6 +2216,47 @@ fn answer_dangling_calls(conv: &mut Conversation) -> anyhow::Result<()> {
 }
 
 /// Whether the last run ended because the user pressed Stop.
+/// Whether Continue can carry on this reply where it stopped: it stopped before it called a tool and holds some
+/// reasoning or text.
+fn continuable(a: &AssistantMessage) -> bool {
+    a.stop == StopReason::Aborted && a.tool_calls.is_empty() && !(a.thinking.is_empty() && a.text.is_empty())
+}
+
+/// The note sent with Continue, which says what the last run left behind.
+fn resume_note(last: Option<&Message>) -> String {
+    let left = match last {
+        Some(Message::Assistant(a)) if a.stop == StopReason::Aborted && !a.tool_calls.is_empty() => Some(RESUME_WRITE),
+        Some(Message::Assistant(a)) if continuable(a) => Some(RESUME_CUT),
+        _ => None,
+    };
+    match left {
+        Some(more) => format!("<interrupted>{RESUME} {more}</interrupted>"),
+        None => format!("<interrupted>{RESUME}</interrupted>"),
+    }
+}
+
+#[cfg(test)]
+mod resume_note_tests {
+    use super::*;
+
+    fn stopped(thinking: &str, calls: usize) -> Message {
+        let call = ToolCall { id: "1".into(), name: "write".into(), arguments: serde_json::json!({}) };
+        Message::Assistant(AssistantMessage { stop: StopReason::Aborted, thinking: thinking.into(), tool_calls: vec![call; calls], ..Default::default() })
+    }
+
+    #[test]
+    fn the_note_names_only_what_the_stop_left() {
+        assert!(resume_note(Some(&stopped("half a thought", 0))).contains(RESUME_CUT));
+        assert!(resume_note(Some(&stopped("", 1))).contains(RESUME_WRITE));
+        let plain = resume_note(Some(&Message::Tool(ToolResult { call_id: "1".into(), name: "bash".into(), output: String::new(), is_error: false, diff: None, time: 0 })));
+        assert!(!plain.contains(RESUME_CUT) && !plain.contains(RESUME_WRITE));
+        assert!(!continuable(match &stopped("", 0) {
+            Message::Assistant(a) => a,
+            _ => unreachable!(),
+        }));
+    }
+}
+
 fn was_stopped(messages: &[Message]) -> bool {
     match messages.last() {
         Some(Message::Assistant(a)) => a.stop == StopReason::Aborted,

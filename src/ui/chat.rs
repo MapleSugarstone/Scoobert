@@ -183,6 +183,8 @@ impl Chat {
                 }
             }
             E::Delta { delta, .. } => {
+                // Continue after a run that failed answers the message already shown, so its placeholder goes.
+                self.pending = None;
                 let s = self.stream.get_or_insert_with(Streaming::default);
                 match delta {
                     Delta::Thinking(t) => s.thinking.push_str(&t),
@@ -201,6 +203,15 @@ impl Chat {
                         self.progress = None;
                     }
                     Delta::Progress { .. } | Delta::LongWrite { .. } => {}
+                }
+            }
+            // The continued reply streams in with everything the stopped one held.
+            E::Replacing { .. } => {
+                // Continue adds no message when it carries on the stopped reply.
+                self.pending = None;
+                if matches!(self.entries.last(), Some(Entry::Assistant { .. })) {
+                    self.entries.pop();
+                    self.seen = self.seen.saturating_sub(1);
                 }
             }
             E::Message { message, .. } => {

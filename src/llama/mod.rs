@@ -685,6 +685,21 @@ impl LlamaServer {
     /// nothing from it. Files saved at another context size count too, because a slot's state does not depend on
     /// the context size, and a file that starts `tokens` fits wherever `tokens` fits.
     pub async fn restore_longest(&self, tokens: &[i32]) -> usize {
+        for (len, name) in self.saved_starts(tokens) {
+            if self.restore(&name).await {
+                return len;
+            }
+        }
+        0
+    }
+
+    /// How many of `tokens` the longest saved prompt covers, without restoring it.
+    pub fn longest_saved(&self, tokens: &[i32]) -> usize {
+        self.saved_starts(tokens).first().map_or(0, |s| s.0)
+    }
+
+    /// The saved prompts for the loaded model and context size that `tokens` starts with, longest first.
+    fn saved_starts(&self, tokens: &[i32]) -> Vec<(usize, String)> {
         let stem = self.model_stem();
         let mut found: Vec<(usize, String)> = std::fs::read_dir(paths::get().slots())
             .into_iter()
@@ -703,12 +718,7 @@ impl LlamaServer {
             })
             .collect();
         found.sort_by(|a, b| b.0.cmp(&a.0));
-        for (len, name) in found {
-            if self.restore(&name).await {
-                return len;
-            }
-        }
-        0
+        found
     }
 
     async fn restore(&self, filename: &str) -> bool {

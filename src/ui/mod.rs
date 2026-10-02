@@ -1264,6 +1264,7 @@ impl App {
         let conv = match &event {
             Event::Activity { conv, .. }
             | Event::Delta { conv, .. }
+            | Event::Replacing { conv }
             | Event::Message { conv, .. }
             | Event::ToolStarted { conv, .. }
             | Event::ToolOutput { conv, .. }
