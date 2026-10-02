@@ -35,6 +35,9 @@ pub fn remember_prompt(topics: &[String]) -> String {
 pub const HOME: &str = "Home.md";
 /// The page the Update notes button keeps, with the features done and the features still to do.
 pub const FEATURES: &str = "Features.md";
+/// What the Features page holds, for the note list and the home page. Its first line is a feature, which says nothing
+/// about the page.
+const FEATURES_SUMMARY: &str = "what is done and what is still to do";
 const HOME_TASKS: usize = 10;
 const HOME_DAYS: usize = 7;
 const TOPIC_LIST: usize = 20;
@@ -76,7 +79,7 @@ pub fn index(vault: &Vault, folder: &str) -> String {
         .iter()
         .take(INDEX_LIMIT)
         .map(|n| {
-            let summary = summary_line(&read(vault, &n.path));
+            let summary = if n.path.eq_ignore_ascii_case(FEATURES) { FEATURES_SUMMARY.to_string() } else { summary_line(&read(vault, &n.path)) };
             if summary.is_empty() { format!("- {}", note_name(&n.path)) } else { format!("- {}: {summary}", note_name(&n.path)) }
         })
         .collect();
@@ -126,6 +129,7 @@ fn backlink_counts(vault: &Vault) -> HashMap<String, usize> {
 }
 
 static DAILY_ENTRY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^## (\d{1,2}:\d{2}) (.+)$").unwrap());
+static CODE_SPAN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`[^`\n]*`").unwrap());
 
 /// The last few logged tasks and the next step of the newest long task, built fresh so it cannot go stale.
 pub fn recent_work(vault: &Vault) -> String {
@@ -546,8 +550,27 @@ pub fn record_task(vault: &Vault, activity_log: bool, task: &FinishedTask, facts
         let existing = vault.read(&rel).unwrap_or_default();
         vault.write(&rel, &format!("{}\n\n{}\n", existing.trim_end(), entry.join("\n")))?;
     }
+    link_features(vault)?;
     rebuild_home(vault)?;
     Ok(saved)
+}
+
+/// Links each feature on the Features page to the topic pages it mentions. A topic page made after the feature was
+/// written would otherwise never be linked from it. A page marked `reviewed: true` is left as the user wrote it.
+fn link_features(vault: &Vault) -> anyhow::Result<()> {
+    let Ok(text) = vault.read(FEATURES) else { return Ok(()) };
+    if reviewed(&text) {
+        return Ok(());
+    }
+    let linked: Vec<String> = text.lines().map(|l| if l.starts_with("- ") { link_mentions(vault, l, FEATURES) } else { l.to_string() }).collect();
+    let mut out = linked.join("\n");
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    if out != text {
+        vault.write(FEATURES, &out)?;
+    }
+    Ok(())
 }
 
 // ---- topic pages ----
@@ -699,7 +722,8 @@ pub fn link_mentions(vault: &Vault, text: &str, skip: &str) -> String {
     let mut out = text.to_string();
     for name in names {
         let Ok(re) = Regex::new(&format!(r"(?i)\b{}\b", regex::escape(&name))) else { continue };
-        let linked: Vec<(usize, usize)> = WIKILINK.find_iter(&out).map(|m| (m.start(), m.end())).collect();
+        // Existing links and code spans stay as written, so a file name such as `dialogue.ts` is never linked.
+        let linked: Vec<(usize, usize)> = WIKILINK.find_iter(&out).chain(CODE_SPAN.find_iter(&out)).map(|m| (m.start(), m.end())).collect();
         let Some(m) = re.find_iter(&out).find(|m| !linked.iter().any(|&(s, e)| m.start() >= s && m.end() <= e)) else { continue };
         let found = m.as_str().to_string();
         let replacement = if found == name { format!("[[{name}]]") } else { format!("[[{name}|{found}]]") };
@@ -726,7 +750,7 @@ pub fn rebuild_home(vault: &Vault) -> anyhow::Result<()> {
     ];
     if vault.read(FEATURES).is_ok() {
         out.push("\n## Features\n".into());
-        out.push(format!("- [[{}]]: what is done and what is still to do", note_name(FEATURES)));
+        out.push(format!("- [[{}]]: {FEATURES_SUMMARY}", note_name(FEATURES)));
     }
     let mut topics = topic_pages(vault);
     topics.sort_by_key(|p| note_name(p).to_lowercase());
@@ -797,6 +821,18 @@ mod tests {
             std::fs::write(p, text).unwrap();
         }
         (Vault::new(&dir), dir)
+    }
+
+    #[test]
+    fn features_link_topic_pages_made_after_them() {
+        let features = "# Features\n\n## Done\n\n- **Dialogue**: graphs in `dialogue.ts` [[Patchwork benchmark RPG]].\n- **Saves**: plain JSON.\n";
+        let (v, dir) = vault(&[("Features.md", features), ("Dialogue.md", "# Dialogue\n"), ("Tasks/Patchwork benchmark RPG.md", "x")]);
+        link_features(&v).unwrap();
+        let linked = v.read("Features.md").unwrap();
+        assert!(linked.contains("- **[[Dialogue]]**: graphs in `dialogue.ts` [[Patchwork benchmark RPG]]."), "{linked}");
+        assert!(linked.contains("- **Saves**: plain JSON.\n"), "{linked}");
+        assert!(index(&v, "Notes").contains("- Features: what is done and what is still to do"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
