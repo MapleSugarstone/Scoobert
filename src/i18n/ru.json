@@ -258,7 +258,6 @@
  "Show the file": "Показать файл",
  "Remove Scoobert": "Удалить Scoobert",
  "{size} download": "Скачивание: {size}",
- "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.": "Требуется около {memory} свободной памяти. Всего на этом компьютере {total}, поэтому модель будет работать очень медленно или не загрузится.",
  "Starting...": "Запуск...",
  "{status}: {done} of {total}": "{status}: {done} из {total}",
  "Stop the download": "Остановить скачивание",
@@ -309,7 +308,6 @@
  "Use the graphics card": "Использовать видеокарту",
  "Runs as much of the model as fits on the graphics card, which is much faster with a dedicated card. A model the card cannot load runs on the processor instead. Applies the next time a model loads.": "Запускает на видеокарте как можно большую часть модели, что намного быстрее с дискретной видеокартой. Модель, которую видеокарта не может загрузить, вместо этого работает на процессоре. Применяется при следующей загрузке модели.",
  "Load models larger than memory from disk": "Загружать с диска модели, не помещающиеся в память",
- "Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory.": "Позволяет модели типа «смесь экспертов» (MoE), которая не помещается в свободную память, читать свои веса с диска в процессе работы. В лучшем случае ожидайте несколько слов в секунду при использовании SSD. Остальные модели по-прежнему должны помещаться в память.",
  "less than a minute": "меньше минуты",
  "about a minute": "около минуты",
  "about {n} minutes": "около {n} мин.",
@@ -326,5 +324,7 @@
  "Plan, then discuss": "План, затем обсуждение",
  "Plan, then build": "План, затем сборка",
  "Before it builds:": "Перед работой:",
- "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "С планом Scoobert сначала записывает в заметки проекта функции, которые он создаст, чтобы следующие шаги и разговоры могли ему следовать."
+ "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "С планом Scoobert сначала записывает в заметки проекта функции, которые он создаст, чтобы следующие шаги и разговоры могли ему следовать.",
+ "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "Позволяет модели, которая не помещается в свободную память, держать часть весов на диске и читать их как виртуальную память во время работы. Это намного медленнее: модель типа «смесь экспертов» выдаёт несколько слов в секунду с SSD, а другим моделям может требоваться несколько секунд на слово.",
+ "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "Требуется около {memory} свободной памяти — больше, чем остаётся из {total} этого компьютера после системы и других приложений. Часть модели работает с диска как виртуальная память, что намного медленнее. Чтобы использовать её, включите в настройках загрузку моделей с диска."
 }

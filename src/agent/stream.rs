@@ -43,6 +43,8 @@ pub enum Delta {
     ToolCall(String),
     /// Characters of tool-call arguments received so far, such as the content of a file being written.
     ToolInput(usize),
+    /// A file write passed `WRITE_PART_CHARS`. `path` is its file, or `None` when the part so far cannot be saved yet.
+    LongWrite { path: Option<String> },
     /// Tokens the local model has generated so far for this reply.
     Generated(u64),
     /// How much of the prompt llama-server has read, and the whole prompt's size in tokens.
@@ -150,10 +152,17 @@ fn openai_user_content(text: &str, images: &[Image]) -> Value {
 
 fn arguments_text(args: &Value) -> String {
     match args {
+        // A call cut off mid-stream keeps its raw text, which a server cannot render as arguments and rejects with
+        // the whole request, so it goes as the fields that arrived.
+        Value::String(s) if serde_json::from_str::<Value>(s).is_err() => Value::Object(partial_object(s).into_iter().collect()).to_string(),
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
 }
+
+/// Characters of arguments after which Scoobert stops a file write and saves what arrived, so one call cannot fill the
+/// context. It is about 200 lines of code, and the instructions ask for parts of about 150.
+pub const WRITE_PART_CHARS: usize = 9_000;
 
 /// A file write cut off by Stop, reduced to the complete lines it had written. Any other call, and a write without a
 /// complete line yet, is dropped.
@@ -302,7 +311,11 @@ fn anthropic_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
                     blocks.push(json!({ "type": "text", "text": a.text }));
                 }
                 for c in &a.tool_calls {
-                    let input = if c.arguments.is_object() { c.arguments.clone() } else { json!({}) };
+                    let input = match &c.arguments {
+                        Value::Object(_) => c.arguments.clone(),
+                        Value::String(raw) => Value::Object(partial_object(raw).into_iter().collect()),
+                        _ => json!({}),
+                    };
                     blocks.push(json!({ "type": "tool_use", "id": c.id, "name": c.name, "input": input }));
                 }
                 if !blocks.is_empty() {
@@ -447,6 +460,28 @@ struct PendingCall {
     id: String,
     name: String,
     args: String,
+    /// `Delta::LongWrite` went out for this call.
+    long: bool,
+}
+
+impl PendingCall {
+    fn new(id: String, name: String) -> Self {
+        PendingCall { id, name, args: String::new(), long: false }
+    }
+
+    /// Adds arguments, and reports a file write the first time it grows past `WRITE_PART_CHARS`.
+    fn push_args(&mut self, more: &str, on_delta: &mut impl FnMut(Delta)) {
+        self.args.push_str(more);
+        on_delta(Delta::ToolInput(self.args.len()));
+        if !self.long && self.name == "write" && self.args.len() > WRITE_PART_CHARS {
+            self.long = true;
+            let fields = partial_object(&self.args);
+            let field = |key: &str| fields.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.as_str());
+            // The part so far can be saved only once the write has named its file and finished a line.
+            let path = field("path").filter(|_| field("content").is_some_and(|c| c.contains('\n'))).map(String::from);
+            on_delta(Delta::LongWrite { path });
+        }
+    }
 }
 
 struct Accumulator {
@@ -503,7 +538,7 @@ impl Accumulator {
         for tc in d["tool_calls"].as_array().into_iter().flatten() {
             let index = tc["index"].as_u64().unwrap_or(self.calls.len().saturating_sub(1) as u64) as usize;
             while self.calls.len() <= index {
-                self.calls.push(PendingCall { id: String::new(), name: String::new(), args: String::new() });
+                self.calls.push(PendingCall::new(String::new(), String::new()));
             }
             let call = &mut self.calls[index];
             if let Some(id) = tc["id"].as_str().filter(|s| !s.is_empty()) {
@@ -514,8 +549,7 @@ impl Accumulator {
                 on_delta(Delta::ToolCall(call.name.clone()));
             }
             if let Some(args) = tc["function"]["arguments"].as_str().filter(|a| !a.is_empty()) {
-                call.args.push_str(args);
-                on_delta(Delta::ToolInput(call.args.len()));
+                call.push_args(args, on_delta);
             }
         }
         if let Some(reason) = choice["finish_reason"].as_str() {
@@ -543,7 +577,7 @@ impl Accumulator {
                 if block["type"] == "tool_use" {
                     let name = block["name"].as_str().unwrap_or_default().to_string();
                     on_delta(Delta::ToolCall(name.clone()));
-                    self.calls.push(PendingCall { id: block["id"].as_str().unwrap_or_default().into(), name, args: String::new() });
+                    self.calls.push(PendingCall::new(block["id"].as_str().unwrap_or_default().into(), name));
                     self.blocks.push((v["index"].as_u64().unwrap_or(0), self.calls.len() - 1));
                 }
             }
@@ -566,8 +600,7 @@ impl Accumulator {
                     "input_json_delta" => {
                         let index = v["index"].as_u64().unwrap_or(0);
                         if let Some(&(_, i)) = self.blocks.iter().find(|(b, _)| *b == index) {
-                            self.calls[i].args.push_str(d["partial_json"].as_str().unwrap_or_default());
-                            on_delta(Delta::ToolInput(self.calls[i].args.len()));
+                            self.calls[i].push_args(d["partial_json"].as_str().unwrap_or_default(), on_delta);
                         }
                     }
                     _ => {}
@@ -603,17 +636,18 @@ impl Accumulator {
             let id = if c.id.is_empty() { format!("call_{}_{i}", self.msg.time) } else { c.id };
             self.msg.tool_calls.push(ToolCall { id, name: c.name, arguments });
         }
-        let aborted = self.stop == Some(StopReason::Aborted);
+        // A stop, or a reply that ran out of room, cuts off the call being written.
+        let cut = matches!(self.stop, Some(StopReason::Aborted | StopReason::Length));
         self.msg.stop = match (&self.error, self.stop) {
             (Some(_), _) => StopReason::Error,
-            (None, Some(StopReason::Aborted)) => StopReason::Aborted,
+            (None, Some(s @ (StopReason::Aborted | StopReason::Length))) => s,
             _ if !self.msg.tool_calls.is_empty() => StopReason::ToolUse,
             (None, Some(s)) => s,
             (None, None) => StopReason::Stop,
         };
-        if aborted {
-            // A call cut off mid-stream must not run as written. A file write keeps its complete lines, which the
-            // next turn saves so the model continues the file instead of writing it again.
+        if cut {
+            // A call cut off mid-stream must not run as written. A file write keeps its complete lines, which Scoobert
+            // saves so the model continues the file instead of writing it again.
             self.msg.tool_calls = std::mem::take(&mut self.msg.tool_calls).into_iter().filter_map(salvage_write).collect();
         }
         self.msg.error = self.error;
@@ -662,5 +696,37 @@ mod tests {
     fn escapes_cut_in_half_end_the_text() {
         assert_eq!(cut(r#"{"path": "a.ts", "content": "one\ntwo\n\u00"#).unwrap()["content"], "one\ntwo\n");
         assert_eq!(cut("{\"path\": \"a.ts\", \"content\": \"one\\n\\").unwrap()["content"], "one\n");
+    }
+
+    #[test]
+    fn a_reply_out_of_room_keeps_only_its_complete_lines() {
+        let mut acc = Accumulator::new("m".into());
+        let mut deltas = Vec::new();
+        let chunk = json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "c1", "function": { "name": "write", "arguments": "{\"path\": \"a.ts\", \"content\": \"one\\ntw" } }] } }] });
+        acc.openai_event(&chunk, &mut |d| deltas.push(d)).unwrap();
+        acc.openai_event(&json!({ "choices": [{ "delta": {}, "finish_reason": "length" }] }), &mut |d| deltas.push(d)).unwrap();
+        let msg = acc.finish();
+        assert_eq!(msg.stop, StopReason::Length);
+        assert_eq!(msg.tool_calls[0].arguments["content"], "one\n");
+    }
+
+    #[test]
+    fn a_long_write_is_reported_once_with_its_path() {
+        let mut call = PendingCall::new("c1".into(), "write".into());
+        let mut seen = Vec::new();
+        call.push_args("{\"path\": \"a.ts\", \"content\": \"", &mut |d| seen.push(d));
+        let line = "x".repeat(99) + "\\n";
+        for _ in 0..(WRITE_PART_CHARS / 100 + 2) {
+            call.push_args(&line, &mut |d| seen.push(d));
+        }
+        let long: Vec<&Delta> = seen.iter().filter(|d| matches!(d, Delta::LongWrite { .. })).collect();
+        assert!(matches!(long.as_slice(), [Delta::LongWrite { path: Some(p) }] if p == "a.ts"));
+    }
+
+    #[test]
+    fn a_cut_off_call_goes_back_as_valid_arguments() {
+        let sent = arguments_text(&Value::String(r#"{"path": "a.ts", "content": "one\ntw"#.into()));
+        let parsed: Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(parsed["path"], "a.ts");
     }
 }

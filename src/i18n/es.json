@@ -258,7 +258,6 @@
   "Show the file": "Mostrar el archivo",
   "Remove Scoobert": "Quitar Scoobert",
   "{size} download": "Descarga de {size}",
-  "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.": "Necesita unos {memory} de memoria libre. Este equipo tiene {total} en total, así que iría muy lento o no se cargaría.",
   "Starting...": "Iniciando...",
   "{status}: {done} of {total}": "{status}: {done} de {total}",
   "Stop the download": "Detener la descarga",
@@ -309,7 +308,6 @@
   "Use the graphics card": "Usar la tarjeta gráfica",
   "Runs as much of the model as fits on the graphics card, which is much faster with a dedicated card. A model the card cannot load runs on the processor instead. Applies the next time a model loads.": "Ejecuta en la tarjeta gráfica la mayor parte posible del modelo, lo que es mucho más rápido con una tarjeta dedicada. Un modelo que la tarjeta no puede cargar se ejecuta en el procesador. Se aplica la próxima vez que se cargue un modelo.",
   "Load models larger than memory from disk": "Cargar desde el disco modelos mayores que la memoria",
-  "Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory.": "Permite que un modelo de mezcla de expertos que no cabe en la memoria libre lea sus pesos desde el disco mientras trabaja. Espera unas pocas palabras por segundo como máximo, con un SSD. Los demás modelos siguen necesitando caber en la memoria.",
   "less than a minute": "menos de un minuto",
   "about a minute": "aproximadamente un minuto",
   "about {n} minutes": "unos {n} minutos",
@@ -326,5 +324,7 @@
   "Plan, then discuss": "Planificar y comentar",
   "Plan, then build": "Planificar y construir",
   "Before it builds:": "Antes de construir:",
-  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "Con un plan, Scoobert primero escribe en las notas del proyecto las funciones que va a construir, para que los pasos y conversaciones posteriores puedan seguirlo."
+  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "Con un plan, Scoobert primero escribe en las notas del proyecto las funciones que va a construir, para que los pasos y conversaciones posteriores puedan seguirlo.",
+  "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "Permite que un modelo que no cabe en la memoria libre deje parte de sus pesos en el disco y los lea como memoria virtual mientras trabaja. Funciona mucho más lento: un modelo de mezcla de expertos logra unas pocas palabras por segundo desde un SSD, y otros modelos pueden tardar varios segundos por palabra.",
+  "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "Necesita unos {memory} de memoria libre, más de lo que dejan los {total} de este equipo tras el sistema y otras aplicaciones. Parte del modelo se ejecuta desde el disco duro como memoria virtual, lo que es mucho más lento. Activa en Configuración la carga de modelos desde el disco para usarlo."
 }

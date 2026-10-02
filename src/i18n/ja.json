@@ -258,7 +258,6 @@
   "Show the file": "ファイルを表示",
   "Remove Scoobert": "Scoobertの削除",
   "{size} download": "ダウンロードサイズ {size}",
-  "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.": "空きメモリが約{memory}必要です。このコンピューターのメモリは合計{total}のため、非常に遅くなるか、ロードに失敗します。",
   "Starting...": "開始しています...",
   "{status}: {done} of {total}": "{status}：{done} / {total}",
   "Stop the download": "ダウンロードを停止",
@@ -309,7 +308,6 @@
   "Use the graphics card": "グラフィックスカードを使う",
   "Runs as much of the model as fits on the graphics card, which is much faster with a dedicated card. A model the card cannot load runs on the processor instead. Applies the next time a model loads.": "モデルのうちグラフィックスカードに収まる部分をできるだけ多くそこで実行します。専用カードがあれば大幅に高速になります。カードに読み込めないモデルは、代わりにプロセッサーで実行されます。次にモデルを読み込むときに適用されます。",
   "Load models larger than memory from disk": "メモリより大きいモデルをディスクから読み込む",
-  "Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory.": "空きメモリに収まらないMoE（専門家混合）モデルが、動作中にディスクから重みを読み込めるようにします。SSDを使っても、速度は最大で毎秒数語程度です。その他のモデルは引き続きメモリに収まる必要があります。",
   "less than a minute": "1分未満",
   "about a minute": "約1分",
   "about {n} minutes": "約{n}分",
@@ -326,5 +324,7 @@
   "Plan, then discuss": "計画して相談",
   "Plan, then build": "計画して作成",
   "Before it builds:": "作成する前に：",
-  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "計画ありの場合、Scoobertはまず作成する機能をプロジェクトのノートに書き出し、後のステップや会話がそれに従えるようにします。"
+  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "計画ありの場合、Scoobertはまず作成する機能をプロジェクトのノートに書き出し、後のステップや会話がそれに従えるようにします。",
+  "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "空きメモリに収まらないモデルが、重みの一部をディスクに置いたまま、動作中に仮想メモリとして読み込めるようにします。大幅に遅くなります。MoE（専門家混合）モデルはSSDから毎秒数語程度、その他のモデルは1語に数秒かかることがあります。",
+  "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "約{memory}の空きメモリが必要で、このコンピューターの{total}からシステムや他のアプリの分を除いた残りより多くなります。モデルの一部はハードディスクから仮想メモリとして実行されるため、大幅に遅くなります。使うには、設定でディスクからのモデル読み込みをオンにしてください。"
 }

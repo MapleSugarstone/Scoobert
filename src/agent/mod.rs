@@ -126,6 +126,19 @@ struct Live {
     step_cancel: Mutex<Option<CancellationToken>>,
     /// When the request in flight last streamed thinking.
     last_thought: Mutex<Option<std::time::Instant>>,
+    /// The request in flight was stopped because a file write grew past `stream::WRITE_PART_CHARS`.
+    split: AtomicBool,
+}
+
+/// Why a file write was cut off partway, which decides what is saved and what the model is told.
+#[derive(Clone, Copy, PartialEq)]
+enum Cut {
+    /// The user pressed Stop.
+    Stopped,
+    /// Scoobert stopped a write that grew past one part.
+    Split,
+    /// The reply ran out of room in the context.
+    OutOfRoom,
 }
 
 /// A conversation's hold on the local model. Dropping it lets the next waiting task start.
@@ -455,6 +468,7 @@ impl Host {
             turn: Mutex::new(None),
             step_cancel: Mutex::new(None),
             last_thought: Mutex::new(None),
+            split: AtomicBool::new(false),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -932,6 +946,21 @@ impl Host {
             let result = self.send_with_retries(id, &target, &ep, &body, &step).await;
             *live.step_cancel.lock().unwrap() = None;
             *live.last_thought.lock().unwrap() = None;
+            // A write that grew past one part was stopped. Its complete lines are saved, and the model writes the rest
+            // in the next part.
+            if live.split.swap(false, Ordering::SeqCst) && !cancel.is_cancelled() {
+                if let Ok(mut cut) = result
+                    && !cut.tool_calls.is_empty()
+                {
+                    cut.resend_thinking = false;
+                    let calls = cut.tool_calls.clone();
+                    let message = Message::Assistant(cut);
+                    live.conv.lock().unwrap().push(message.clone())?;
+                    self.emit(Event::Message { conv: id.to_string(), message });
+                    self.save_cut_writes(live, id, calls, Cut::Split, cancel).await?;
+                }
+                continue;
+            }
             // The user sent a message while the model thought. The thinking so far stays, and the next request
             // adds the message after it.
             if step.is_cancelled() && !cancel.is_cancelled() {
@@ -973,6 +1002,12 @@ impl Host {
                 self.emit(Event::Error { conv: Some(id.to_string()), message: err });
                 return Ok(());
             }
+            // The context filled while the model wrote a file. The complete lines are saved, and the next step
+            // summarizes the conversation to make room before the model continues the file.
+            if stop == StopReason::Length && !calls.is_empty() && !cancel.is_cancelled() {
+                self.save_cut_writes(live, id, calls, Cut::OutOfRoom, cancel).await?;
+                continue;
+            }
             if stop != StopReason::ToolUse || calls.is_empty() || cancel.is_cancelled() {
                 // A message sent during the final reply gets its own reply before the task ends.
                 if stop == StopReason::Stop && !cancel.is_cancelled() && !live.queued.lock().unwrap().is_empty() {
@@ -998,41 +1033,54 @@ impl Host {
         }
     }
 
-    /// Saves the complete lines of file writes that Stop cut off, through the usual approval, and tells the model
-    /// where to continue. A cut-off write that would replace an existing file saves nothing, since half of it would
-    /// lose the rest of that file.
+    /// Saves the complete lines of file writes that Stop cut off, which the reply before this run left.
     async fn save_stopped_writes(&self, live: &Live, id: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
-        let (cwd, calls) = {
-            let c = live.conv.lock().unwrap();
-            match c.messages.last() {
-                Some(Message::Assistant(a)) if a.stop == StopReason::Aborted && !a.tool_calls.is_empty() => (c.cwd.clone(), a.tool_calls.clone()),
-                _ => return Ok(()),
-            }
+        let calls = match live.conv.lock().unwrap().messages.last() {
+            Some(Message::Assistant(a)) if a.stop == StopReason::Aborted && !a.tool_calls.is_empty() => a.tool_calls.clone(),
+            _ => return Ok(()),
         };
+        self.save_cut_writes(live, id, calls, Cut::Stopped, cancel).await
+    }
+
+    /// Saves the complete lines of file writes cut off partway, through the usual approval, and tells the model where
+    /// to continue. After Stop, a write that would replace an existing file saves nothing, since half of it would
+    /// lose the rest of that file. After Scoobert cut a write, the model meant the whole file, so it is saved unless
+    /// the call was cut before it said whether to add to an existing file.
+    async fn save_cut_writes(&self, live: &Live, id: &str, calls: Vec<ToolCall>, cut: Cut, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let cwd = live.conv.lock().unwrap().cwd.clone();
         let notes = cwd.join(&self.settings().notes_folder);
         for call in calls {
-            let append = call.arguments.get("append").and_then(Value::as_bool).unwrap_or(false);
+            let append = call.arguments.get("append").and_then(Value::as_bool);
             let exists = tools::target_path(&cwd, &call, Some(&notes)).is_some_and(|p| p.exists());
             let lines = call.arg("content").lines().count();
-            let result = if !append && exists {
-                ToolResult {
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    output: format!("The reply was stopped while writing this file, and saving part of it would have replaced the rest, so nothing was saved and {} is unchanged.", call.arg("path")),
-                    is_error: true,
-                    diff: None,
-                    time: now_millis(),
+            let path = call.arg("path");
+            let refused = match cut {
+                Cut::Stopped if append != Some(true) && exists => Some(format!(
+                    "The reply was stopped while writing this file, and saving part of it would have replaced the rest, so nothing was saved and {path} is unchanged."
+                )),
+                Cut::Split | Cut::OutOfRoom if append.is_none() && exists => Some(format!(
+                    "Nothing was saved, because the write was cut off after {lines} lines, before it said whether to replace {path} or add to it. Write it again in parts of about 150 lines, and give path and append before content."
+                )),
+                _ => None,
+            };
+            let result = match refused {
+                Some(output) => ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error: true, diff: None, time: now_millis() },
+                None => {
+                    let mut r = self.run_tool(live, id, &cwd, &call, cancel).await;
+                    if !r.is_error {
+                        let why = match cut {
+                            Cut::Stopped => format!("The reply was stopped while writing this file, so only its first {lines} lines were saved."),
+                            Cut::Split => format!("One write holds about 200 lines, so Scoobert stopped this one and saved its first {lines} lines."),
+                            Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only its first {lines} lines were saved."),
+                        };
+                        r.output = format!(
+                            "{} {why} Continue from line {} with write and append set to true, and do not write the saved lines again.",
+                            r.output,
+                            lines + 1
+                        );
+                    }
+                    r
                 }
-            } else {
-                let mut r = self.run_tool(live, id, &cwd, &call, cancel).await;
-                if !r.is_error {
-                    r.output = format!(
-                        "{} The reply was stopped while writing this file, so only its first {lines} lines were saved. Continue from line {} with write and append set to true, and do not write the saved lines again.",
-                        r.output,
-                        lines + 1
-                    );
-                }
-                r
             };
             let message = Message::Tool(result);
             live.conv.lock().unwrap().push(message.clone())?;
@@ -1073,6 +1121,14 @@ impl Host {
                     match &delta {
                         Delta::Thinking(_) => *live.last_thought.lock().unwrap() = Some(std::time::Instant::now()),
                         Delta::Text(_) | Delta::ToolCall(_) | Delta::ToolInput(_) => *live.last_thought.lock().unwrap() = None,
+                        // The write so far is saved and the model continues it in another part. A write that has not
+                        // named its file yet runs on, since nothing could be saved.
+                        Delta::LongWrite { path: Some(_) } => {
+                            if let Some(step) = live.step_cancel.lock().unwrap().as_ref() {
+                                live.split.store(true, Ordering::SeqCst);
+                                step.cancel();
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1113,6 +1169,8 @@ impl Host {
     fn too_long(&self, live: &Live, target: &Target) -> bool {
         let ctx = self.context_window(target);
         let thinking = live.conv.lock().unwrap().thinking;
+        // A write the context cuts off keeps its complete lines, so the reserve only covers the thinking and a short
+        // reply, and the summary waits as long as it can.
         let reserve = (thinking.budget() as u64 + 2048).min(ctx / 3);
         self.prompt_tokens(live) + reserve > ctx
     }

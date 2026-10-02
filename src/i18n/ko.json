@@ -258,7 +258,6 @@
   "Show the file": "파일 표시",
   "Remove Scoobert": "Scoobert 제거",
   "{size} download": "다운로드 크기 {size}",
-  "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.": "여유 메모리가 약 {memory} 필요합니다. 이 컴퓨터의 총 메모리({total})로는 매우 느리거나 로드에 실패할 수 있습니다.",
   "Starting...": "시작하는 중...",
   "{status}: {done} of {total}": "{status}: {done} / {total}",
   "Stop the download": "다운로드 중지",
@@ -309,7 +308,6 @@
   "Use the graphics card": "그래픽 카드 사용",
   "Runs as much of the model as fits on the graphics card, which is much faster with a dedicated card. A model the card cannot load runs on the processor instead. Applies the next time a model loads.": "모델 중 그래픽 카드에 들어가는 만큼을 최대한 그래픽 카드에서 실행하며, 전용 카드가 있으면 훨씬 빠릅니다. 카드에 로드할 수 없는 모델은 대신 프로세서에서 실행됩니다. 다음에 모델을 로드할 때 적용됩니다.",
   "Load models larger than memory from disk": "메모리보다 큰 모델을 디스크에서 로드",
-  "Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory.": "여유 메모리에 들어가지 않는 전문가 혼합(MoE) 모델이 작동하는 동안 디스크에서 가중치를 읽을 수 있게 합니다. SSD를 쓰더라도 속도는 초당 몇 단어 정도가 한계입니다. 다른 모델은 여전히 메모리에 들어가야 합니다.",
   "less than a minute": "1분 미만",
   "about a minute": "약 1분",
   "about {n} minutes": "약 {n}분",
@@ -326,5 +324,7 @@
   "Plan, then discuss": "계획 후 논의",
   "Plan, then build": "계획 후 작성",
   "Before it builds:": "작성하기 전에:",
-  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "계획을 사용하면 Scoobert가 먼저 만들 기능을 프로젝트 노트에 적어 두어, 이후 단계와 대화가 그 계획을 따를 수 있습니다."
+  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "계획을 사용하면 Scoobert가 먼저 만들 기능을 프로젝트 노트에 적어 두어, 이후 단계와 대화가 그 계획을 따를 수 있습니다.",
+  "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "여유 메모리에 들어가지 않는 모델이 가중치 일부를 디스크에 둔 채 작동 중에 가상 메모리로 읽을 수 있게 합니다. 훨씬 느려집니다. 전문가 혼합(MoE) 모델은 SSD에서 초당 몇 단어 정도이고, 다른 모델은 한 단어에 몇 초가 걸릴 수 있습니다.",
+  "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "약 {memory}의 여유 메모리가 필요하며, 이는 이 컴퓨터의 {total}에서 시스템과 다른 앱이 쓰고 남는 양보다 많습니다. 모델의 일부는 하드 드라이브에서 가상 메모리로 실행되므로 훨씬 느립니다. 사용하려면 설정에서 디스크로부터 모델 로드를 켜세요."
 }

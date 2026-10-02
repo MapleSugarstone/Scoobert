@@ -168,14 +168,6 @@ pub fn kv_bytes_per_token(file: &Path) -> u64 {
     bytes
 }
 
-/// Whether the model is a mixture of experts, which uses only some of its weights for each token. Such a model
-/// can run with its weights read from disk as needed, since each token reads a small part of them.
-pub fn mixture_of_experts(file: &Path) -> bool {
-    let Ok(meta) = read_metadata(file) else { return false };
-    let Some(Value::Str(arch)) = meta.get("general.architecture") else { return false };
-    meta.get(&format!("{arch}.expert_count")).and_then(Value::as_u64).is_some_and(|n| n > 1)
-}
-
 fn compute_kv(file: &Path) -> Option<u64> {
     let meta = read_metadata(file).ok()?;
     let Some(Value::Str(arch)) = meta.get("general.architecture") else { return None };

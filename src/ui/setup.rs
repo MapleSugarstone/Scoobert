@@ -211,7 +211,7 @@ impl Setup {
                 text(trf("Needs about {memory} of free memory.", &[("memory", &gb(need))])).size(12).style(theme::muted)
             } else {
                 text(trf(
-                    "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.",
+                    "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.",
                     &[("memory", &gb(need)), ("total", &gb(total_ram))],
                 ))
                 .size(12)

@@ -116,8 +116,8 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
         ),
         tool(
             "write",
-            "Create a file or replace a whole file. Creates missing folders. Set append to true to add content to the end of an existing file, which is how to write a long file in parts.",
-            json!({ "path": path, "content": { "type": "string" }, "append": { "type": "boolean" } }),
+            "Create a file or replace a whole file. Creates missing folders. Set append to true to add content to the end of an existing file, which is how to write a long file in parts. Give path and append before content.",
+            json!({ "path": path, "append": { "type": "boolean" }, "content": { "type": "string" } }),
             &["path", "content"],
         ),
         shell_tool,

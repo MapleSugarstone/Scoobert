@@ -200,7 +200,7 @@ impl Chat {
                         self.activity = None;
                         self.progress = None;
                     }
-                    Delta::Progress { .. } => {}
+                    Delta::Progress { .. } | Delta::LongWrite { .. } => {}
                 }
             }
             E::Message { message, .. } => {

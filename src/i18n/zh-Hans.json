@@ -258,7 +258,6 @@
   "Show the file": "显示文件",
   "Remove Scoobert": "移除 Scoobert",
   "{size} download": "下载大小 {size}",
-  "Needs about {memory} of free memory. This computer has {total} in total, so it would be very slow or fail to load.": "需要约 {memory} 的可用内存。这台电脑的内存总共只有 {total}，运行会非常慢，甚至无法加载。",
   "Starting...": "正在启动...",
   "{status}: {done} of {total}": "{status}：{done} / {total}",
   "Stop the download": "停止下载",
@@ -309,7 +308,6 @@
   "Use the graphics card": "使用显卡",
   "Runs as much of the model as fits on the graphics card, which is much faster with a dedicated card. A model the card cannot load runs on the processor instead. Applies the next time a model loads.": "在显卡上运行模型中尽可能多的部分，使用独立显卡时速度会快得多。显卡无法加载的模型则改用处理器运行。下次加载模型时生效。",
   "Load models larger than memory from disk": "从磁盘加载超出内存的模型",
-  "Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory.": "允许无法放入可用内存的混合专家（MoE）模型在运行时从磁盘读取权重。使用 SSD 时，速度最多也只有每秒几个词。其他模型仍需放入内存。",
   "less than a minute": "不到 1 分钟",
   "about a minute": "约 1 分钟",
   "about {n} minutes": "约 {n} 分钟",
@@ -326,5 +324,7 @@
   "Plan, then discuss": "先计划再讨论",
   "Plan, then build": "先计划再构建",
   "Before it builds:": "开始构建前：",
-  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "启用计划后，Scoobert 会先把要构建的功能写进项目笔记，以便后续步骤和对话可以按计划进行。"
+  "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "启用计划后，Scoobert 会先把要构建的功能写进项目笔记，以便后续步骤和对话可以按计划进行。",
+  "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "允许无法放入可用内存的模型把部分权重留在磁盘上，并在运行时作为虚拟内存读取。速度会慢很多：混合专家（MoE）模型在 SSD 上每秒只能生成几个词，其他模型每个词可能需要数秒。",
+  "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "需要约 {memory} 的可用内存，超过这台电脑的 {total} 在系统和其他应用占用后剩下的部分。模型的一部分会作为虚拟内存从硬盘运行，速度会慢很多。要使用它，请在设置中开启从磁盘加载模型。"
 }

@@ -659,7 +659,7 @@ impl Panel {
             ),
             switch_row(
                 tr("Load models larger than memory from disk"),
-                tr("Lets a mixture-of-experts model that does not fit in free memory read its weights from disk as it works. Expect a few words per second at best, from an SSD. Other models still need to fit in memory."),
+                tr("Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word."),
                 s.models_from_disk,
                 Msg::ModelsFromDisk
             ),

@@ -148,7 +148,7 @@ pub struct Settings {
     pub use_gpu: bool,
     /// Models the graphics card failed to load, which run on the processor. Turning the card on again clears it.
     pub gpu_failed: Vec<String>,
-    /// Lets a mixture-of-experts model larger than free memory run with its weights read from disk, slowly.
+    /// Lets a model larger than free memory run with part of its weights read from disk as virtual memory, slowly.
     pub models_from_disk: bool,
     /// What the first message of a new conversation in a project does before any code.
     pub plan_first: PlanFirst,

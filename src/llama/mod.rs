@@ -268,16 +268,16 @@ impl LlamaServer {
         let need = self.memory_needed(model, ctx);
         let free = crate::sys::available_memory();
         if free < need {
-            // A mixture-of-experts model can leave its weights on disk, where the system reads the parts each token
-            // uses. Everything else, such as the conversation's cache, still has to fit in memory.
-            let experts = gguf::mixture_of_experts(&model.path);
-            let rest = need.saturating_sub(model.size) + DISK_MARGIN;
-            if !(experts && self.settings().models_from_disk && free >= rest) {
+            // The weights are memory-mapped, so with the setting on, the weights that do not fit stay on disk and the
+            // system reads them in as virtual memory. Everything else, such as the conversation's cache, still has to
+            // fit in memory.
+            let from_disk = self.settings().models_from_disk;
+            if !(from_disk && free >= need.saturating_sub(model.size) + DISK_MARGIN) {
                 let args: &[(&str, &dyn std::fmt::Display)] = &[("model", &model.name), ("need", &gb(need)), ("free", &gb(free))];
-                bail!(if experts {
-                    crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, or turn on loading models from disk in Settings to run it slowly.", args)
-                } else {
+                bail!(if from_disk {
                     crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, then send your message again.", args)
+                } else {
+                    crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, or turn on loading models from disk in Settings to run it slowly.", args)
                 });
             }
         }
