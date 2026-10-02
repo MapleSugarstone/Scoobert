@@ -1,6 +1,6 @@
 [package]
 name = "scoobert"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Desktop coding assistant that runs local Qwen models or hosted models, with project notes"
 authors = ["Maple Sugarstone"]
@@ -41,6 +41,11 @@ windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", 
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# cosmic-text 0.15 lets a line that mixes Arabic and Latin words grow past its width. The copy in
+# patches/cosmic-text changes only src/shape.rs to fix it. Check it again when iced moves to a newer cosmic-text.
+[patch.crates-io]
+cosmic-text = { path = "patches/cosmic-text" }
 
 [profile.release]
 opt-level = 3

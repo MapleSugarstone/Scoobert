@@ -5,6 +5,11 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# GitHub once started two runs for one tag push, and the second failed to create a release that already existed.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   LLAMA_RELEASE: b11193
   CARGO_TERM_COLOR: always
@@ -72,4 +77,9 @@ jobs:
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/*/* --repo "$GITHUB_REPOSITORY" --title "Scoobert ${GITHUB_REF_NAME#v}" --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/*/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" artifacts/*/* --repo "$GITHUB_REPOSITORY" --title "Scoobert ${GITHUB_REF_NAME#v}" --generate-notes
+          fi

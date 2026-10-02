@@ -37,6 +37,12 @@ pub const LANGUAGES: &[Language] = &[
     Language { code: "ja", name: "日本語", english: "Japanese", group: ',', decimal: '.', date_time: "%Y/%m/%d %H:%M", table: include_str!("ja.json") },
     Language { code: "ko", name: "한국어", english: "Korean", group: ',', decimal: '.', date_time: "%Y. %-m. %-d. %H:%M", table: include_str!("ko.json") },
     Language { code: "zh-Hans", name: "简体中文", english: "Simplified Chinese", group: ',', decimal: '.', date_time: "%Y/%m/%d %H:%M", table: include_str!("zh-Hans.json") },
+    Language { code: "ar", name: "العربية", english: "Arabic", group: ',', decimal: '.', date_time: "%d/%m/%Y %H:%M", table: include_str!("ar.json") },
+    Language { code: "ckb", name: "کوردیی سۆرانی", english: "Sorani Kurdish", group: ',', decimal: '.', date_time: "%Y/%m/%d %H:%M", table: include_str!("ckb.json") },
+    Language { code: "kmr", name: "Kurdî (Kurmancî)", english: "Kurmanji Kurdish", group: '.', decimal: ',', date_time: "%d.%m.%Y %H:%M", table: include_str!("kmr.json") },
+    Language { code: "hy", name: "Հայերեն", english: "Armenian", group: '\u{a0}', decimal: ',', date_time: "%d.%m.%Y, %H:%M", table: include_str!("hy.json") },
+    Language { code: "tl", name: "Tagalog", english: "Tagalog", group: ',', decimal: '.', date_time: "%m/%d/%Y, %-I:%M %p", table: include_str!("tl.json") },
+    Language { code: "ga", name: "Gaeilge", english: "Irish", group: ',', decimal: '.', date_time: "%d/%m/%Y %H:%M", table: include_str!("ga.json") },
 ];
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
@@ -115,6 +121,10 @@ pub fn from_locale(locale: &str) -> Option<&'static str> {
         // Brazilian Portuguese is the only Portuguese offered, and the only Chinese is Simplified.
         "pt" => Some("pt-BR"),
         "zh" => Some("zh-Hans"),
+        // Windows names Sorani "ku-Arab", and Linux uses "ku" for Kurmanji.
+        "ku" if locale.contains("-arab") => Some("ckb"),
+        "ku" => Some("kmr"),
+        "fil" => Some("tl"),
         _ => LANGUAGES.iter().find(|l| l.code == primary).map(|l| l.code),
     }
 }
@@ -149,6 +159,11 @@ mod tests {
         assert_eq!(from_locale("ja-JP"), Some("ja"));
         assert_eq!(from_locale("en-GB"), Some("en"));
         assert_eq!(from_locale("nl-NL"), None);
+        assert_eq!(from_locale("ku-Arab-IQ"), Some("ckb"));
+        assert_eq!(from_locale("ckb_IQ.UTF-8"), Some("ckb"));
+        assert_eq!(from_locale("ku_TR.UTF-8"), Some("kmr"));
+        assert_eq!(from_locale("fil-PH"), Some("tl"));
+        assert_eq!(from_locale("ga-IE"), Some("ga"));
     }
 
     #[test]

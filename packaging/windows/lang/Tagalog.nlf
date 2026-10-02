@@ -1,0 +1,191 @@
+﻿# Header, don't edit
+NLF v6
+# Start editing here
+# Language ID
+1124
+# Font and size - dash (-) means default
+-
+-
+# Codepage - dash (-) means ASCII code page
+-
+# RTL - anything else than RTL means LTR
+-
+# Translation by Scoobert
+# ^Branding
+Nullsoft Install System %s
+# ^SetupCaption
+Setup ng $(^Name)
+# ^UninstallCaption
+Pag-uninstall ng $(^Name)
+# ^LicenseSubCaption
+: Kasunduan sa Lisensya
+# ^ComponentsSubCaption
+: Mga Opsyon sa Pag-install
+# ^DirSubCaption
+: Folder ng Pag-install
+# ^InstallingSubCaption
+: Ini-install
+# ^CompletedSubCaption
+: Tapos na
+# ^UnComponentsSubCaption
+: Mga Opsyon sa Pag-uninstall
+# ^UnDirSubCaption
+: Folder ng Pag-uninstall
+# ^ConfirmSubCaption
+: Kumpirmasyon
+# ^UninstallingSubCaption
+: Ina-uninstall
+# ^UnCompletedSubCaption
+: Tapos na
+# ^BackBtn
+< &Bumalik
+# ^NextBtn
+&Susunod >
+# ^AgreeBtn
+&Sumasang-ayon Ako
+# ^AcceptBtn
+&Tinatanggap ko ang mga tuntunin ng Kasunduan sa Lisensya
+# ^DontAcceptBtn
+&Hindi ko tinatanggap ang mga tuntunin ng Kasunduan sa Lisensya
+# ^InstallBtn
+&I-install
+# ^UninstallBtn
+&I-uninstall
+# ^CancelBtn
+Kanselahin
+# ^CloseBtn
+&Isara
+# ^BrowseBtn
+Mag-b&rowse...
+# ^ShowDetailsBtn
+Ipakita ang mga &detalye
+# ^ClickNext
+I-click ang Susunod para magpatuloy.
+# ^ClickInstall
+I-click ang I-install para simulan ang pag-install.
+# ^ClickUninstall
+I-click ang I-uninstall para simulan ang pag-uninstall.
+# ^Name
+Pangalan
+# ^Completed
+Tapos na
+# ^LicenseText
+Pakirepaso ang kasunduan sa lisensya bago i-install ang $(^NameDA). Kung tinatanggap mo ang lahat ng tuntunin ng kasunduan, i-click ang Sumasang-ayon Ako.
+# ^LicenseTextCB
+Pakirepaso ang kasunduan sa lisensya bago i-install ang $(^NameDA). Kung tinatanggap mo ang lahat ng tuntunin ng kasunduan, lagyan ng tsek ang check box sa ibaba. $_CLICK
+# ^LicenseTextRB
+Pakirepaso ang kasunduan sa lisensya bago i-install ang $(^NameDA). Kung tinatanggap mo ang lahat ng tuntunin ng kasunduan, piliin ang unang opsyon sa ibaba. $_CLICK
+# ^UnLicenseText
+Pakirepaso ang kasunduan sa lisensya bago i-uninstall ang $(^NameDA). Kung tinatanggap mo ang lahat ng tuntunin ng kasunduan, i-click ang Sumasang-ayon Ako.
+# ^UnLicenseTextCB
+Pakirepaso ang kasunduan sa lisensya bago i-uninstall ang $(^NameDA). Kung tinatanggap mo ang lahat ng tuntunin ng kasunduan, lagyan ng tsek ang check box sa ibaba. $_CLICK
+# ^UnLicenseTextRB
+Pakirepaso ang kasunduan sa lisensya bago i-uninstall ang $(^NameDA). Kung tinatanggap mo ang lahat ng tuntunin ng kasunduan, piliin ang unang opsyon sa ibaba. $_CLICK
+# ^Custom
+Pasadya
+# ^ComponentsText
+Lagyan ng tsek ang mga component na gusto mong i-install at alisan ng tsek ang mga component na ayaw mong i-install. $_CLICK
+# ^ComponentsSubText1
+Piliin ang uri ng pag-install:
+# ^ComponentsSubText2_NoInstTypes
+Piliin ang mga component na ii-install:
+# ^ComponentsSubText2
+O kaya, piliin ang mga opsyonal na component na gusto mong i-install:
+# ^UnComponentsText
+Lagyan ng tsek ang mga component na gusto mong i-uninstall at alisan ng tsek ang mga component na ayaw mong i-uninstall. $_CLICK
+# ^UnComponentsSubText1
+Piliin ang uri ng pag-uninstall:
+# ^UnComponentsSubText2_NoInstTypes
+Piliin ang mga component na iu-uninstall:
+# ^UnComponentsSubText2
+O kaya, piliin ang mga opsyonal na component na gusto mong i-uninstall:
+# ^DirText
+Ii-install ng Setup ang $(^NameDA) sa sumusunod na folder. Para mag-install sa ibang folder, i-click ang Mag-browse at pumili ng ibang folder. $_CLICK
+# ^DirSubText
+Folder ng Patutunguhan
+# ^DirBrowseText
+Piliin ang folder kung saan i-install ang $(^NameDA):
+# ^UnDirText
+Iu-uninstall ng Setup ang $(^NameDA) mula sa sumusunod na folder. Para mag-uninstall mula sa ibang folder, i-click ang Mag-browse at pumili ng ibang folder. $_CLICK
+# ^UnDirSubText
+""
+# ^UnDirBrowseText
+Piliin ang folder kung saan i-uninstall ang $(^NameDA):
+# ^SpaceAvailable
+"Magagamit na espasyo: "
+# ^SpaceRequired
+"Kinakailangang espasyo: "
+# ^UninstallingText
+Iu-uninstall ang $(^NameDA) mula sa sumusunod na folder. $_CLICK
+# ^UninstallingSubText
+Ina-uninstall mula sa:
+# ^FileError
+Error sa pagbubukas ng file para sa pagsusulat: \r\n\r\n$0\r\n\r\nI-click ang Abort para ihinto ang pag-install,\r\nRetry para subukang muli, o\r\nIgnore para laktawan ang file na ito.
+# ^FileError_NoIgnore
+Error sa pagbubukas ng file para sa pagsusulat: \r\n\r\n$0\r\n\r\nI-click ang Retry para subukang muli, o\r\nCancel para ihinto ang pag-install.
+# ^CantWrite
+"Hindi makapagsulat: "
+# ^CopyFailed
+Nabigo ang pagkopya
+# ^CopyTo
+"Kopyahin sa "
+# ^Registering
+"Nire-register: "
+# ^Unregistering
+"Ina-unregister: "
+# ^SymbolNotFound
+"Hindi mahanap ang symbol: "
+# ^CouldNotLoad
+"Hindi ma-load: "
+# ^CreateFolder
+"Gumawa ng folder: "
+# ^CreateShortcut
+"Gumawa ng shortcut: "
+# ^CreatedUninstaller
+"Nagawa ang uninstaller: "
+# ^Delete
+"Burahin ang file: "
+# ^DeleteOnReboot
+"Burahin sa pag-restart: "
+# ^ErrorCreatingShortcut
+"Error sa paggawa ng shortcut: "
+# ^ErrorCreating
+"Error sa paggawa: "
+# ^ErrorDecompressing
+Error sa pag-decompress ng data! Sira ba ang installer?
+# ^ErrorRegistering
+Error sa pag-register ng DLL
+# ^ExecShell
+"ExecShell: "
+# ^Exec
+"Patakbuhin: "
+# ^Extract
+"I-extract: "
+# ^ErrorWriting
+"I-extract: error sa pagsusulat sa file "
+# ^InvalidOpcode
+Sira ang installer: hindi wastong opcode
+# ^NoOLE
+"Walang OLE para sa: "
+# ^OutputFolder
+"Folder ng output: "
+# ^RemoveFolder
+"Alisin ang folder: "
+# ^RenameOnReboot
+"Palitan ang pangalan sa pag-restart: "
+# ^Rename
+"Palitan ang pangalan: "
+# ^Skipped
+"Nilaktawan: "
+# ^CopyDetails
+Kopyahin ang mga Detalye sa Clipboard
+# ^LogInstall
+I-log ang proseso ng pag-install
+# ^Byte
+B
+# ^Kilo
+ K
+# ^Mega
+ M
+# ^Giga
+ G
