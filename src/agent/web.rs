@@ -193,7 +193,8 @@ pub async fn fetch(address: &str) -> anyhow::Result<Page> {
     Ok(page)
 }
 
-/// A Chromium-based browser installed on this computer: Edge on Windows, Chrome or Chromium on Linux.
+/// A Chromium-based browser installed on this computer: Edge on Windows, Chrome or Chromium on Linux, Chrome, Edge,
+/// or Chromium on macOS.
 fn find_browser() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     if cfg!(windows) {
@@ -205,6 +206,12 @@ fn find_browser() -> Option<std::path::PathBuf> {
             env("LOCALAPPDATA").map(|p| p.join("Google/Chrome/Application/chrome.exe")),
         ];
         return candidates.into_iter().flatten().find(|p| p.is_file());
+    }
+    if cfg!(target_os = "macos") {
+        let apps = ["Google Chrome.app/Contents/MacOS/Google Chrome", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Chromium.app/Contents/MacOS/Chromium"];
+        let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications"));
+        let roots = [Some(PathBuf::from("/Applications")), home];
+        return roots.iter().flatten().flat_map(|r| apps.iter().map(move |a| r.join(a))).find(|p| p.is_file());
     }
     let path = std::env::var_os("PATH")?;
     ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"]

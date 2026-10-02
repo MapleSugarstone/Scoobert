@@ -201,7 +201,8 @@ impl Default for Settings {
             custom_providers: Vec::new(),
             theme: ThemeChoice::System,
             language: String::new(),
-            use_gpu: false,
+            // Macs share memory between the processor and the graphics chip, so the model runs on the chip by default.
+            use_gpu: cfg!(target_os = "macos"),
             gpu_failed: Vec::new(),
             models_from_disk: false,
             plan_first: PlanFirst::Off,

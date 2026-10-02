@@ -19,6 +19,10 @@ fn pick() -> &'static Fonts {
             let mono = if dir.join("CascadiaMono.ttf").exists() { "Cascadia Mono" } else { "Consolas" };
             return Fonts { ui: "Segoe UI", mono };
         }
+        // Every macOS version Scoobert runs on has both, and the system font itself is not exposed by name.
+        if cfg!(target_os = "macos") {
+            return Fonts { ui: "Helvetica Neue", mono: "Menlo" };
+        }
         let files = font_files();
         let has = |needles: &[&str]| needles.iter().any(|n| files.iter().any(|f| f.starts_with(&n.to_lowercase())));
         let ui = [
@@ -84,6 +88,14 @@ fn cjk_family(code: &str) -> Option<&'static str> {
             "ja" => Some("Yu Gothic UI"),
             "ko" => Some("Malgun Gothic"),
             "zh-Hans" => Some("Microsoft YaHei UI"),
+            _ => None,
+        };
+    }
+    if cfg!(target_os = "macos") {
+        return match code {
+            "ja" => Some("Hiragino Sans"),
+            "ko" => Some("Apple SD Gothic Neo"),
+            "zh-Hans" => Some("PingFang SC"),
             _ => None,
         };
     }

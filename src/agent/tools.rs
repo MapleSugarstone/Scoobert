@@ -514,7 +514,7 @@ async fn command(
     if writes_heredoc(cmd_text) {
         return Err("Nothing ran. This command writes a file from a heredoc, which can change quotes, backslashes, and dollar signs without an error. Use write to create or replace the file, or edit to change part of it. The file keeps everything you write, even though the conversation later shows a long write as a short note.".into());
     }
-    let sandboxed = limits.unattended && matches!(limits.isolation, Isolation::Bubblewrap { .. });
+    let sandboxed = limits.unattended && matches!(limits.isolation, Isolation::Bubblewrap { .. } | Isolation::Seatbelt);
     if limits.unattended
         && !sandboxed
         && let Some(tool) = sandbox::network_use(cmd_text)
@@ -526,6 +526,7 @@ async fn command(
     let (program, args): (PathBuf, Vec<String>) = match (shell, &limits.isolation) {
         (Shell::Bash(bash), Isolation::Bubblewrap { flatpak_host }) if sandboxed => sandbox::bubblewrap(*flatpak_host, bash, cwd, cmd_text),
         (Shell::FlatpakHost, Isolation::Bubblewrap { .. }) if sandboxed => sandbox::bubblewrap(true, Path::new("/bin/bash"), cwd, cmd_text),
+        (Shell::Bash(bash), Isolation::Seatbelt) if sandboxed => sandbox::seatbelt(bash, cwd, cmd_text),
         (Shell::Bash(bash), _) => (bash.clone(), vec!["-c".into(), cmd_text.into()]),
         (Shell::FlatpakHost, _) => (
             PathBuf::from("flatpak-spawn"),

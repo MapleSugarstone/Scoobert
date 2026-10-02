@@ -1,4 +1,4 @@
-//! Memory and process queries that differ between Windows and Linux.
+//! Memory and process queries that differ between Windows, Linux, and macOS.
 
 /// Physical memory the system can give to a new process without paging, in bytes.
 pub fn available_memory() -> u64 {
@@ -23,6 +23,30 @@ pub fn kill_if_named(pid: u32, name: &str) -> bool {
 /// The primary screen without the taskbar, as x, y, width, and height in logical pixels.
 pub fn work_area() -> Option<(f32, f32, f32, f32)> {
     imp::work_area()
+}
+
+/// Gives this process the PATH of the user's login shell on macOS. An app opened from Finder or the Dock gets
+/// only the system folders, so tools installed with Homebrew and similar would not be found. Call it before any
+/// other thread starts, since it changes the environment.
+pub fn use_login_path() {
+    #[cfg(target_os = "macos")]
+    {
+        const MARK: &str = "SCOOBERT_PATH=";
+        let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into());
+        // A profile that prints text or waits would otherwise delay the window, so the answer gets 3 seconds.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let out = std::process::Command::new(&shell).args(["-l", "-c", "printf 'SCOOBERT_PATH=%s' \"$PATH\""]).stdin(std::process::Stdio::null()).output();
+            let _ = tx.send(out.ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()));
+        });
+        let printed = rx.recv_timeout(std::time::Duration::from_secs(3)).ok().flatten().unwrap_or_default();
+        let path = printed.rsplit_once(MARK).map(|(_, p)| p.trim().to_string()).unwrap_or_default();
+        let fallback = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+        let path = if path.contains("/usr/bin") { path } else { format!("{fallback}:{}", std::env::var("PATH").unwrap_or_default()) };
+        // SAFETY: main calls this before the app starts its threads, and the helper thread above only waits on the
+        // shell it already started.
+        unsafe { std::env::set_var("PATH", path) };
+    }
 }
 
 /// The language code the Windows installer wrote beside the program, if any.
@@ -91,7 +115,72 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::process::Command;
+
+    /// macOS keeps a new window inside the visible screen area itself.
+    pub fn work_area() -> Option<(f32, f32, f32, f32)> {
+        None
+    }
+
+    /// Total from `sysctl hw.memsize`, and available as the free, inactive, speculative, and purgeable pages that
+    /// `vm_stat` reports, which macOS hands to a new process before it compresses or swaps anything.
+    pub fn memory() -> (u64, u64) {
+        let run = |cmd: &str, args: &[&str]| Command::new(cmd).args(args).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        let total = run("/usr/sbin/sysctl", &["-n", "hw.memsize"]).and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
+        let Some(stats) = run("/usr/bin/vm_stat", &[]) else { return (total, 0) };
+        (total, available_from_vm_stat(&stats))
+    }
+
+    pub fn available_from_vm_stat(stats: &str) -> u64 {
+        let page = stats
+            .lines()
+            .next()
+            .and_then(|l| l.split("page size of").nth(1))
+            .and_then(|r| r.split_whitespace().next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(16384);
+        let pages = |key: &str| {
+            stats
+                .lines()
+                .find(|l| l.starts_with(key))
+                .and_then(|l| l.split(':').nth(1))
+                .and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page
+    }
+
+    /// Read from the POSIX df output, whose fourth column is the space available in kilobytes.
+    pub fn free_space(path: &std::path::Path) -> Option<u64> {
+        let out = Command::new("/bin/df").arg("-Pk").arg(path).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines().nth(1)?.split_whitespace().nth(3)?.parse::<u64>().ok().map(|kb| kb * 1024)
+    }
+
+    /// `ps` gives the full path of the program, which has to end with `name`.
+    pub fn kill_if_named(pid: u32, name: &str) -> bool {
+        let out = Command::new("/bin/ps").args(["-p", &pid.to_string(), "-o", "comm="]).output();
+        let program = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        if program.rsplit('/').next() != Some(name) {
+            return false;
+        }
+        Command::new("/bin/kill").arg(pid.to_string()).status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn reads_available_pages_from_vm_stat() {
+            let stats = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               1000.\nPages active:                             5000.\nPages inactive:                           2000.\nPages speculative:                         300.\nPages purgeable:                           100.\n";
+            assert_eq!(super::available_from_vm_stat(stats), 3400 * 16384);
+            assert!(super::memory().0 > 0);
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 mod imp {
     /// Linux desktops keep a new window inside the work area themselves.
     pub fn work_area() -> Option<(f32, f32, f32, f32)> {

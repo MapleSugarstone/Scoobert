@@ -15,6 +15,9 @@ const MIN_CAP: u64 = 2_000_000_000;
 pub enum Isolation {
     /// bubblewrap runs the command with no network and a read-only system, with the project writable.
     Bubblewrap { flatpak_host: bool },
+    /// macOS's sandbox-exec runs the command with no network, and with writes allowed only in the project and the
+    /// temporary folders.
+    Seatbelt,
     /// No sandbox is available, so commands that download or install are refused by name.
     Refuse,
 }
@@ -32,12 +35,15 @@ impl Isolation {
                 return Isolation::Bubblewrap { flatpak_host: in_flatpak };
             }
         }
+        if cfg!(target_os = "macos") && Path::new(SANDBOX_EXEC).is_file() {
+            return Isolation::Seatbelt;
+        }
         Isolation::Refuse
     }
 
     pub fn describe(&self) -> &'static str {
         match self {
-            Isolation::Bubblewrap { .. } => "Commands run without internet access and can only change files in the project folder.",
+            Isolation::Bubblewrap { .. } | Isolation::Seatbelt => "Commands run without internet access and can only change files in the project folder.",
             Isolation::Refuse => "Commands that download or install software are refused. Other commands run normally, so they can still change files outside the project.",
         }
     }
@@ -97,6 +103,43 @@ pub fn bubblewrap(flatpak_host: bool, bash: &Path, cwd: &Path, command: &str) ->
     } else {
         (PathBuf::from("bwrap"), args)
     }
+}
+
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// Everything is allowed except the network and writes outside the project, the temporary folders, and the
+/// terminal devices. Paths come in as parameters, so a project path never needs quoting inside the profile.
+const SEATBELT_PROFILE: &str = r#"(version 1)
+(allow default)
+(deny network*)
+(deny file-write*)
+(allow file-write*
+    (subpath (param "PROJECT"))
+    (subpath (param "TMP"))
+    (subpath "/private/tmp")
+    (subpath "/private/var/folders")
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/dtracehelper")
+    (regex #"^/dev/tty")
+    (regex #"^/dev/fd/"))"#;
+
+/// The program and arguments that run `command` inside macOS's sandbox. The project path is resolved first, since
+/// the sandbox compares real paths and folders such as /tmp are links on macOS.
+pub fn seatbelt(bash: &Path, cwd: &Path, command: &str) -> (PathBuf, Vec<String>) {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().into_owned();
+    let args = vec![
+        "-D".to_string(),
+        format!("PROJECT={}", real(cwd)),
+        "-D".into(),
+        format!("TMP={}", real(&std::env::temp_dir())),
+        "-p".into(),
+        SEATBELT_PROFILE.into(),
+        bash.to_string_lossy().into_owned(),
+        "-c".into(),
+        command.into(),
+    ];
+    (PathBuf::from(SANDBOX_EXEC), args)
 }
 
 /// A Windows job object that caps the memory of a command and every process it starts, and ends them
@@ -175,6 +218,31 @@ pub fn systemd_scope_available() -> bool {
             .is_ok_and(|s| s.success())
     });
     *AVAILABLE
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod seatbelt_tests {
+    use std::path::Path;
+
+    fn run(project: &Path, command: &str) -> std::process::Output {
+        let (program, args) = super::seatbelt(Path::new("/bin/bash"), project, command);
+        std::process::Command::new(program).args(args).current_dir(project).output().expect("sandbox-exec runs")
+    }
+
+    #[test]
+    fn writes_only_in_the_project_and_reaches_no_network() {
+        let project = std::env::temp_dir().join(format!("scoobert-seatbelt-{}", std::process::id()));
+        std::fs::create_dir_all(&project).unwrap();
+        let inside = run(&project, "echo ok > inside.txt && cat inside.txt");
+        assert_eq!(String::from_utf8_lossy(&inside.stdout).trim(), "ok", "{}", String::from_utf8_lossy(&inside.stderr));
+        let home = std::env::var("HOME").unwrap();
+        let outside = Path::new(&home).join(format!("scoobert-seatbelt-{}.txt", std::process::id()));
+        let blocked = run(&project, &format!("echo no > '{}'", outside.display()));
+        assert!(!blocked.status.success() && !outside.exists(), "a write outside the project went through");
+        let network = run(&project, "curl -s --max-time 10 -o /dev/null https://github.com");
+        assert!(!network.status.success(), "the network was reachable");
+        let _ = std::fs::remove_dir_all(&project);
+    }
 }
 
 #[cfg(test)]

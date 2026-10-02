@@ -1411,7 +1411,8 @@ impl App {
         // Dialogs cover the area below the top bar, so the window can still be moved and closed.
         let title_bar = mouse_area(self.topbar()).on_press(Message::TitlePressed).on_right_press(Message::WindowMenu);
         let framed = container(column![title_bar, rule::horizontal(1).style(theme::divider), layers]).width(Fill).height(Fill).style(theme::app);
-        if self.maximized {
+        // macOS cannot start a resize from the app, and resizes a borderless window from its edges itself.
+        if self.maximized || cfg!(target_os = "macos") {
             return framed.into();
         }
         stack![framed, resize_edges()].into()
