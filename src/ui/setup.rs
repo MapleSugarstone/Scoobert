@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use iced::futures::SinkExt;
+use iced::widget::text::Wrapping;
 use iced::widget::{Column, button, checkbox, column, container, pick_list, progress_bar, row, scrollable, space, text};
 use iced::{Alignment, Element, Fill, Task};
 use tokio_util::sync::CancellationToken;
@@ -47,6 +48,8 @@ pub struct Setup {
     pub queue: Vec<Job>,
     pub download: Option<Download>,
     pub error: Option<String>,
+    /// Free space on the drive of the models folder, measured when the folder changes and after each download.
+    free_space: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,12 +63,8 @@ pub enum Msg {
     UseHosted,
     Skip,
     Language(&'static crate::i18n::Language),
-}
-
-impl Default for Setup {
-    fn default() -> Self {
-        Setup { selected: default_selection(), queue: Vec::new(), download: None, error: None }
-    }
+    BrowseFolder,
+    FolderPicked(Option<std::path::PathBuf>),
 }
 
 /// The 9B, plus the best larger model that fits this computer's memory.
@@ -80,6 +79,10 @@ pub fn fits(i: usize) -> bool {
 }
 
 impl Setup {
+    pub fn new(models_dir: &std::path::Path) -> Self {
+        Setup { selected: default_selection(), queue: Vec::new(), download: None, error: None, free_space: crate::sys::free_space(models_dir) }
+    }
+
     pub fn update(&mut self, msg: Msg, state: &mut State, host: Option<&Arc<Host>>) -> (Task<Message>, Effect) {
         match msg {
             Msg::Toggle(i, on) => {
@@ -100,6 +103,7 @@ impl Setup {
             }
             Msg::Event(DownloadEvent::Done(result)) => {
                 let finished = self.download.take();
+                self.free_space = crate::sys::free_space(&state.settings.models_dir());
                 match result {
                     Ok(name) => {
                         // The first model that arrives becomes the default, and a larger catalog model replaces the 9B.
@@ -140,6 +144,22 @@ impl Setup {
                 state.settings.language = language.code.to_string();
                 return (Task::none(), Effect::Saved);
             }
+            Msg::BrowseFolder => {
+                return (
+                    Task::perform(
+                        async { rfd::AsyncFileDialog::new().set_title(tr("Choose the models folder")).pick_folder().await.map(|h| h.path().to_path_buf()) },
+                        |p| Message::Setup(Msg::FolderPicked(p)),
+                    ),
+                    Effect::None,
+                );
+            }
+            Msg::FolderPicked(Some(dir)) => {
+                state.settings.models_dir = dir.to_string_lossy().into_owned();
+                self.free_space = crate::sys::free_space(&dir);
+                // The folder may already hold models, which the model list then shows.
+                return (Task::none(), Effect::ModelsChanged);
+            }
+            Msg::FolderPicked(None) => {}
         }
         (Task::none(), Effect::None)
     }
@@ -192,7 +212,7 @@ impl Setup {
         Task::run(stream, |e| Message::Setup(Msg::Event(e)))
     }
 
-    pub fn view(&self, _state: &State) -> Element<'_, Msg> {
+    pub fn view(&self, state: &State) -> Element<'_, Msg> {
         let total_ram = crate::sys::total_memory();
         let mut cards = Column::new().spacing(10);
         for (i, m) in CATALOG.iter().enumerate() {
@@ -211,8 +231,8 @@ impl Setup {
                 text(trf("Needs about {memory} of free memory.", &[("memory", &gb(need))])).size(12).style(theme::muted)
             } else {
                 text(trf(
-                    "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.",
-                    &[("memory", &gb(need)), ("total", &gb(total_ram))],
+                    "Needs about {memory} of free memory, more than this computer can spare. You can still run it by turning on loading models from disk in Settings, which uses storage as extra memory and runs much slower.",
+                    &[("memory", &gb(need))],
                 ))
                 .size(12)
                 .style(theme::warn_text)
@@ -231,11 +251,39 @@ impl Setup {
         let busy = self.download.is_some();
         let any = self.selected.iter().any(|&s| s);
         let total: u64 = CATALOG.iter().zip(&self.selected).filter(|(_, s)| **s).map(|(m, _)| m.download_bytes).sum();
+        let short = self.free_space.is_some_and(|free| total > free);
+        let mut storage = column![
+            row![
+                text(tr("Where models are stored")).size(14),
+                container(text(crate::paths::display(&state.settings.models_dir())).size(13).font(fonts::mono()).style(theme::muted).wrapping(Wrapping::None))
+                    .width(Fill)
+                    .clip(true),
+                button(text(tr("Browse")).size(13)).padding([6, 12]).style(theme::secondary).on_press_maybe((!busy).then_some(Msg::BrowseFolder)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(4);
+        if let Some(free) = self.free_space {
+            storage = storage.push(if short {
+                text(trf(
+                    "The selected models need {size}, and this drive has {free} free. Choose another folder or fewer models.",
+                    &[("size", &gb(total)), ("free", &gb(free))],
+                ))
+                .size(12)
+                .style(theme::warn_text)
+            } else {
+                text(trf("{free} free on this drive.", &[("free", &gb(free))])).size(12).style(theme::muted)
+            });
+        }
         let mut actions = row![].spacing(10).align_y(Alignment::Center);
         actions = actions.push(if busy {
             button(text(tr("Stop the download")).size(14)).padding([8, 16]).style(theme::secondary).on_press(Msg::Cancel)
         } else {
-            button(text(trf("Download {size}", &[("size", &gb(total))])).size(14)).padding([8, 16]).style(theme::primary).on_press_maybe(any.then_some(Msg::Start))
+            button(text(trf("Download {size}", &[("size", &gb(total))])).size(14))
+                .padding([8, 16])
+                .style(theme::primary)
+                .on_press_maybe((any && !short).then_some(Msg::Start))
         });
         actions = actions.push(button(text(tr("Use a hosted model with an API key")).size(14)).padding([8, 16]).style(theme::secondary).on_press(Msg::UseHosted));
         actions = actions.push(space::horizontal());
@@ -258,6 +306,7 @@ impl Setup {
             .size(14)
             .style(theme::muted),
             cards,
+            storage,
             actions,
         ]
         .spacing(16)

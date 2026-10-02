@@ -326,5 +326,7 @@
   "Before it builds:": "作成する前に：",
   "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "計画ありの場合、Scoobertはまず作成する機能をプロジェクトのノートに書き出し、後のステップや会話がそれに従えるようにします。",
   "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "空きメモリに収まらないモデルが、重みの一部をディスクに置いたまま、動作中に仮想メモリとして読み込めるようにします。大幅に遅くなります。MoE（専門家混合）モデルはSSDから毎秒数語程度、その他のモデルは1語に数秒かかることがあります。",
-  "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "約{memory}の空きメモリが必要で、このコンピューターの{total}からシステムや他のアプリの分を除いた残りより多くなります。モデルの一部はハードディスクから仮想メモリとして実行されるため、大幅に遅くなります。使うには、設定でディスクからのモデル読み込みをオンにしてください。"
+  "{free} free on this drive.": "このドライブの空き容量：{free}",
+  "The selected models need {size}, and this drive has {free} free. Choose another folder or fewer models.": "選んだモデルには{size}が必要ですが、このドライブの空き容量は{free}です。別のフォルダーを選ぶか、モデルを減らしてください。",
+  "Needs about {memory} of free memory, more than this computer can spare. You can still run it by turning on loading models from disk in Settings, which uses storage as extra memory and runs much slower.": "約{memory}の空きメモリが必要で、このコンピューターで空けられる量を超えています。設定でディスクからのモデル読み込みをオンにすれば、ストレージを追加のメモリとして使って実行できますが、大幅に遅くなります。"
 }

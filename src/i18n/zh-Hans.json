@@ -326,5 +326,7 @@
   "Before it builds:": "开始构建前：",
   "With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.": "启用计划后，Scoobert 会先把要构建的功能写进项目笔记，以便后续步骤和对话可以按计划进行。",
   "Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word.": "允许无法放入可用内存的模型把部分权重留在磁盘上，并在运行时作为虚拟内存读取。速度会慢很多：混合专家（MoE）模型在 SSD 上每秒只能生成几个词，其他模型每个词可能需要数秒。",
-  "Needs about {memory} of free memory, more than this computer's {total} leaves after the system and other apps. Part of the model runs from the hard drive as virtual memory, which is much slower. Turn on loading models from disk in Settings to use it.": "需要约 {memory} 的可用内存，超过这台电脑的 {total} 在系统和其他应用占用后剩下的部分。模型的一部分会作为虚拟内存从硬盘运行，速度会慢很多。要使用它，请在设置中开启从磁盘加载模型。"
+  "{free} free on this drive.": "此驱动器可用空间：{free}",
+  "The selected models need {size}, and this drive has {free} free. Choose another folder or fewer models.": "所选模型需要 {size}，而此驱动器只有 {free} 可用。请选择其他文件夹或减少模型。",
+  "Needs about {memory} of free memory, more than this computer can spare. You can still run it by turning on loading models from disk in Settings, which uses storage as extra memory and runs much slower.": "需要约 {memory} 的可用内存，超过这台电脑能腾出的量。你仍可以在设置中开启从磁盘加载模型来运行它，这会把存储空间当作额外内存使用，速度会慢很多。"
 }

@@ -9,6 +9,12 @@ pub fn total_memory() -> u64 {
     imp::memory().0
 }
 
+/// Free space on the drive that holds `path`, measured at the nearest folder that exists, since a models folder is
+/// often created only when the first download starts.
+pub fn free_space(path: &std::path::Path) -> Option<u64> {
+    imp::free_space(path.ancestors().find(|p| p.exists())?)
+}
+
 /// Stops a process left behind by an earlier run, but only when it is still the named program.
 pub fn kill_if_named(pid: u32, name: &str) -> bool {
     imp::kill_if_named(pid, name)
@@ -60,6 +66,14 @@ mod imp {
         (status.ullTotalPhys, status.ullAvailPhys)
     }
 
+    pub fn free_space(path: &std::path::Path) -> Option<u64> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut free = 0u64;
+        (unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) } != 0).then_some(free)
+    }
+
     pub fn kill_if_named(pid: u32, name: &str) -> bool {
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, pid);
@@ -95,6 +109,13 @@ mod imp {
                 .unwrap_or(0)
         };
         (field("MemTotal:"), field("MemAvailable:"))
+    }
+
+    /// Read from the POSIX df output, whose fourth column is the space available in kilobytes.
+    pub fn free_space(path: &std::path::Path) -> Option<u64> {
+        let out = std::process::Command::new("df").arg("-Pk").arg(path).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        text.lines().nth(1)?.split_whitespace().nth(3)?.parse::<u64>().ok().map(|kb| kb * 1024)
     }
 
     pub fn kill_if_named(pid: u32, name: &str) -> bool {

@@ -309,6 +309,7 @@ impl App {
         let shared = Arc::new(RwLock::new(state.settings.clone()));
         let logo = image::Handle::from_bytes(include_bytes!("../../assets/logo.png").as_slice());
         let notes = notes::Pane::new(!state.notes_closed);
+        let setup = setup::Setup::new(&state.settings.models_dir());
         let mut app = App {
             state,
             shared,
@@ -334,7 +335,7 @@ impl App {
             images: Vec::new(),
             notes,
             settings: None,
-            setup: setup::Setup::default(),
+            setup,
             confirm: None,
             toast: None,
             update_notice: None,
