@@ -54,8 +54,10 @@ impl std::fmt::Display for NotEnoughMemory {
 
 impl std::error::Error for NotEnoughMemory {}
 
-/// Free memory kept beyond a disk-loaded model's cache and buffers, for the parts of the weights in use.
-const DISK_MARGIN: u64 = 3_000_000_000;
+/// Free memory kept beyond a disk-loaded model's cache and buffers, for the parts of the weights in use. A dense
+/// model reads all of its weights for every token, so a larger margin does not keep it from reading the disk, and
+/// 3 GB refused the 9B on an 8 GB Mac with 3.4 GB free.
+const DISK_MARGIN: u64 = 1_000_000_000;
 /// How often a long read saves its progress.
 const SAVE_EVERY: Duration = Duration::from_secs(60);
 const FIRST_STEP: usize = 256;
