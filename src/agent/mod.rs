@@ -53,6 +53,8 @@ pub enum Event {
     Approval { conv: ConvId, id: u64, call: ToolCall },
     /// The stopped reply at the end of the conversation is being continued, and the next reply takes its place.
     Replacing { conv: ConvId },
+    /// The model did not fit in free memory and loading from disk is off, so the window can offer to turn it on.
+    DiskOffer { conv: ConvId },
     /// The run ended. `interrupted` is true when the task did not finish, so the window can offer Continue.
     Settled { conv: ConvId, context: u64, interrupted: bool },
     /// Messages before `kept_from` were replaced by a summary.
@@ -748,7 +750,7 @@ impl Host {
         tokio::pin!(wait);
         loop {
             let line = match self.llama.loading_for() {
-                Some((model, took)) => trf("Loading {model}: {secs} s", &[("model", &model), ("secs", &took.as_secs())]),
+                Some((model, took, first)) => loading_line(&model, took.as_secs(), first),
                 None => text(),
             };
             self.emit(Event::Activity { conv: id.into(), text: Some(line) });
@@ -842,6 +844,9 @@ impl Host {
                 && !is_cancelled(err)
             {
                 host.emit(Event::Error { conv: Some(conv_id.clone()), message: format!("{err:#}") });
+                if err.chain().any(|e| e.downcast_ref::<crate::llama::NotEnoughMemory>().is_some_and(|m| !m.from_disk)) {
+                    host.emit(Event::DiskOffer { conv: conv_id.clone() });
+                }
             }
             host.emit(Event::Activity { conv: conv_id.clone(), text: None });
             live.running.store(false, Ordering::SeqCst);
@@ -898,11 +903,12 @@ impl Host {
             if self.llama.loaded_model().as_deref() != Some(&model.name) {
                 // Loading takes from seconds to minutes and reports no progress, so the time so far is shown.
                 let (events, conv, name, stop) = (self.events.clone(), id.to_string(), model.name.clone(), CancellationToken::new());
+                let first = !self.llama.loaded_before(&model.name);
                 let ticker = stop.clone();
                 self.rt.spawn(async move {
                     let start = std::time::Instant::now();
                     loop {
-                        let text = trf("Loading {model}: {secs} s", &[("model", &name), ("secs", &start.elapsed().as_secs())]);
+                        let text = loading_line(&name, start.elapsed().as_secs(), first);
                         let _ = events.send(Event::Activity { conv: conv.clone(), text: Some(text) });
                         tokio::select! {
                             _ = ticker.cancelled() => break,
@@ -2226,6 +2232,12 @@ fn answer_dangling_calls(conv: &mut Conversation) -> anyhow::Result<()> {
 }
 
 /// Whether the last run ended because the user pressed Stop.
+/// The activity line while a model loads, with a note on the first load, which reads the whole model from disk.
+fn loading_line(model: &str, secs: u64, first: bool) -> String {
+    let line = trf("Loading {model}: {secs} s", &[("model", &model), ("secs", &secs)]);
+    if first { format!("{line}. {}", tr("The first load of a model takes longer, because it reads the whole model from disk.")) } else { line }
+}
+
 /// Whether Continue can carry on this reply where it stopped: it stopped before it called a tool and holds some
 /// reasoning or text.
 fn continuable(a: &AssistantMessage) -> bool {

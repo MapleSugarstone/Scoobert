@@ -38,6 +38,22 @@ impl std::fmt::Display for ExitedWhileLoading {
 
 impl std::error::Error for ExitedWhileLoading {}
 
+/// The model needs more free memory than there is. `from_disk` says whether loading from disk was already on, since
+/// the window offers to turn it on when it was off.
+#[derive(Debug)]
+pub struct NotEnoughMemory {
+    pub message: String,
+    pub from_disk: bool,
+}
+
+impl std::fmt::Display for NotEnoughMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NotEnoughMemory {}
+
 /// Free memory kept beyond a disk-loaded model's cache and buffers, for the parts of the weights in use.
 const DISK_MARGIN: u64 = 3_000_000_000;
 /// How often a long read saves its progress.
@@ -292,11 +308,12 @@ impl LlamaServer {
             let from_disk = self.settings().models_from_disk;
             if !(from_disk && free >= need.saturating_sub(model.size) + DISK_MARGIN) {
                 let args: &[(&str, &dyn std::fmt::Display)] = &[("model", &model.name), ("need", &gb(need)), ("free", &gb(free))];
-                bail!(if from_disk {
+                let message = if from_disk {
                     crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, then send your message again.", args)
                 } else {
                     crate::i18n::trf("{model} needs about {need} of free memory, and {free} is free. Close other apps, or turn on loading models from disk in Settings to run it slowly.", args)
-                });
+                };
+                return Err(NotEnoughMemory { message, from_disk }.into());
             }
         }
         let slots = paths::get().slots();
@@ -380,12 +397,33 @@ impl LlamaServer {
         *self.loading_model.lock().unwrap() = Some((model.name.clone(), Instant::now()));
         let ready = self.wait_ready(proc, model, cancel).await;
         *self.loading_model.lock().unwrap() = None;
+        if ready.is_ok() {
+            let marker = loaded_marker(&model.name);
+            if let Some(dir) = marker.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(marker, "");
+        }
         ready
     }
 
-    /// The model the server is loading now and how long it has taken so far, if it is loading one.
-    pub fn loading_for(&self) -> Option<(String, Duration)> {
-        self.loading_model.lock().unwrap().as_ref().map(|(name, since)| (name.clone(), since.elapsed()))
+    /// The model the server is loading now, how long it has taken so far, and whether it never loaded on this
+    /// computer before, if it is loading one.
+    pub fn loading_for(&self) -> Option<(String, Duration, bool)> {
+        let loading = self.loading_model.lock().unwrap().clone();
+        loading.map(|(name, since)| {
+            let first = !self.loaded_before(&name);
+            (name, since.elapsed(), first)
+        })
+    }
+
+    /// Whether the model has finished loading on this computer before. The first load reads the whole file from
+    /// disk, which takes far longer than a load the system's file cache can serve.
+    pub fn loaded_before(&self, model: &str) -> bool {
+        // Saved prompts also prove a load, for models loaded before Scoobert kept the marker.
+        let prefix = format!("{model}-");
+        loaded_marker(model).is_file()
+            || std::fs::read_dir(paths::get().slots()).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with(&prefix))
     }
 
     /// Waits for the server to finish loading model, and stops it when loading fails or is cancelled.
@@ -853,6 +891,12 @@ fn reasoning_keeping_template(model: &LocalModel) -> Option<PathBuf> {
     std::fs::create_dir_all(&dir).ok()?;
     std::fs::write(&file, template.replace(CONDITION, "true")).ok()?;
     Some(file)
+}
+
+/// An empty file that marks a model as loaded once on this computer.
+fn loaded_marker(model: &str) -> PathBuf {
+    let safe: String = model.chars().map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    paths::get().cache.join("loaded").join(safe)
 }
 
 /// A server left behind by a crash or a forced close still holds the port and several GB of memory.

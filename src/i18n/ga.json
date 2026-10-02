@@ -440,5 +440,10 @@
   "less than a minute": "níos lú ná nóiméad",
   "about a minute": "thart ar nóiméad",
   "about {n} minutes": "thart ar {n} nóiméad",
-  "about {n} hours": "thart ar {n} uair an chloig"
+  "about {n} hours": "thart ar {n} uair an chloig",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "Tógann an chéad lódáil de shamhail níos faide, mar léann sí an tsamhail ar fad ón diosca.",
+  "The model does not fit in free memory.": "Ní luíonn an tsamhail sa chuimhne shaor.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Is féidir le Scoobert í a rith, ag léamh ón diosca de réir a chéile an chuid nach luíonn. Tagann na freagraí i bhfad níos moille.",
+  "Run it from disk and continue": "Rith ón diosca agus lean ar aghaidh",
+  "Not now": "Ní anois"
 }

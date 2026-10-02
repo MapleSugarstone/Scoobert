@@ -440,5 +440,10 @@
   "less than a minute": "wala pang isang minuto",
   "about a minute": "mga isang minuto",
   "about {n} minutes": "mga {n} minuto",
-  "about {n} hours": "mga {n} oras"
+  "about {n} hours": "mga {n} oras",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "Mas matagal ang unang pag-load ng modelo, dahil binabasa nito ang buong modelo mula sa disk.",
+  "The model does not fit in free memory.": "Hindi kasya ang modelo sa bakanteng memory.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Kayang patakbuhin ito ng Scoobert habang binabasa mula sa disk ang bahaging hindi kasya. Mas mabagal nang husto ang mga sagot.",
+  "Run it from disk and continue": "Patakbuhin mula sa disk at magpatuloy",
+  "Not now": "Hindi ngayon"
 }

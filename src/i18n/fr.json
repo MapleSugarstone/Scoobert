@@ -440,5 +440,10 @@
   "A conversation that already started switches to the new prompt at its next message, and the model reads the whole conversation again then, which takes a while on a long one.": "Une conversation déjà commencée passe aux nouvelles instructions à son prochain message, et le modèle relit alors toute la conversation, ce qui prend un moment si elle est longue.",
   "Save": "Enregistrer",
   "Reset to Scoobert's prompt": "Revenir aux instructions de Scoobert",
-  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "Les couches du milieu réagissent le mieux, donc les menus commencent sur la moitié centrale du modèle. Une plage plus étroite pousse plus fort sur chaque couche et peut donc demander une intensité plus faible."
+  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "Les couches du milieu réagissent le mieux, donc les menus commencent sur la moitié centrale du modèle. Une plage plus étroite pousse plus fort sur chaque couche et peut donc demander une intensité plus faible.",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "Le premier chargement d'un modèle prend plus de temps, car il lit tout le modèle depuis le disque.",
+  "The model does not fit in free memory.": "Le modèle ne tient pas dans la mémoire libre.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert peut l'exécuter en lisant au fur et à mesure depuis le disque la partie qui ne tient pas. Les réponses arrivent beaucoup plus lentement.",
+  "Run it from disk and continue": "L'exécuter depuis le disque et continuer",
+  "Not now": "Pas maintenant"
 }

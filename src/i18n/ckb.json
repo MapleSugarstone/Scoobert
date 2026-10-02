@@ -440,5 +440,10 @@
   "less than a minute": "کەمتر لە خولەکێک",
   "about a minute": "نزیکەی خولەکێک",
   "about {n} minutes": "نزیکەی {n} خولەک",
-  "about {n} hours": "نزیکەی {n} کاتژمێر"
+  "about {n} hours": "نزیکەی {n} کاتژمێر",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "یەکەم بارکردنی مۆدێل زیاتر دەخایەنێت، چونکە هەموو مۆدێلەکە لە دیسکەوە دەخوێنێتەوە.",
+  "The model does not fit in free memory.": "مۆدێلەکە لە بیرگەی بەتاڵدا جێی نابێتەوە.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert دەتوانێت کاری پێ بکات و ئەو بەشەی جێی نابێتەوە لە کاتی کارکردندا لە دیسکەوە بخوێنێتەوە. وەڵامەکان زۆر هێواشتر دێن.",
+  "Run it from disk and continue": "لە دیسکەوە کاری پێ بکە و بەردەوام بە",
+  "Not now": "ئێستا نا"
 }

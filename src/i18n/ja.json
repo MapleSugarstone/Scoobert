@@ -440,5 +440,10 @@
   "A conversation that already started switches to the new prompt at its next message, and the model reads the whole conversation again then, which takes a while on a long one.": "すでに始まっている会話は次のメッセージから新しいプロンプトに切り替わり、そのときモデルは会話全体を読み直すため、長い会話では時間がかかります。",
   "Save": "保存",
   "Reset to Scoobert's prompt": "Scoobertのプロンプトに戻す",
-  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "中間のレイヤーが最もよく反応するため、メニューは最初にモデルの中央半分を選んでいます。範囲を狭くすると各レイヤーへの働きかけが強くなるため、強度を下げる必要があるかもしれません。"
+  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "中間のレイヤーが最もよく反応するため、メニューは最初にモデルの中央半分を選んでいます。範囲を狭くすると各レイヤーへの働きかけが強くなるため、強度を下げる必要があるかもしれません。",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "モデルの初回の読み込みは、モデル全体をディスクから読むため時間がかかります。",
+  "The model does not fit in free memory.": "モデルが空きメモリに収まりません。",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobertは、収まらない部分を必要に応じてディスクから読みながら実行できます。返答はかなり遅くなります。",
+  "Run it from disk and continue": "ディスクから実行して続ける",
+  "Not now": "今はしない"
 }

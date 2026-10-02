@@ -440,5 +440,10 @@
   "A conversation that already started switches to the new prompt at its next message, and the model reads the whole conversation again then, which takes a while on a long one.": "이미 시작된 대화는 다음 메시지부터 새 프롬프트를 사용하며, 그때 모델이 대화 전체를 다시 읽으므로 긴 대화에서는 시간이 걸립니다.",
   "Save": "저장",
   "Reset to Scoobert's prompt": "Scoobert 프롬프트로 되돌리기",
-  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "가운데 레이어가 가장 잘 반응하므로 메뉴는 처음에 모델의 가운데 절반을 고릅니다. 범위를 좁히면 각 레이어에 더 세게 작용하므로 강도를 낮춰야 할 수 있습니다."
+  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "가운데 레이어가 가장 잘 반응하므로 메뉴는 처음에 모델의 가운데 절반을 고릅니다. 범위를 좁히면 각 레이어에 더 세게 작용하므로 강도를 낮춰야 할 수 있습니다.",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "모델을 처음 불러올 때는 모델 전체를 디스크에서 읽기 때문에 시간이 더 걸립니다.",
+  "The model does not fit in free memory.": "모델이 사용 가능한 메모리에 들어가지 않습니다.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert는 들어가지 않는 부분을 필요할 때마다 디스크에서 읽으며 실행할 수 있습니다. 답변이 훨씬 느려집니다.",
+  "Run it from disk and continue": "디스크에서 실행하고 계속",
+  "Not now": "나중에"
 }

@@ -154,6 +154,8 @@ pub enum Message {
     Maximized(bool),
     /// The system's id for the window, which is its handle on Windows.
     RawWindow(u64),
+    /// The window moved or came to the front.
+    WindowMoved,
     ResizeFrom(window::Direction),
     CloseHover(bool),
     Tick,
@@ -214,6 +216,8 @@ pub enum Message {
     UpdateNotes,
     /// The answer to the offer to turn on web search before sending: true turns it on.
     WebOffer(bool),
+    /// Turns on loading models from disk and continues, or dismisses the offer.
+    DiskOffer(bool),
 
     Notes(notes::Msg),
     Settings(settings::Msg),
@@ -268,6 +272,8 @@ pub struct App {
     update_progress: Option<(u64, u64)>,
     /// A message that looks like it needs the web is waiting while the user decides about web search.
     web_offer: bool,
+    /// The conversation whose model did not fit in memory, which shows the offer to load it from disk.
+    disk_offer: Option<String>,
     language_menu: bool,
     approvals_menu: bool,
     /// The sidebar open over the chat, in a window too narrow to show it beside the chat.
@@ -346,6 +352,7 @@ impl App {
             update_notice: None,
             update_progress: None,
             web_offer: false,
+            disk_offer: None,
             language_menu: false,
             approvals_menu: false,
             sidebar_drawer: false,
@@ -387,6 +394,7 @@ impl App {
             window::resize_events().map(|(_, size)| Message::Resized(size)),
             window::events().filter_map(|(_, event)| match event {
                 window::Event::FileDropped(path) => Some(Message::FileDropped(path)),
+                window::Event::Moved(_) | window::Event::Focused => Some(Message::WindowMoved),
                 _ => None,
             }),
             keyboard::listen().filter_map(|event| match event {
@@ -482,8 +490,30 @@ impl App {
     }
 
     fn refresh_models(&mut self) {
-        if let Some(host) = &self.host {
-            self.models = host.models();
+        let Some(host) = self.host.clone() else { return };
+        self.models = host.models();
+        // A fresh install names a model it may not have downloaded, so the largest downloaded model that fits the
+        // computer's memory becomes the default, or the smallest when none fits.
+        if self.models.iter().any(|m| m.usable && m.name == self.state.settings.model) {
+            return;
+        }
+        let total = crate::sys::total_memory();
+        let local = || self.models.iter().filter(|m| m.usable && m.provider.is_empty());
+        let pick = local()
+            .filter(|m| m.memory_needed <= total)
+            .max_by_key(|m| m.memory_needed)
+            .or_else(|| local().min_by_key(|m| m.memory_needed))
+            .or_else(|| self.models.iter().find(|m| m.usable));
+        let Some(name) = pick.map(|m| m.name.clone()) else { return };
+        self.state.settings.model = name.clone();
+        self.save();
+        // A conversation with no messages yet takes the new default too.
+        if let Some(chat) = self.chat.as_mut()
+            && chat.is_empty()
+            && !self.models.iter().any(|m| m.usable && m.name == chat.model)
+            && host.set_model(&chat.id, &name).is_ok()
+        {
+            chat.model = name;
         }
     }
 
@@ -589,6 +619,11 @@ impl App {
             Message::RawWindow(raw) => {
                 self.raw_window = Some(raw);
                 crate::sys::round_corners(raw, self.maximized);
+            }
+            Message::WindowMoved => {
+                if let Some(raw) = self.raw_window {
+                    crate::sys::follow_window(raw);
+                }
             }
             Message::Scale(s) => self.scale = s,
             Message::Resized(size) => {
@@ -862,6 +897,15 @@ impl App {
                     self.save();
                 }
                 return self.send(false);
+            }
+            Message::DiskOffer(enable) => {
+                self.disk_offer = None;
+                if enable {
+                    self.state.settings.models_from_disk = true;
+                    self.save();
+                    // The message that failed is still unanswered, so Continue answers it rather than adding another.
+                    return self.update(Message::Continue);
+                }
             }
             Message::Stop => {
                 if let (Some(host), Some(chat)) = (&self.host, &mut self.chat) {
@@ -1176,6 +1220,7 @@ impl App {
         if text.is_empty() && self.images.is_empty() {
             return Task::none();
         }
+        self.disk_offer = None;
         // While a task runs, the message waits for its current step, like a note passed in rather than a Stop.
         if let (Some(host), Some(chat)) = (self.host.clone(), self.chat.as_mut())
             && chat.running
@@ -1272,6 +1317,10 @@ impl App {
             Event::NotesSaved { notes, .. } => {
                 self.toast(trf("Saved to notes: {notes}", &[("notes", &notes.join(", "))]));
                 return self.notes.reload();
+            }
+            Event::DiskOffer { conv } => {
+                self.disk_offer = Some(conv.clone());
+                return Task::none();
             }
             _ => {}
         }
@@ -1970,6 +2019,28 @@ impl App {
                         row![
                             button(text(tr("Turn on web search and send")).size(13)).padding([5, 12]).style(theme::primary).on_press(Message::WebOffer(true)),
                             button(text(tr("Send without it")).size(13)).padding([5, 12]).style(theme::secondary).on_press(Message::WebOffer(false)),
+                        ]
+                        .spacing(8),
+                    ]
+                    .spacing(6),
+                )
+                .padding(10)
+                .width(Fill)
+                .style(theme::banner),
+            );
+        }
+        if !running
+            && let Some(chat) = &self.chat
+            && self.disk_offer.as_deref() == Some(chat.id.as_str())
+        {
+            col = col.push(
+                container(
+                    column![
+                        text(tr("The model does not fit in free memory.")).size(13).font(fonts::ui_semibold()),
+                        text(tr("Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.")).size(12).style(theme::muted),
+                        row![
+                            button(text(tr("Run it from disk and continue")).size(13)).padding([5, 12]).style(theme::primary).on_press(Message::DiskOffer(true)),
+                            button(text(tr("Not now")).size(13)).padding([5, 12]).style(theme::secondary).on_press(Message::DiskOffer(false)),
                         ]
                         .spacing(8),
                     ]

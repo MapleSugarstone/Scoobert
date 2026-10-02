@@ -440,5 +440,10 @@
   "less than a minute": "أقل من دقيقة",
   "about a minute": "نحو دقيقة",
   "about {n} minutes": "نحو {n} دقيقة",
-  "about {n} hours": "نحو {n} ساعة"
+  "about {n} hours": "نحو {n} ساعة",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "يستغرق أول تحميل للنموذج وقتًا أطول، لأنه يقرأ النموذج كله من القرص.",
+  "The model does not fit in free memory.": "لا يتسع النموذج في الذاكرة المتاحة.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "يمكن لـ Scoobert تشغيله بقراءة الجزء الذي لا يتسع من القرص أثناء العمل. تصل الردود أبطأ بكثير.",
+  "Run it from disk and continue": "التشغيل من القرص والمتابعة",
+  "Not now": "ليس الآن"
 }

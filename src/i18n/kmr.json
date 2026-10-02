@@ -440,5 +440,10 @@
   "less than a minute": "kêmtir ji deqeyekê",
   "about a minute": "nêzîkî deqeyekê",
   "about {n} minutes": "nêzîkî {n} deqeyan",
-  "about {n} hours": "nêzîkî {n} saetan"
+  "about {n} hours": "nêzîkî {n} saetan",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "Barkirina yekem a modelekê dirêjtir dikişîne, ji ber ku tevahiya modelê ji dîskê dixwîne.",
+  "The model does not fit in free memory.": "Model di bîra vala de cih nagire.",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert dikare wê bixebitîne û beşa ku cih nagire di dema xebatê de ji dîskê bixwîne. Bersiv pir hêdîtir tên.",
+  "Run it from disk and continue": "Ji dîskê bixebitîne û bidomîne",
+  "Not now": "Ne niha"
 }

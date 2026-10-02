@@ -21,13 +21,21 @@ pub fn kill_if_named(pid: u32, name: &str) -> bool {
 }
 
 /// Rounds the corners of the window with this raw id, or squares them while it is maximized. Windows 11 rounds
-/// them itself when asked. Windows 10 cannot, so the window is clipped to a rounded rectangle, which also hides
-/// its shadow. Other systems leave the window as it is.
+/// them itself when asked. Windows 10 cannot, so the window is clipped to a rounded rectangle, which loses its
+/// shadow, and a separate window behind it draws a rounded shadow instead. Other systems leave the window as it is.
 pub fn round_corners(window: u64, maximized: bool) {
     #[cfg(windows)]
     imp::round_corners(window, maximized);
     #[cfg(not(windows))]
     let _ = (window, maximized);
+}
+
+/// Keeps the Windows 10 shadow behind the window after it moves or comes to the front.
+pub fn follow_window(window: u64) {
+    #[cfg(windows)]
+    imp::shadow::follow(window);
+    #[cfg(not(windows))]
+    let _ = window;
 }
 
 /// The primary screen without the taskbar, as x, y, width, and height in logical pixels.
@@ -106,6 +114,7 @@ mod imp {
             }
             if maximized {
                 SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+                shadow::place(window, false);
                 return;
             }
             let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -113,10 +122,193 @@ mod imp {
                 return;
             }
             // The 8-pixel radius Windows 11 uses, as a diameter at the window's scale.
-            let diameter = (16 * GetDpiForWindow(hwnd).max(96) / 96) as i32;
+            let diameter = (2 * shadow::RADIUS * GetDpiForWindow(hwnd).max(96) / 96) as i32;
             let region = CreateRoundRectRgn(0, 0, r.right - r.left + 1, r.bottom - r.top + 1, diameter, diameter);
             // The system owns the region once it is set.
             SetWindowRgn(hwnd, region, 1);
+            shadow::place(window, true);
+        }
+    }
+
+    /// A click-through window that sits right behind Scoobert's on Windows 10 and draws a soft shadow with the same
+    /// rounded corners, since clipping the window to its rounded shape removes the shadow Windows draws.
+    pub mod shadow {
+        use std::sync::Mutex;
+
+        use windows_sys::Win32::Foundation::{HWND, POINT, RECT, SIZE};
+        use windows_sys::Win32::Graphics::Gdi::{
+            AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
+            DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
+        };
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, GetWindowRect, IsIconic, IsWindowVisible, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_NOSIZE,
+            SWP_SHOWWINDOW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+        };
+
+        /// The corner radius, in pixels at 100% scale.
+        pub const RADIUS: u32 = 8;
+        /// How far the shadow reaches past the window, and how far it drops below it, at 100% scale.
+        const REACH: i32 = 16;
+        const DROP: i32 = 2;
+        /// The shadow's darkness right at the window's edge, out of 255.
+        const DARKEST: f32 = 70.0;
+
+        struct Shadow {
+            /// The shadow window, kept as a number so the state can live in a static.
+            hwnd: usize,
+            size: (i32, i32),
+            maximized: bool,
+        }
+
+        static SHADOW: Mutex<Option<Shadow>> = Mutex::new(None);
+
+        /// Shows the shadow behind the window, or hides it while the window is maximized.
+        pub fn place(window: u64, show: bool) {
+            let mut state = SHADOW.lock().unwrap();
+            if state.is_none() {
+                if !show {
+                    return;
+                }
+                let Some(hwnd) = create() else { return };
+                *state = Some(Shadow { hwnd, size: (0, 0), maximized: false });
+            }
+            let Some(s) = state.as_mut() else { return };
+            s.maximized = !show;
+            update(s, window);
+        }
+
+        /// Moves the shadow with the window. Does nothing until the window has one.
+        pub fn follow(window: u64) {
+            if let Some(s) = SHADOW.lock().unwrap().as_mut() {
+                update(s, window);
+            }
+        }
+
+        fn update(s: &mut Shadow, window: u64) {
+            let main = window as usize as HWND;
+            let shadow = s.hwnd as HWND;
+            unsafe {
+                if s.maximized || IsIconic(main) != 0 || IsWindowVisible(main) == 0 {
+                    ShowWindow(shadow, SW_HIDE);
+                    return;
+                }
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                if GetWindowRect(main, &mut r) == 0 {
+                    return;
+                }
+                let scale = GetDpiForWindow(main).max(96) as f32 / 96.0;
+                let reach = (REACH as f32 * scale).round() as i32;
+                let (w, h) = (r.right - r.left, r.bottom - r.top);
+                let at = POINT { x: r.left - reach, y: r.top - reach };
+                if s.size != (w, h) && draw(shadow, at, w, h, reach, scale) {
+                    s.size = (w, h);
+                }
+                // Right below the window in the stacking order, so nothing else comes between them.
+                SetWindowPos(shadow, main, at.x, at.y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            }
+        }
+
+        fn create() -> Option<usize> {
+            let class: Vec<u16> = "ScoobertShadow\0".encode_utf16().collect();
+            unsafe {
+                let instance = GetModuleHandleW(std::ptr::null());
+                let wc = WNDCLASSEXW {
+                    cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                    style: 0,
+                    lpfnWndProc: Some(DefWindowProcW),
+                    cbClsExtra: 0,
+                    cbWndExtra: 0,
+                    hInstance: instance,
+                    hIcon: std::ptr::null_mut(),
+                    hCursor: std::ptr::null_mut(),
+                    hbrBackground: std::ptr::null_mut(),
+                    lpszMenuName: std::ptr::null(),
+                    lpszClassName: class.as_ptr(),
+                    hIconSm: std::ptr::null_mut(),
+                };
+                RegisterClassExW(&wc);
+                // Layered for its alpha, transparent to clicks, never activated, and kept off the taskbar.
+                let hwnd = CreateWindowExW(
+                    WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                    class.as_ptr(),
+                    std::ptr::null(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    instance,
+                    std::ptr::null(),
+                );
+                (!hwnd.is_null()).then_some(hwnd as usize)
+            }
+        }
+
+        /// Draws the shadow for a window of `w` by `h` into the layered window at `at`.
+        fn draw(shadow: HWND, at: POINT, w: i32, h: i32, reach: i32, scale: f32) -> bool {
+            let (bw, bh) = (w + 2 * reach, h + 2 * reach);
+            let pixels = pixels(w, h, reach, RADIUS as f32 * scale, DROP as f32 * scale);
+            unsafe {
+                let screen = GetDC(std::ptr::null_mut());
+                let dc = CreateCompatibleDC(screen);
+                let mut info: BITMAPINFO = std::mem::zeroed();
+                info.bmiHeader = BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: bw,
+                    // A negative height stores the rows from the top.
+                    biHeight: -bh,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB as u32,
+                    biSizeImage: 0,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 0,
+                    biClrImportant: 0,
+                };
+                let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+                let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+                let mut ok = false;
+                if !bitmap.is_null() && !bits.is_null() {
+                    std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits.cast::<u32>(), pixels.len());
+                    let old = SelectObject(dc, bitmap);
+                    let size = SIZE { cx: bw, cy: bh };
+                    let origin = POINT { x: 0, y: 0 };
+                    let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
+                    ok = UpdateLayeredWindow(shadow, screen, &at, &size, dc, &origin, 0, &blend, ULW_ALPHA) != 0;
+                    SelectObject(dc, old);
+                    DeleteObject(bitmap);
+                }
+                DeleteDC(dc);
+                ReleaseDC(std::ptr::null_mut(), screen);
+                ok
+            }
+        }
+
+        /// Premultiplied black with an alpha that fades from the window's rounded edge out to `reach`.
+        pub(super) fn pixels(w: i32, h: i32, reach: i32, radius: f32, drop: f32) -> Vec<u32> {
+            let (bw, bh) = (w + 2 * reach, h + 2 * reach);
+            let (half_w, half_h) = (w as f32 / 2.0, h as f32 / 2.0);
+            let mut out = Vec::with_capacity((bw * bh) as usize);
+            for py in 0..bh {
+                let y = py as f32 + 0.5 - reach as f32 - drop - half_h;
+                for px in 0..bw {
+                    let x = px as f32 + 0.5 - reach as f32 - half_w;
+                    // Signed distance to the rounded rectangle: negative inside, positive outside.
+                    let qx = x.abs() - (half_w - radius);
+                    let qy = y.abs() - (half_h - radius);
+                    let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+                    let d = outside + qx.max(qy).min(0.0) - radius;
+                    let t = 1.0 - (d / reach as f32).clamp(0.0, 1.0);
+                    out.push(((DARKEST * t * t) as u32) << 24);
+                }
+            }
+            out
         }
     }
 
@@ -163,16 +355,16 @@ mod imp {
         None
     }
 
-    /// Total from `sysctl hw.memsize`, and available as the free, inactive, speculative, and purgeable pages that
-    /// `vm_stat` reports, which macOS hands to a new process before it compresses or swaps anything.
+    /// Total from `sysctl hw.memsize`, and available as Activity Monitor counts it: everything except wired memory,
+    /// the compressor, and app memory. The file cache counts as available, since macOS drops it for a new process.
     pub fn memory() -> (u64, u64) {
         let run = |cmd: &str, args: &[&str]| Command::new(cmd).args(args).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
         let total = run("/usr/sbin/sysctl", &["-n", "hw.memsize"]).and_then(|t| t.trim().parse::<u64>().ok()).unwrap_or(0);
         let Some(stats) = run("/usr/bin/vm_stat", &[]) else { return (total, 0) };
-        (total, available_from_vm_stat(&stats))
+        (total, available_from_vm_stat(&stats, total))
     }
 
-    pub fn available_from_vm_stat(stats: &str) -> u64 {
+    pub fn available_from_vm_stat(stats: &str, total: u64) -> u64 {
         let page = stats
             .lines()
             .next()
@@ -188,7 +380,10 @@ mod imp {
                 .and_then(|v| v.trim().trim_end_matches('.').parse::<u64>().ok())
                 .unwrap_or(0)
         };
-        (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page
+        let used = pages("Pages wired down") + pages("Pages occupied by compressor") + pages("Anonymous pages").saturating_sub(pages("Pages purgeable"));
+        let unused = (pages("Pages free") + pages("Pages inactive") + pages("Pages speculative") + pages("Pages purgeable")) * page;
+        // Older vm_stat output has no anonymous pages, and then only the unused pages are certain.
+        if pages("Anonymous pages") == 0 { unused } else { total.saturating_sub(used * page).max(unused) }
     }
 
     /// Read from the POSIX df output, whose fourth column is the space available in kilobytes.
@@ -212,9 +407,12 @@ mod imp {
     mod tests {
         #[test]
         fn reads_available_pages_from_vm_stat() {
-            let stats = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               1000.\nPages active:                             5000.\nPages inactive:                           2000.\nPages speculative:                         300.\nPages purgeable:                           100.\n";
-            assert_eq!(super::available_from_vm_stat(stats), 3400 * 16384);
-            assert!(super::memory().0 > 0);
+            let page = 16384u64;
+            let stats = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                               1000.\nPages active:                             5000.\nPages inactive:                           2000.\nPages speculative:                         300.\nPages wired down:                         4000.\nPages purgeable:                           100.\nFile-backed pages:                        3000.\nAnonymous pages:                          4100.\nPages occupied by compressor:              500.\n";
+            // 12,800 pages in all, minus 4,000 wired, 500 compressed, and 4,000 app pages (anonymous less purgeable).
+            assert_eq!(super::available_from_vm_stat(stats, 12_800 * page), 4300 * page);
+            let (total, available) = super::memory();
+            assert!(total > 0 && available > 0 && available <= total);
         }
     }
 }

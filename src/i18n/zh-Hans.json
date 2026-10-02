@@ -440,5 +440,10 @@
   "A conversation that already started switches to the new prompt at its next message, and the model reads the whole conversation again then, which takes a while on a long one.": "已开始的对话会在下一条消息时改用新的提示词，届时模型会重新读取整段对话，较长的对话需要一些时间。",
   "Save": "保存",
   "Reset to Scoobert's prompt": "恢复为 Scoobert 的提示词",
-  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "中间的层响应最好，因此菜单默认选择模型中间的一半。范围越窄，对每一层的作用越强，因此可能需要降低强度。"
+  "The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.": "中间的层响应最好，因此菜单默认选择模型中间的一半。范围越窄，对每一层的作用越强，因此可能需要降低强度。",
+  "The first load of a model takes longer, because it reads the whole model from disk.": "首次加载模型需要更长时间，因为要从磁盘读取整个模型。",
+  "The model does not fit in free memory.": "该模型无法放入可用内存。",
+  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert 可以在运行时从磁盘读取放不下的部分来运行它。回复会慢很多。",
+  "Run it from disk and continue": "从磁盘运行并继续",
+  "Not now": "暂不"
 }

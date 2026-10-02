@@ -1,6 +1,6 @@
 # Scoobert
 
-Scoobert is an AI coding assistant for Windows and Linux that runs Qwen models on your own computer through [llama.cpp](https://github.com/ggml-org/llama.cpp). Your code and conversations stay on your machine. Each project gets its own conversation history and a folder of linked Markdown notes that Scoobert uses as its memory. If your computer is too slow for a local model, you can use a hosted model with your own API key instead.
+Scoobert is an AI coding assistant for Windows, macOS, and Linux that runs Qwen models on your own computer through [llama.cpp](https://github.com/ggml-org/llama.cpp). Your code and conversations stay on your machine. Each project gets its own conversation history and a folder of linked Markdown notes that Scoobert uses as its memory. If your computer is too slow for a local model, you can use a hosted model with your own API key instead.
 
 Scoobert is a single native program written in Rust. It needs no browser engine or runtime, which leaves more of your memory for the model.
 
