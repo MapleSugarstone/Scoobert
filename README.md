@@ -27,11 +27,22 @@ To remove Scoobert, open **Settings** in Scoobert and select **Uninstall Scoober
 
 To remove Scoobert, delete the AppImage file. The `.tar.gz` holds the same program as a portable folder that keeps its data inside it, like the Windows zip.
 
+### macOS
+
+1. Download `Scoobert-<version>-macos-arm64.dmg` and open it.
+2. Drag **Scoobert** onto the **Applications** folder in the window that opens.
+3. Open Scoobert from Applications. macOS says it could not verify the app, because Scoobert is not notarized by Apple. Select **Done**.
+4. Open **System Settings**, then **Privacy & Security**, scroll down, and select **Open Anyway** next to the message about Scoobert. Confirm with your password. After this, Scoobert opens normally.
+
+If **Open Anyway** does not appear, run `xattr -dr com.apple.quarantine /Applications/Scoobert.app` in Terminal, then open Scoobert again.
+
+To remove Scoobert, drag it from Applications to the Trash. Your settings and conversations stay in `~/Library/Application Support/Scoobert`, its saved prompts in `~/Library/Caches/Scoobert`, and the models in `~/models`, until you delete those folders.
+
 On first launch, choose which models to download. Scoobert preselects the ones that fit your computer's memory.
 
 ### What your computer needs
 
-- Windows 10 or 11, or a 64-bit Linux desktop from 2022 or later.
+- Windows 10 or 11, a 64-bit Linux desktop from 2022 or later, or a Mac with Apple Silicon (M1 or later). On a Mac the models run on the graphics chip, which shares the Mac's memory.
 - 16 GB of RAM for the fast model, and 24 GB or more for the larger ones. Scoobert lists each model's memory needs before you download it.
 - Free disk space for the models: 6.6 GB for the fast model, and 14 to 83 GB for the larger ones.
 

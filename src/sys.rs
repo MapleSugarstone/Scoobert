@@ -20,6 +20,16 @@ pub fn kill_if_named(pid: u32, name: &str) -> bool {
     imp::kill_if_named(pid, name)
 }
 
+/// Rounds the corners of the window with this raw id, or squares them while it is maximized. Windows 11 rounds
+/// them itself when asked. Windows 10 cannot, so the window is clipped to a rounded rectangle, which also hides
+/// its shadow. Other systems leave the window as it is.
+pub fn round_corners(window: u64, maximized: bool) {
+    #[cfg(windows)]
+    imp::round_corners(window, maximized);
+    #[cfg(not(windows))]
+    let _ = (window, maximized);
+}
+
 /// The primary screen without the taskbar, as x, y, width, and height in logical pixels.
 pub fn work_area() -> Option<(f32, f32, f32, f32)> {
     imp::work_area()
@@ -79,6 +89,35 @@ mod imp {
         // Both calls answer in the same units whether or not the process is DPI aware yet.
         let scale = unsafe { GetDpiForSystem() } as f32 / 96.0;
         Some((r.left as f32 / scale, r.top as f32 / scale, (r.right - r.left) as f32 / scale, (r.bottom - r.top) as f32 / scale))
+    }
+
+    pub fn round_corners(window: u64, maximized: bool) {
+        use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute};
+        use windows_sys::Win32::Graphics::Gdi::{CreateRoundRectRgn, SetWindowRgn};
+        use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        // iced's raw window id on Windows is the window handle.
+        let hwnd = window as usize as windows_sys::Win32::Foundation::HWND;
+        unsafe {
+            let round = DWMWCP_ROUND;
+            let size = std::mem::size_of_val(&round) as u32;
+            if DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as _, (&round as *const i32).cast(), size) == 0 {
+                return;
+            }
+            if maximized {
+                SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
+                return;
+            }
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            if GetWindowRect(hwnd, &mut r) == 0 {
+                return;
+            }
+            // The 8-pixel radius Windows 11 uses, as a diameter at the window's scale.
+            let diameter = (16 * GetDpiForWindow(hwnd).max(96) / 96) as i32;
+            let region = CreateRoundRectRgn(0, 0, r.right - r.left + 1, r.bottom - r.top + 1, diameter, diameter);
+            // The system owns the region once it is set.
+            SetWindowRgn(hwnd, region, 1);
+        }
     }
 
     pub fn memory() -> (u64, u64) {

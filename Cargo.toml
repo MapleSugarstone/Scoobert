@@ -1,6 +1,6 @@
 [package]
 name = "scoobert"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "Desktop coding assistant that runs local Qwen models or hosted models, with project notes"
 authors = ["Maple Sugarstone"]
@@ -37,7 +37,7 @@ half = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_Foundation", "Win32_System_JobObjects", "Win32_Security", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

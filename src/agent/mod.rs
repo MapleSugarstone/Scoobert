@@ -742,6 +742,24 @@ impl Host {
         })
     }
 
+    /// Waits for `wait`, with the activity line saying what for: the model being loaded and the time so far, or
+    /// `text`. It updates once a second, since a first load from a slow disk can take minutes.
+    async fn wait_showing<T>(&self, id: &str, text: impl Fn() -> String, wait: impl std::future::Future<Output = T>, cancel: &CancellationToken) -> anyhow::Result<T> {
+        tokio::pin!(wait);
+        loop {
+            let line = match self.llama.loading_for() {
+                Some((model, took)) => trf("Loading {model}: {secs} s", &[("model", &model), ("secs", &took.as_secs())]),
+                None => text(),
+            };
+            self.emit(Event::Activity { conv: id.into(), text: Some(line) });
+            tokio::select! {
+                out = &mut wait => return Ok(out),
+                _ = cancel.cancelled() => return Err(crate::util::Cancelled.into()),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+            }
+        }
+    }
+
     /// Waits until no other conversation's task holds the local model, then holds it for this task and the steps
     /// after it.
     async fn take_turn(&self, live: &Live, id: &str, cancel: &CancellationToken) -> anyhow::Result<()> {
@@ -752,15 +770,11 @@ impl Host {
             Ok(guard) => guard,
             Err(_) => {
                 // The holder is another conversation's task, or this conversation's steps after its last task.
-                let text = match self.local_task_elsewhere(id) {
+                let text = || match self.local_task_elsewhere(id) {
                     Some(other) => trf("Waiting for “{title}” to finish", &[("title", &other.title)]),
                     None => tr("Getting ready...").into(),
                 };
-                self.emit(Event::Activity { conv: id.into(), text: Some(text) });
-                tokio::select! {
-                    guard = self.local_turn.clone().lock_owned() => guard,
-                    _ = cancel.cancelled() => return Err(crate::util::Cancelled.into()),
-                }
+                self.wait_showing(id, text, self.local_turn.clone().lock_owned(), cancel).await?
             }
         };
         *self.turn_holder.lock().unwrap() = Some(id.to_string());
@@ -877,13 +891,9 @@ impl Host {
         let _busy = matches!(target, Target::Local(_)).then(|| self.llama.busy());
         let mut continuing = false;
         if let Target::Local(model) = &target {
-            let wait = live.background.try_lock().is_err();
-            if wait {
-                self.emit(Event::Activity { conv: id.into(), text: Some(tr("Getting ready...").into()) });
-            }
-            let _guard = tokio::select! {
-                g = live.background.lock() => g,
-                _ = cancel.cancelled() => return Err(crate::util::Cancelled.into()),
+            let _guard = match live.background.try_lock() {
+                Ok(guard) => guard,
+                Err(_) => self.wait_showing(id, || tr("Getting ready...").into(), live.background.lock(), cancel).await?,
             };
             if self.llama.loaded_model().as_deref() != Some(&model.name) {
                 // Loading takes from seconds to minutes and reports no progress, so the time so far is shown.

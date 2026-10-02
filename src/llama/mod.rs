@@ -99,6 +99,8 @@ pub struct LlamaServer {
     gpu_refused: Mutex<std::collections::HashSet<String>>,
     /// A load holds `proc` until the model is ready, so `stop` cancels this first.
     loading: Mutex<CancellationToken>,
+    /// The model being loaded and when its load started, for the activity line of a task that waits on it.
+    loading_model: Mutex<Option<(String, Instant)>>,
     on_status: Box<dyn Fn(ServerStatus) + Send + Sync>,
 }
 
@@ -129,6 +131,7 @@ impl LlamaServer {
             busy: AtomicUsize::new(0),
             gpu_refused: Mutex::new(std::collections::HashSet::new()),
             loading: Mutex::new(CancellationToken::new()),
+            loading_model: Mutex::new(None),
             on_status: Box::new(on_status),
         });
         let _ = std::fs::create_dir_all(paths::get().slots());
@@ -374,7 +377,15 @@ impl LlamaServer {
             shared.slot_owner = None;
         }
         (self.on_status)(ServerStatus::Loading(model.name.clone()));
-        self.wait_ready(proc, model, cancel).await
+        *self.loading_model.lock().unwrap() = Some((model.name.clone(), Instant::now()));
+        let ready = self.wait_ready(proc, model, cancel).await;
+        *self.loading_model.lock().unwrap() = None;
+        ready
+    }
+
+    /// The model the server is loading now and how long it has taken so far, if it is loading one.
+    pub fn loading_for(&self) -> Option<(String, Duration)> {
+        self.loading_model.lock().unwrap().as_ref().map(|(name, since)| (name.clone(), since.elapsed()))
     }
 
     /// Waits for the server to finish loading model, and stops it when loading fails or is cancelled.

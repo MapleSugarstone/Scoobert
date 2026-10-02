@@ -152,6 +152,8 @@ pub enum Message {
     Minimize,
     ToggleMaximize,
     Maximized(bool),
+    /// The system's id for the window, which is its handle on Windows.
+    RawWindow(u64),
     ResizeFrom(window::Direction),
     CloseHover(bool),
     Tick,
@@ -242,6 +244,7 @@ pub struct App {
     window: Option<window::Id>,
     window_size: Option<Size>,
     maximized: bool,
+    raw_window: Option<u64>,
     /// When the top bar was last pressed, to tell a double click from two drags.
     title_pressed: Option<Instant>,
     close_hover: bool,
@@ -323,6 +326,7 @@ impl App {
             window: None,
             window_size: None,
             maximized: false,
+            raw_window: None,
             title_pressed: None,
             close_hover: false,
             server: ServerStatus::Stopped,
@@ -580,7 +584,11 @@ impl App {
             Message::Mode(mode) => self.system_dark = mode != iced::theme::Mode::Light,
             Message::WindowOpened(id) => {
                 self.window = Some(id);
-                return window::scale_factor(id).map(Message::Scale);
+                return Task::batch([window::scale_factor(id).map(Message::Scale), window::raw_id::<Message>(id).map(Message::RawWindow)]);
+            }
+            Message::RawWindow(raw) => {
+                self.raw_window = Some(raw);
+                crate::sys::round_corners(raw, self.maximized);
             }
             Message::Scale(s) => self.scale = s,
             Message::Resized(size) => {
@@ -589,7 +597,13 @@ impl App {
                     return window::is_maximized(id).map(Message::Maximized);
                 }
             }
-            Message::Maximized(on) => self.maximized = on,
+            // Every resize ends here, so a clipped window's rounded shape follows its new size.
+            Message::Maximized(on) => {
+                self.maximized = on;
+                if let Some(raw) = self.raw_window {
+                    crate::sys::round_corners(raw, on);
+                }
+            }
             Message::TitlePressed => {
                 let Some(id) = self.window else { return Task::none() };
                 let double = self.title_pressed.is_some_and(|t| t.elapsed() < Duration::from_millis(400));
