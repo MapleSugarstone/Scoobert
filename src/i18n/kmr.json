@@ -448,5 +448,17 @@
   "Not now": "Ne niha",
   "Could not find the folder Scoobert is in.": "Peldanka ku Scoobert tê de ye nehat dîtin.",
   "Could not put the new version in {folder}. Download it from the release page instead.": "Guhertoya nû nehat danîn nav {folder}. Li şûna wê ji rûpela weşanê daxe.",
-  "Could not open the update's disk image.": "Wêneya dîskê ya nûvekirinê nehat vekirin."
+  "Could not open the update's disk image.": "Wêneya dîskê ya nûvekirinê nehat vekirin.",
+  "Could not remove {path}": "{path} nehat rakirin",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "Piştgiriya NVIDIA guhertoya {min} an nûtir a ajokarê dixwaze, û li vî komputerî guhertoya {driver} heye. Pêşî ajokarê ji malpera NVIDIA nûve bike.",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Nehat diyarkirin ka kîjan weşana llama.cpp bi Scoobert re tê. Scoobert dîsa saz bike, paşê dîsa biceribîne.",
+  "llama.cpp {release} has no {file} to download.": "Di llama.cpp {release} de pela {file} ji bo daxistinê tune ye.",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "Ji bo daxistin û vekirina piştgiriya NVIDIA nêzîkî {need} cih li ser dîskê lazim e, û {free} vala ye.",
+  "The download holds no llama-server.": "Di pela daxistî de llama-server tune ye.",
+  "Could not unpack the download.": "Pela daxistî nehat vekirin.",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "Piştgiriya NVIDIA nikaribû {model} bar bike, ji ber vê yekê Scoobert heta ku ji nû ve dest pê bike piştgiriya bingehîn a kartê bi kar tîne.",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "Piştgiriya NVIDIA ya bi CUDA {version} hatiye sazkirin. Dema ku “Karta grafîkê bi kar bîne” çalak be, Scoobert wê bi kar tîne, ji cara din a ku modelek tê barkirin pê ve.",
+  "Remove NVIDIA support": "Piştgiriya NVIDIA rake",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "Piştgiriya NVIDIA modelan bi CUDA li ser karta te ({gpu}) dimeşîne, ku bi gelemperî promptan ji piştgiriya grafîkê ya ku bi Scoobert re tê pir zûtir dixwîne.",
+  "Download NVIDIA support ({size})": "Piştgiriya NVIDIA daxe ({size})"
 }

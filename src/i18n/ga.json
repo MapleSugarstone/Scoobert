@@ -448,5 +448,17 @@
   "Not now": "Ní anois",
   "Could not find the folder Scoobert is in.": "Níorbh fhéidir an fillteán ina bhfuil Scoobert a aimsiú.",
   "Could not put the new version in {folder}. Download it from the release page instead.": "Níorbh fhéidir an leagan nua a chur in {folder}. Íoslódáil ón leathanach eisiúna é ina ionad.",
-  "Could not open the update's disk image.": "Níorbh fhéidir íomhá diosca an nuashonraithe a oscailt."
+  "Could not open the update's disk image.": "Níorbh fhéidir íomhá diosca an nuashonraithe a oscailt.",
+  "Could not remove {path}": "Níorbh fhéidir {path} a bhaint",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "Teastaíonn leagan {min} den tiománaí nó leagan níos nuaí ó thacaíocht NVIDIA, agus tá leagan {driver} ar an ríomhaire seo. Nuashonraigh an tiománaí ó shuíomh gréasáin NVIDIA ar dtús.",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Níorbh fhéidir a dhéanamh amach cén eisiúint de llama.cpp atá i Scoobert. Athshuiteáil Scoobert, ansin bain triail eile as.",
+  "llama.cpp {release} has no {file} to download.": "Níl comhad {file} le híoslódáil ag llama.cpp {release}.",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "Teastaíonn thart ar {need} de spás diosca chun tacaíocht NVIDIA a íoslódáil agus a dhíphacáil, agus tá {free} saor.",
+  "The download holds no llama-server.": "Níl llama-server san íoslódáil.",
+  "Could not unpack the download.": "Níorbh fhéidir an íoslódáil a dhíphacáil.",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "Níorbh fhéidir le tacaíocht NVIDIA {model} a luchtú, mar sin úsáideann Scoobert tacaíocht réamhshocraithe an chárta go dtí go n-atosóidh sé.",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "Tá tacaíocht NVIDIA le CUDA {version} suiteáilte. Úsáideann Scoobert í fad is atá “Úsáid an cárta grafaicí” ar siúl, ón chéad uair eile a luchtaítear samhail.",
+  "Remove NVIDIA support": "Bain tacaíocht NVIDIA",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "Ritheann tacaíocht NVIDIA samhlacha trí CUDA ar do {gpu}, rud a léann leideanna i bhfad níos tapa de ghnáth ná an tacaíocht ghrafaicí a thagann le Scoobert.",
+  "Download NVIDIA support ({size})": "Íoslódáil tacaíocht NVIDIA ({size})"
 }

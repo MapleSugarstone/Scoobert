@@ -448,5 +448,17 @@
  "Not now": "Не сейчас",
  "Could not find the folder Scoobert is in.": "Не удалось найти папку, в которой находится Scoobert.",
  "Could not put the new version in {folder}. Download it from the release page instead.": "Не удалось поместить новую версию в {folder}. Скачайте её со страницы выпуска.",
- "Could not open the update's disk image.": "Не удалось открыть образ диска обновления."
+ "Could not open the update's disk image.": "Не удалось открыть образ диска обновления.",
+ "Could not remove {path}": "Не удалось удалить {path}",
+ "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "Для поддержки NVIDIA нужен драйвер версии {min} или новее, а на этом компьютере установлена версия {driver}. Сначала обновите драйвер на сайте NVIDIA.",
+ "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Не удалось определить, какой релиз llama.cpp входит в состав Scoobert. Переустановите Scoobert и повторите попытку.",
+ "llama.cpp {release} has no {file} to download.": "В llama.cpp {release} нет файла {file} для скачивания.",
+ "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "Для скачивания и распаковки поддержки NVIDIA нужно около {need} места на диске, а свободно {free}.",
+ "The download holds no llama-server.": "В скачанном файле нет llama-server.",
+ "Could not unpack the download.": "Не удалось распаковать скачанный файл.",
+ "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "Поддержка NVIDIA не смогла загрузить {model}, поэтому Scoobert использует стандартную поддержку видеокарты до перезапуска.",
+ "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "Поддержка NVIDIA с CUDA {version} установлена. Scoobert использует её, пока включено «Использовать видеокарту», начиная со следующей загрузки модели.",
+ "Remove NVIDIA support": "Удалить поддержку NVIDIA",
+ "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "Поддержка NVIDIA запускает модели через CUDA на вашей видеокарте {gpu} и обычно читает промпты намного быстрее, чем графическая поддержка, входящая в состав Scoobert.",
+ "Download NVIDIA support ({size})": "Скачать поддержку NVIDIA ({size})"
 }

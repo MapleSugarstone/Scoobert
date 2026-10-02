@@ -448,5 +448,17 @@
  "Not now": "Agora não",
  "Could not find the folder Scoobert is in.": "Não foi possível encontrar a pasta em que o Scoobert está.",
  "Could not put the new version in {folder}. Download it from the release page instead.": "Não foi possível colocar a nova versão em {folder}. Baixe-a pela página da versão.",
- "Could not open the update's disk image.": "Não foi possível abrir a imagem de disco da atualização."
+ "Could not open the update's disk image.": "Não foi possível abrir a imagem de disco da atualização.",
+ "Could not remove {path}": "Não foi possível remover {path}",
+ "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "O suporte à NVIDIA precisa da versão {min} do driver ou posterior, e este computador tem a versão {driver}. Primeiro atualize o driver pelo site da NVIDIA.",
+ "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Não foi possível identificar qual versão do llama.cpp o Scoobert inclui. Reinstale o Scoobert e tente de novo.",
+ "llama.cpp {release} has no {file} to download.": "O llama.cpp {release} não tem o arquivo {file} para baixar.",
+ "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "O suporte à NVIDIA precisa de cerca de {need} de espaço em disco para baixar e descompactar, e há {free} livres.",
+ "The download holds no llama-server.": "O download não contém o llama-server.",
+ "Could not unpack the download.": "Não foi possível descompactar o download.",
+ "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "O suporte à NVIDIA não conseguiu carregar {model}, então o Scoobert usa o suporte padrão da placa até reiniciar.",
+ "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "O suporte à NVIDIA com CUDA {version} está instalado. O Scoobert o usa enquanto “Usar a placa de vídeo” estiver ativado, a partir da próxima vez que um modelo for carregado.",
+ "Remove NVIDIA support": "Remover o suporte à NVIDIA",
+ "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "O suporte à NVIDIA executa modelos via CUDA na sua {gpu} e geralmente lê prompts muito mais rápido que o suporte gráfico que acompanha o Scoobert.",
+ "Download NVIDIA support ({size})": "Baixar o suporte à NVIDIA ({size})"
 }

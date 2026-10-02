@@ -1,6 +1,7 @@
 //! Runs one llama-server process for the selected GGUF model and manages its saved prompt caches.
 
 pub mod catalog;
+pub mod cuda;
 pub mod download;
 pub mod gguf;
 pub mod gguf_file;
@@ -9,7 +10,7 @@ pub mod lab;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -89,6 +90,8 @@ pub enum ServerStatus {
     Error(String),
     /// The graphics card could not load the named model, which then loads on the processor.
     GpuFailed(String),
+    /// NVIDIA support could not load the named model, which then loads through the card's default support.
+    CudaFailed(String),
 }
 
 struct Running {
@@ -119,6 +122,8 @@ pub struct LlamaServer {
     loading: Mutex<CancellationToken>,
     /// The model being loaded and when its load started, for the activity line of a task that waits on it.
     loading_model: Mutex<Option<(String, Instant)>>,
+    /// CUDA failed to load a model in this run, so the card's default support loads them from then on.
+    cuda_refused: AtomicBool,
     on_status: Box<dyn Fn(ServerStatus) + Send + Sync>,
 }
 
@@ -150,6 +155,7 @@ impl LlamaServer {
             gpu_refused: Mutex::new(std::collections::HashSet::new()),
             loading: Mutex::new(CancellationToken::new()),
             loading_model: Mutex::new(None),
+            cuda_refused: AtomicBool::new(false),
             on_status: Box::new(on_status),
         });
         let _ = std::fs::create_dir_all(paths::get().slots());
@@ -272,7 +278,19 @@ impl LlamaServer {
         self.stop_locked(&mut proc).await;
         let s = self.settings();
         let gpu = s.use_gpu && !s.gpu_failed.contains(&model.name) && !self.gpu_refused.lock().unwrap().contains(&model.name);
-        let mut result = self.start_locked(&mut proc, model, gpu, &cancel).await;
+        // NVIDIA support replaces the bundled server on the card, unless the user named a server of their own.
+        let cuda = if gpu && s.llama_server_path.trim().is_empty() && !self.cuda_refused.load(Ordering::SeqCst) { cuda::server() } else { None };
+        let mut result = self.start_locked(&mut proc, model, gpu, cuda.clone(), &cancel).await;
+        // CUDA that cannot load the model leaves it to the card's default support, for the rest of this run.
+        if cuda.is_some()
+            && let Err(err) = &result
+            && err.is::<ExitedWhileLoading>()
+        {
+            eprintln!("[llama] CUDA could not load {}: {err:#}", model.name);
+            self.cuda_refused.store(true, Ordering::SeqCst);
+            (self.on_status)(ServerStatus::CudaFailed(model.name.clone()));
+            result = self.start_locked(&mut proc, model, gpu, None, &cancel).await;
+        }
         // A graphics card that cannot load the model leaves it to the processor, and the app remembers the model. Only
         // a server that dies while loading counts, since a check that fails before the start is not the card's doing.
         if gpu
@@ -282,7 +300,7 @@ impl LlamaServer {
             eprintln!("[llama] the graphics card could not load {}: {err:#}", model.name);
             self.gpu_refused.lock().unwrap().insert(model.name.clone());
             (self.on_status)(ServerStatus::GpuFailed(model.name.clone()));
-            result = self.start_locked(&mut proc, model, false, &cancel).await;
+            result = self.start_locked(&mut proc, model, false, None, &cancel).await;
         }
         if let Err(err) = &result
             && !crate::util::is_cancelled(err)
@@ -292,8 +310,9 @@ impl LlamaServer {
         result
     }
 
-    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, gpu: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
-        let Some(exe) = self.executable() else {
+    /// Starts a server for `model`: `server` when given, such as the CUDA build, otherwise the configured or bundled one.
+    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, gpu: bool, server: Option<PathBuf>, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let Some(exe) = server.or_else(|| self.executable()) else {
             bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
         };
         kill_orphan();

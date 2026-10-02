@@ -448,5 +448,17 @@
   "Not now": "Ahora no",
   "Could not find the folder Scoobert is in.": "No se encontró la carpeta en la que está Scoobert.",
   "Could not put the new version in {folder}. Download it from the release page instead.": "No se pudo poner la nueva versión en {folder}. Descárgala desde la página de la versión.",
-  "Could not open the update's disk image.": "No se pudo abrir la imagen de disco de la actualización."
+  "Could not open the update's disk image.": "No se pudo abrir la imagen de disco de la actualización.",
+  "Could not remove {path}": "No se pudo quitar {path}",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "La compatibilidad con NVIDIA necesita la versión {min} del controlador o una posterior, y este equipo tiene la versión {driver}. Primero actualiza el controlador desde el sitio web de NVIDIA.",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "No se pudo determinar qué versión de llama.cpp incluye Scoobert. Reinstala Scoobert y vuelve a intentarlo.",
+  "llama.cpp {release} has no {file} to download.": "llama.cpp {release} no tiene el archivo {file} para descargar.",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "La compatibilidad con NVIDIA necesita unos {need} de espacio en disco para descargarla y descomprimirla, y hay {free} libres.",
+  "The download holds no llama-server.": "La descarga no contiene llama-server.",
+  "Could not unpack the download.": "No se pudo descomprimir la descarga.",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "La compatibilidad con NVIDIA no pudo cargar {model}, así que Scoobert usa la compatibilidad predeterminada de la tarjeta hasta que se reinicie.",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "La compatibilidad con NVIDIA está instalada, con CUDA {version}. Scoobert la usa mientras «Usar la tarjeta gráfica» esté activado, a partir de la próxima vez que se cargue un modelo.",
+  "Remove NVIDIA support": "Quitar la compatibilidad con NVIDIA",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "La compatibilidad con NVIDIA ejecuta los modelos mediante CUDA en tu {gpu} y suele leer los prompts mucho más rápido que la compatibilidad gráfica que incluye Scoobert.",
+  "Download NVIDIA support ({size})": "Descargar la compatibilidad con NVIDIA ({size})"
 }

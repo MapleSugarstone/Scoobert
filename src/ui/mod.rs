@@ -66,6 +66,8 @@ pub fn run() -> iced::Result {
     // The default font follows the language, so the language is set before the window is built.
     crate::i18n::set(state.settings.language().code);
     let saved = state.window.map(|(w, h)| Size::new(w, h)).unwrap_or(Size::new(1310.0, 730.0));
+    // Looking for an NVIDIA card runs a program, so it happens while the window opens.
+    std::thread::spawn(crate::llama::cuda::detect);
     let (size, position) = place_window(saved);
     iced::application(App::new, App::update, App::view)
         .window(window::Settings {
@@ -1280,6 +1282,10 @@ impl App {
                 self.toast(trf("The graphics card could not load {model}, so it runs on the processor.", &[("model", model)]));
                 return Task::none();
             }
+            Event::Server(ServerStatus::CudaFailed(model)) => {
+                self.toast(trf("NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.", &[("model", model)]));
+                return Task::none();
+            }
             Event::Server(status) => {
                 self.server = status.clone();
                 return Task::none();
@@ -1855,7 +1861,7 @@ impl App {
         }
         match &self.server {
             ServerStatus::Stopped => (|t| t.muted, tr("Model not loaded").into()),
-            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) => (|t| t.warn, trf("Loading {model}", &[("model", m)])),
+            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) | ServerStatus::CudaFailed(m) => (|t| t.warn, trf("Loading {model}", &[("model", m)])),
             ServerStatus::Ready(m) => (|t| t.ok, trf("{model} loaded", &[("model", m)])),
             ServerStatus::Error(_) => (|t| t.danger, tr("The model stopped").into()),
         }

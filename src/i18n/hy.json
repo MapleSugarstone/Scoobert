@@ -448,5 +448,17 @@
   "Not now": "Ոչ հիմա",
   "Could not find the folder Scoobert is in.": "Չհաջողվեց գտնել այն թղթապանակը, որում գտնվում է Scoobert-ը։",
   "Could not put the new version in {folder}. Download it from the release page instead.": "Չհաջողվեց նոր տարբերակը տեղադրել {folder} թղթապանակում։ Փոխարենը ներբեռնեք այն թողարկման էջից։",
-  "Could not open the update's disk image.": "Չհաջողվեց բացել թարմացման սկավառակի պատկերը։"
+  "Could not open the update's disk image.": "Չհաջողվեց բացել թարմացման սկավառակի պատկերը։",
+  "Could not remove {path}": "Չհաջողվեց հեռացնել {path}",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "NVIDIA-ի աջակցությանը անհրաժեշտ է դրայվերի {min} կամ ավելի նոր տարբերակ, իսկ այս համակարգչում տեղադրված է {driver} տարբերակը։ Նախ թարմացրեք դրայվերը NVIDIA-ի կայքից։",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Չհաջողվեց պարզել, թե llama.cpp-ի որ թողարկումն է ներառված Scoobert-ում։ Վերատեղակայեք Scoobert-ը, ապա նորից փորձեք։",
+  "llama.cpp {release} has no {file} to download.": "llama.cpp-ի {release} թողարկման մեջ ներբեռնելու {file} ֆայլ չկա։",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "NVIDIA-ի աջակցությունը ներբեռնելու և ապափաթեթավորելու համար պետք է մոտ {need} սկավառակի տարածք, իսկ ազատ է {free}։",
+  "The download holds no llama-server.": "Ներբեռնված ֆայլում llama-server չկա։",
+  "Could not unpack the download.": "Չհաջողվեց ապափաթեթավորել ներբեռնված ֆայլը։",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "NVIDIA-ի աջակցությունը չկարողացավ բեռնել {model} մոդելը, ուստի Scoobert-ը մինչև վերագործարկվելը օգտագործում է քարտի լռելյայն աջակցությունը։",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "NVIDIA-ի աջակցությունը CUDA {version} տարբերակով տեղադրված է։ Scoobert-ը օգտագործում է այն, քանի դեռ «Օգտագործել գրաֆիկական քարտը» միացված է, մոդելի հաջորդ բեռնումից սկսած։",
+  "Remove NVIDIA support": "Հեռացնել NVIDIA-ի աջակցությունը",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "NVIDIA-ի աջակցությունը մոդելներն աշխատեցնում է CUDA-ի միջոցով ձեր քարտի ({gpu}) վրա և սովորաբար հուշումները շատ ավելի արագ է կարդում, քան Scoobert-ի հետ եկած գրաֆիկական աջակցությունը։",
+  "Download NVIDIA support ({size})": "Ներբեռնել NVIDIA-ի աջակցությունը ({size})"
 }

@@ -17,6 +17,8 @@ use crate::agent::providers::{self, Provider};
 use crate::agent::{Host, ModelOption};
 use crate::i18n::{tr, trf};
 use crate::llama::catalog::{CATALOG, memory_needed};
+use crate::llama::cuda;
+use tokio_util::sync::CancellationToken;
 use crate::store::{Approvals, CustomProvider, HostedModel, State, ThemeChoice};
 use crate::util::gb;
 
@@ -103,6 +105,10 @@ pub struct Panel {
     lab: Option<super::lab::Lab>,
     /// The system prompt page for one model, which replaces the section while it is open.
     prompt: Option<PromptPage>,
+    /// Bytes of NVIDIA support downloaded so far and in all, while it downloads.
+    cuda_progress: Option<(u64, u64)>,
+    cuda_cancel: Option<CancellationToken>,
+    cuda_error: Option<String>,
 }
 
 struct PromptPage {
@@ -161,6 +167,12 @@ pub enum Msg {
     Lab(super::lab::Msg),
     LabDeleted,
     LabFailed(String),
+    CudaDownload,
+    CudaProgress(u64, u64),
+    /// NVIDIA support finished downloading or was removed, or the error that stopped it. An empty error is a stop.
+    CudaDone(Result<(), String>),
+    CudaCancel,
+    CudaRemove,
     /// Opens the system prompt page for a model, by name or reference, with the label to show.
     OpenPrompt(String, String),
     PromptEdit(text_editor::Action),
@@ -190,6 +202,9 @@ impl Panel {
             custom_spec: String::new(),
             lab: None,
             prompt: None,
+            cuda_progress: None,
+            cuda_cancel: None,
+            cuda_error: None,
         }
     }
 
@@ -273,6 +288,67 @@ impl Panel {
             Msg::ModelsFromDisk(on) => {
                 s.models_from_disk = on;
                 return (Task::none(), Effect::Saved);
+            }
+            Msg::CudaDownload => {
+                let Some(Some(gpu)) = cuda::detected() else { return (Task::none(), Effect::None) };
+                let stop = CancellationToken::new();
+                self.cuda_cancel = Some(stop.clone());
+                self.cuda_progress = Some((0, gpu.download_size()));
+                self.cuda_error = None;
+                let stream = iced::stream::channel(16, async move |mut out: iced::futures::channel::mpsc::Sender<Message>| {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+                    let job = tokio::spawn(async move { cuda::install(&gpu, &stop, |done, total| {
+                        let _ = tx.send((done, total));
+                    })
+                    .await });
+                    let mut job = std::pin::pin!(job);
+                    let mut shown = u64::MAX;
+                    let result = loop {
+                        tokio::select! {
+                            Some((done, total)) = rx.recv() => {
+                                let percent = done * 100 / total.max(1);
+                                if percent != shown {
+                                    shown = percent;
+                                    let _ = iced::futures::SinkExt::send(&mut out, Message::Settings(Msg::CudaProgress(done, total))).await;
+                                }
+                            }
+                            r = &mut job => break r,
+                        }
+                    };
+                    let result = match result {
+                        Ok(r) => r.map_err(|e| if crate::util::is_cancelled(&e) { String::new() } else { format!("{e:#}") }),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = iced::futures::SinkExt::send(&mut out, Message::Settings(Msg::CudaDone(result))).await;
+                });
+                return (Task::run(stream, std::convert::identity), Effect::None);
+            }
+            Msg::CudaProgress(done, total) => self.cuda_progress = Some((done, total)),
+            Msg::CudaDone(result) => {
+                self.cuda_progress = None;
+                self.cuda_cancel = None;
+                self.cuda_error = result.err().filter(|e| !e.is_empty());
+            }
+            Msg::CudaCancel => {
+                if let Some(stop) = &self.cuda_cancel {
+                    stop.cancel();
+                }
+            }
+            Msg::CudaRemove => {
+                let llama = ctx.host.map(|h| h.llama.clone());
+                // The server may be running from the CUDA folder, so it stops before the folder goes.
+                return (
+                    Task::perform(
+                        async move {
+                            if let Some(l) = llama {
+                                l.stop().await;
+                            }
+                            cuda::remove().map_err(|e| format!("{e:#}"))
+                        },
+                        |r| Message::Settings(Msg::CudaDone(r)),
+                    ),
+                    Effect::None,
+                );
             }
             Msg::KeepAlive(k) => {
                 s.keep_alive_minutes = k.0;
@@ -745,6 +821,7 @@ impl Panel {
                 s.use_gpu,
                 Msg::UseGpu
             ),
+            self.nvidia(),
             switch_row(
                 tr("Load models larger than memory from disk"),
                 tr("Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word."),
@@ -765,6 +842,55 @@ impl Panel {
         ]
         .spacing(14)
         .into()
+    }
+
+    /// NVIDIA support for a computer with an NVIDIA card: the offer to download it, its progress, or what is installed.
+    fn nvidia(&self) -> Element<'_, Msg> {
+        let Some(Some(gpu)) = cuda::detected() else { return space().into() };
+        let mut col = Column::new().spacing(6);
+        if let Some(version) = cuda::installed_version() {
+            col = col.push(
+                text(trf("NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.", &[("version", &version)]))
+                    .size(12)
+                    .style(theme::muted),
+            );
+            col = col.push(button(text(tr("Remove NVIDIA support")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::CudaRemove));
+        } else if let Some((done, total)) = self.cuda_progress {
+            col = col.push(
+                row![
+                    progress_bar(0.0..=total.max(1) as f32, done as f32).girth(6).style(theme::meter),
+                    text(format!("{}%", done * 100 / total.max(1))).size(12).width(44),
+                    button(text(tr("Stop")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::CudaCancel),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        } else if gpu.cuda().is_none() {
+            col = col.push(
+                text(trf(
+                    "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.",
+                    &[("min", &cuda::MIN_DRIVER), ("driver", &gpu.driver)],
+                ))
+                .size(12)
+                .style(theme::muted),
+            );
+        } else {
+            col = col.push(
+                text(trf("NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.", &[("gpu", &gpu.name)]))
+                    .size(12)
+                    .style(theme::muted),
+            );
+            col = col.push(
+                button(text(trf("Download NVIDIA support ({size})", &[("size", &gb(gpu.download_size()))])).size(12))
+                    .padding([4, 10])
+                    .style(theme::secondary)
+                    .on_press(Msg::CudaDownload),
+            );
+        }
+        if let Some(e) = &self.cuda_error {
+            col = col.push(text(e.clone()).size(12).style(theme::warn_text));
+        }
+        col.into()
     }
 
     fn hosted<'a>(&'a self, state: &'a State) -> Element<'a, Msg> {

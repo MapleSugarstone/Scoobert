@@ -448,5 +448,17 @@
   "Not now": "暂不",
   "Could not find the folder Scoobert is in.": "找不到 Scoobert 所在的文件夹。",
   "Could not put the new version in {folder}. Download it from the release page instead.": "无法将新版本放入 {folder}。请改从发布页面下载。",
-  "Could not open the update's disk image.": "无法打开更新的磁盘映像。"
+  "Could not open the update's disk image.": "无法打开更新的磁盘映像。",
+  "Could not remove {path}": "无法移除 {path}",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "NVIDIA 支持需要 {min} 或更高版本的驱动程序，而这台电脑的驱动程序版本是 {driver}。请先从 NVIDIA 网站更新驱动程序。",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "无法确定 Scoobert 自带的是 llama.cpp 的哪个发布版本。请重新安装 Scoobert，然后重试。",
+  "llama.cpp {release} has no {file} to download.": "llama.cpp {release} 中没有可下载的 {file} 文件。",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "下载并解压 NVIDIA 支持需要约 {need} 的磁盘空间，当前可用 {free}。",
+  "The download holds no llama-server.": "下载的文件中没有 llama-server。",
+  "Could not unpack the download.": "无法解压下载的文件。",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "NVIDIA 支持无法加载 {model}，因此在 Scoobert 重启前改用显卡的默认支持。",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "已安装使用 CUDA {version} 的 NVIDIA 支持。开启“使用显卡”期间，Scoobert 会从下次加载模型时起使用它。",
+  "Remove NVIDIA support": "移除 NVIDIA 支持",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "NVIDIA 支持通过 CUDA 在你的 {gpu} 上运行模型，通常比 Scoobert 自带的图形支持读取提示词快得多。",
+  "Download NVIDIA support ({size})": "下载 NVIDIA 支持（{size}）"
 }

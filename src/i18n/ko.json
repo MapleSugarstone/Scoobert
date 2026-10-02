@@ -448,5 +448,17 @@
   "Not now": "나중에",
   "Could not find the folder Scoobert is in.": "Scoobert가 있는 폴더를 찾지 못했습니다.",
   "Could not put the new version in {folder}. Download it from the release page instead.": "새 버전을 {folder}에 넣지 못했습니다. 대신 릴리스 페이지에서 내려받으세요.",
-  "Could not open the update's disk image.": "업데이트 디스크 이미지를 열지 못했습니다."
+  "Could not open the update's disk image.": "업데이트 디스크 이미지를 열지 못했습니다.",
+  "Could not remove {path}": "{path} 항목을 제거할 수 없습니다",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "NVIDIA 지원에는 드라이버 버전 {min} 이상이 필요하지만 현재 이 컴퓨터의 드라이버 버전은 {driver}입니다. 먼저 NVIDIA 웹사이트에서 드라이버를 업데이트하세요.",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Scoobert에 포함된 llama.cpp 릴리스를 확인할 수 없습니다. Scoobert를 다시 설치한 다음 다시 시도하세요.",
+  "llama.cpp {release} has no {file} to download.": "llama.cpp {release}에는 다운로드할 {file} 파일이 없습니다.",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "NVIDIA 지원을 다운로드하고 압축을 푸는 데 디스크 공간이 약 {need} 필요하지만 사용 가능한 공간은 {free}입니다.",
+  "The download holds no llama-server.": "다운로드한 파일에 llama-server가 없습니다.",
+  "Could not unpack the download.": "다운로드한 파일의 압축을 풀 수 없습니다.",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "NVIDIA 지원에서 {model} 로드에 실패하여 Scoobert가 다시 시작될 때까지 카드의 기본 지원을 사용합니다.",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "CUDA {version} 기반 NVIDIA 지원이 설치되어 있습니다. Scoobert는 “그래픽 카드 사용”이 켜져 있는 동안 다음에 모델을 로드할 때부터 이를 사용합니다.",
+  "Remove NVIDIA support": "NVIDIA 지원 제거",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "NVIDIA 지원은 CUDA를 통해 사용 중인 {gpu}에서 모델을 실행하며, 보통 Scoobert에 포함된 그래픽 지원보다 프롬프트를 훨씬 빠르게 읽습니다.",
+  "Download NVIDIA support ({size})": "NVIDIA 지원 다운로드({size})"
 }

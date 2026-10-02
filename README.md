@@ -133,6 +133,7 @@ Tasks that need new packages from the internet fail in this mode, so install a p
 | Unload the model after | How long an idle model keeps its memory. |
 | Load the model when Scoobert starts | Loads your default model at startup, so the first reply does not wait for it. Off by default, because the model then holds its memory from the start. |
 | Where models live | The folder Scoobert looks in for GGUF models. |
+| NVIDIA support | Shown on a computer with an NVIDIA card. Downloads llama.cpp's CUDA build and NVIDIA's runtime (about 550 MB), which usually reads prompts much faster than the bundled graphics support. Scoobert falls back to the bundled support if CUDA cannot load a model. |
 
 ## Where Scoobert keeps data
 

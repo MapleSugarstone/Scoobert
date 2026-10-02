@@ -448,5 +448,17 @@
   "Not now": "Pas maintenant",
   "Could not find the folder Scoobert is in.": "Impossible de trouver le dossier où se trouve Scoobert.",
   "Could not put the new version in {folder}. Download it from the release page instead.": "Impossible de placer la nouvelle version dans {folder}. Téléchargez-la plutôt depuis la page de la version.",
-  "Could not open the update's disk image.": "Impossible d'ouvrir l'image disque de la mise à jour."
+  "Could not open the update's disk image.": "Impossible d'ouvrir l'image disque de la mise à jour.",
+  "Could not remove {path}": "Impossible de retirer {path}",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "La prise en charge de NVIDIA nécessite la version {min} du pilote ou une version ultérieure, et cet ordinateur dispose de la version {driver}. Commencez par mettre à jour le pilote depuis le site web de NVIDIA.",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Impossible de déterminer quelle publication de llama.cpp Scoobert inclut. Réinstallez Scoobert, puis réessayez.",
+  "llama.cpp {release} has no {file} to download.": "llama.cpp {release} n'a aucun fichier {file} à télécharger.",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "La prise en charge de NVIDIA nécessite environ {need} d'espace disque pour le téléchargement et la décompression, et {free} sont libres.",
+  "The download holds no llama-server.": "Le téléchargement ne contient pas llama-server.",
+  "Could not unpack the download.": "Impossible de décompresser le téléchargement.",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "La prise en charge de NVIDIA n'a pas pu charger {model}, donc Scoobert utilise la prise en charge par défaut de la carte jusqu'à ce qu'il redémarre.",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "La prise en charge de NVIDIA avec CUDA {version} est installée. Scoobert l'utilise tant que « Utiliser la carte graphique » est activé, à partir du prochain chargement d'un modèle.",
+  "Remove NVIDIA support": "Retirer la prise en charge de NVIDIA",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "La prise en charge de NVIDIA exécute les modèles via CUDA sur votre {gpu} et lit généralement les prompts bien plus vite que la prise en charge graphique fournie avec Scoobert.",
+  "Download NVIDIA support ({size})": "Télécharger la prise en charge de NVIDIA ({size})"
 }

@@ -448,5 +448,17 @@
   "Not now": "Hindi ngayon",
   "Could not find the folder Scoobert is in.": "Hindi mahanap ang folder kung nasaan ang Scoobert.",
   "Could not put the new version in {folder}. Download it from the release page instead.": "Hindi mailagay ang bagong bersyon sa {folder}. I-download na lang ito mula sa page ng release.",
-  "Could not open the update's disk image.": "Hindi mabuksan ang disk image ng update."
+  "Could not open the update's disk image.": "Hindi mabuksan ang disk image ng update.",
+  "Could not remove {path}": "Hindi naalis ang {path}",
+  "NVIDIA support needs driver version {min} or later, and this computer has {driver}. Update the driver from NVIDIA's website first.": "Kailangan ng suporta sa NVIDIA ng driver na bersyon {min} o mas bago, at bersyon {driver} ang nasa computer na ito. I-update muna ang driver mula sa website ng NVIDIA.",
+  "Could not tell which llama.cpp release Scoobert includes. Reinstall Scoobert, then try again.": "Hindi matukoy kung aling release ng llama.cpp ang kasama ng Scoobert. I-install muli ang Scoobert, pagkatapos ay pakisubukang muli.",
+  "llama.cpp {release} has no {file} to download.": "Walang {file} na maaaring i-download sa llama.cpp {release}.",
+  "NVIDIA support needs about {need} of disk space to download and unpack, and {free} is free.": "Para i-download at i-unpack ang suporta sa NVIDIA, kailangan ng humigit-kumulang {need} na espasyo sa disk, at {free} ang libre.",
+  "The download holds no llama-server.": "Walang llama-server sa na-download na file.",
+  "Could not unpack the download.": "Hindi na-unpack ang na-download na file.",
+  "NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.": "Hindi na-load ng suporta sa NVIDIA ang {model}, kaya ginagamit ng Scoobert ang default na suporta ng card hanggang sa mag-restart ito.",
+  "NVIDIA support with CUDA {version} is installed. Scoobert uses it while Use the graphics card is on, from the next time a model loads.": "Naka-install ang suporta sa NVIDIA na may CUDA {version}. Ginagamit ito ng Scoobert habang naka-on ang “Gamitin ang graphics card”, simula sa susunod na pag-load ng modelo.",
+  "Remove NVIDIA support": "Alisin ang suporta sa NVIDIA",
+  "NVIDIA support runs models through CUDA on your {gpu}, which usually reads prompts much faster than the graphics support Scoobert includes.": "Pinapatakbo ng suporta sa NVIDIA ang mga modelo sa pamamagitan ng CUDA sa iyong {gpu}, na kadalasang mas mabilis nang husto sa pagbasa ng mga prompt kaysa sa suporta sa graphics na kasama ng Scoobert.",
+  "Download NVIDIA support ({size})": "I-download ang suporta sa NVIDIA ({size})"
 }
