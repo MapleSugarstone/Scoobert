@@ -445,5 +445,8 @@
  "The model does not fit in free memory.": "Модель не помещается в свободную память.",
  "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert может запустить её, читая не поместившуюся часть с диска по ходу работы. Ответы будут приходить намного медленнее.",
  "Run it from disk and continue": "Запустить с диска и продолжить",
- "Not now": "Не сейчас"
+ "Not now": "Не сейчас",
+ "Could not find the folder Scoobert is in.": "Не удалось найти папку, в которой находится Scoobert.",
+ "Could not put the new version in {folder}. Download it from the release page instead.": "Не удалось поместить новую версию в {folder}. Скачайте её со страницы выпуска.",
+ "Could not open the update's disk image.": "Не удалось открыть образ диска обновления."
 }

@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "Model di bîra vala de cih nagire.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert dikare wê bixebitîne û beşa ku cih nagire di dema xebatê de ji dîskê bixwîne. Bersiv pir hêdîtir tên.",
   "Run it from disk and continue": "Ji dîskê bixebitîne û bidomîne",
-  "Not now": "Ne niha"
+  "Not now": "Ne niha",
+  "Could not find the folder Scoobert is in.": "Peldanka ku Scoobert tê de ye nehat dîtin.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "Guhertoya nû nehat danîn nav {folder}. Li şûna wê ji rûpela weşanê daxe.",
+  "Could not open the update's disk image.": "Wêneya dîskê ya nûvekirinê nehat vekirin."
 }

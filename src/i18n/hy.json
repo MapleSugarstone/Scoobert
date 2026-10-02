@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "Մոդելը չի տեղավորվում ազատ հիշողության մեջ։",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert-ը կարող է այն գործարկել՝ չտեղավորվող մասը աշխատանքի ընթացքում կարդալով սկավառակից։ Պատասխանները շատ ավելի դանդաղ կգան։",
   "Run it from disk and continue": "Գործարկել սկավառակից և շարունակել",
-  "Not now": "Ոչ հիմա"
+  "Not now": "Ոչ հիմա",
+  "Could not find the folder Scoobert is in.": "Չհաջողվեց գտնել այն թղթապանակը, որում գտնվում է Scoobert-ը։",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "Չհաջողվեց նոր տարբերակը տեղադրել {folder} թղթապանակում։ Փոխարենը ներբեռնեք այն թողարկման էջից։",
+  "Could not open the update's disk image.": "Չհաջողվեց բացել թարմացման սկավառակի պատկերը։"
 }

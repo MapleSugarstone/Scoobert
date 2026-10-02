@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "该模型无法放入可用内存。",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert 可以在运行时从磁盘读取放不下的部分来运行它。回复会慢很多。",
   "Run it from disk and continue": "从磁盘运行并继续",
-  "Not now": "暂不"
+  "Not now": "暂不",
+  "Could not find the folder Scoobert is in.": "找不到 Scoobert 所在的文件夹。",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "无法将新版本放入 {folder}。请改从发布页面下载。",
+  "Could not open the update's disk image.": "无法打开更新的磁盘映像。"
 }

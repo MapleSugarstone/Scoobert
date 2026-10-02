@@ -46,13 +46,26 @@ pub struct Asset {
 pub enum Kind {
     WindowsInstaller,
     AppImage(PathBuf),
+    /// The .app folder this copy runs from on macOS.
+    MacApp(PathBuf),
 }
 
 pub fn install_kind() -> Option<Kind> {
     if cfg!(windows) && crate::paths::uninstaller().is_some() {
         return Some(Kind::WindowsInstaller);
     }
+    if cfg!(target_os = "macos") {
+        return mac_bundle().map(Kind::MacApp);
+    }
     std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_file()).map(Kind::AppImage)
+}
+
+/// The .app folder around this program, which runs from its Contents/MacOS folder.
+fn mac_bundle() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos = exe.parent()?;
+    let bundle = macos.parent()?.parent()?;
+    (macos.ends_with("Contents/MacOS") && bundle.extension().is_some_and(|e| e == "app")).then(|| bundle.to_path_buf())
 }
 
 fn client() -> Option<reqwest::Client> {
@@ -85,6 +98,7 @@ pub async fn check() -> anyhow::Result<Option<Release>> {
     let wanted = |name: &str| match install_kind() {
         Some(Kind::WindowsInstaller) => name == format!("Scoobert-Setup-{version}.exe"),
         Some(Kind::AppImage(_)) => name.ends_with("-x86_64.AppImage"),
+        Some(Kind::MacApp(_)) => name == format!("Scoobert-{version}-macos-arm64.dmg"),
         None => false,
     };
     let asset = body["assets"].as_array().into_iter().flatten().find_map(|a| {
@@ -108,7 +122,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 /// Downloads the update, reporting bytes done and total, and checks it against GitHub's checksum.
 pub async fn download(asset: &Asset, kind: &Kind, on_progress: impl Fn(u64, u64)) -> anyhow::Result<PathBuf> {
     let target = match kind {
-        Kind::WindowsInstaller => std::env::temp_dir().join(&asset.name),
+        Kind::WindowsInstaller | Kind::MacApp(_) => std::env::temp_dir().join(&asset.name),
         // Next to the running AppImage, so the finished file can replace it with a rename.
         Kind::AppImage(current) => current.with_extension("AppImage.new"),
     };
@@ -141,9 +155,11 @@ pub async fn download(asset: &Asset, kind: &Kind, on_progress: impl Fn(u64, u64)
 }
 
 /// Starts the new version. The Windows installer updates in place without its wizard and reopens Scoobert; an
-/// AppImage replaces the running file and starts. The caller then closes this copy.
+/// AppImage replaces the running file and starts; a Mac app is swapped for the one in the disk image and opens once
+/// this copy has closed. The caller then closes this copy.
 pub fn install(file: &Path, kind: &Kind) -> anyhow::Result<()> {
     match kind {
+        Kind::MacApp(bundle) => install_mac(file, bundle)?,
         Kind::WindowsInstaller => {
             std::process::Command::new(file).args(["/S", "/relaunch"]).spawn().context(tr("Could not start the installer"))?;
         }
@@ -158,6 +174,91 @@ pub fn install(file: &Path, kind: &Kind) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Copies the app out of the disk image beside the running one, swaps the two, and leaves a shell that waits for
+/// this copy to exit, deletes the old app, and opens the new one. The download comes from Scoobert itself rather
+/// than a browser, so macOS does not ask the user to approve the new copy again.
+fn install_mac(dmg: &Path, bundle: &Path) -> anyhow::Result<()> {
+    use std::process::{Command, Stdio};
+    let old = swap_mac_app(dmg, bundle)?;
+    let wait = format!("while kill -0 {} 2>/dev/null; do sleep 0.5; done; rm -rf \"$1\"; open \"$2\"", std::process::id());
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", &wait, "sh"]).arg(&old).arg(bundle).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Its own group, so closing this copy does not end the shell that reopens Scoobert.
+        cmd.process_group(0);
+    }
+    cmd.spawn().context(tr("Could not start the new version"))?;
+    Ok(())
+}
+
+/// Puts the app from the disk image where `bundle` is, and returns where the old app went.
+fn swap_mac_app(dmg: &Path, bundle: &Path) -> anyhow::Result<PathBuf> {
+    use std::process::Command;
+    let folder = bundle.parent().context(tr("Could not find the folder Scoobert is in."))?;
+    let name = bundle.file_name().context(tr("Could not find the folder Scoobert is in."))?.to_string_lossy().into_owned();
+    let staged = folder.join(format!("{name}.new"));
+    let old = folder.join(format!("{name}.old"));
+    let cannot_write = || trf("Could not put the new version in {folder}. Download it from the release page instead.", &[("folder", &folder.display())]);
+    let mount = std::env::temp_dir().join(format!("scoobert-update-{}", std::process::id()));
+    std::fs::create_dir_all(&mount)?;
+    let attached = Command::new("/usr/bin/hdiutil").args(["attach", "-nobrowse", "-noautoopen", "-readonly", "-mountpoint"]).arg(&mount).arg(dmg).output()?;
+    if !attached.status.success() {
+        let _ = std::fs::remove_dir(&mount);
+        bail!(tr("Could not open the update's disk image."));
+    }
+    let app = std::fs::read_dir(&mount)?.flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|e| e == "app"));
+    let _ = std::fs::remove_dir_all(&staged);
+    // ditto keeps the app's signatures and links as they are.
+    let copied = app.is_some_and(|app| Command::new("/usr/bin/ditto").arg(app).arg(&staged).status().is_ok_and(|s| s.success()));
+    let _ = Command::new("/usr/bin/hdiutil").args(["detach", "-quiet"]).arg(&mount).status();
+    let _ = std::fs::remove_dir(&mount);
+    let _ = std::fs::remove_file(dmg);
+    if !copied {
+        let _ = std::fs::remove_dir_all(&staged);
+        bail!(cannot_write());
+    }
+    let _ = Command::new("/usr/bin/xattr").args(["-dr", "com.apple.quarantine"]).arg(&staged).status();
+    let _ = std::fs::remove_dir_all(&old);
+    if std::fs::rename(bundle, &old).is_err() {
+        let _ = std::fs::remove_dir_all(&staged);
+        bail!(cannot_write());
+    }
+    if std::fs::rename(&staged, bundle).is_err() {
+        let _ = std::fs::rename(&old, bundle);
+        bail!(cannot_write());
+    }
+    Ok(old)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    use std::process::Command;
+
+    #[test]
+    fn swaps_the_app_for_the_one_in_the_disk_image() {
+        let root = std::env::temp_dir().join(format!("scoobert-swap-{}", std::process::id()));
+        let app = |dir: &std::path::Path, text: &str| {
+            let exe = dir.join("Scoobert.app/Contents/MacOS");
+            std::fs::create_dir_all(&exe).unwrap();
+            std::fs::write(exe.join("scoobert"), text).unwrap();
+        };
+        let (installed, image) = (root.join("Applications"), root.join("image"));
+        app(&installed, "old");
+        app(&image, "new");
+        let dmg = root.join("update.dmg");
+        let made = Command::new("/usr/bin/hdiutil").args(["create", "-quiet", "-fs", "HFS+", "-format", "UDZO", "-srcfolder"]).arg(&image).arg(&dmg).status().unwrap();
+        assert!(made.success());
+        let bundle = installed.join("Scoobert.app");
+        let old = super::swap_mac_app(&dmg, &bundle).expect("the swap works");
+        assert_eq!(std::fs::read_to_string(bundle.join("Contents/MacOS/scoobert")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(old.join("Contents/MacOS/scoobert")).unwrap(), "old");
+        assert!(!installed.join("Scoobert.app.new").exists() && !dmg.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

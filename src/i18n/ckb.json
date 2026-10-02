@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "مۆدێلەکە لە بیرگەی بەتاڵدا جێی نابێتەوە.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert دەتوانێت کاری پێ بکات و ئەو بەشەی جێی نابێتەوە لە کاتی کارکردندا لە دیسکەوە بخوێنێتەوە. وەڵامەکان زۆر هێواشتر دێن.",
   "Run it from disk and continue": "لە دیسکەوە کاری پێ بکە و بەردەوام بە",
-  "Not now": "ئێستا نا"
+  "Not now": "ئێستا نا",
+  "Could not find the folder Scoobert is in.": "ئەو بوخچەیەی Scoobert تێیدایە نەدۆزرایەوە.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "نەتوانرا وەشانە نوێیەکە لە {folder} دابنرێت. لە جیاتی ئەوە لە پەڕەی وەشانەکەوە دایبگرن.",
+  "Could not open the update's disk image.": "نەتوانرا وێنەی دیسکی نوێکردنەوەکە بکرێتەوە."
 }

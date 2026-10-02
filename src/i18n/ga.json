@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "Ní luíonn an tsamhail sa chuimhne shaor.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Is féidir le Scoobert í a rith, ag léamh ón diosca de réir a chéile an chuid nach luíonn. Tagann na freagraí i bhfad níos moille.",
   "Run it from disk and continue": "Rith ón diosca agus lean ar aghaidh",
-  "Not now": "Ní anois"
+  "Not now": "Ní anois",
+  "Could not find the folder Scoobert is in.": "Níorbh fhéidir an fillteán ina bhfuil Scoobert a aimsiú.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "Níorbh fhéidir an leagan nua a chur in {folder}. Íoslódáil ón leathanach eisiúna é ina ionad.",
+  "Could not open the update's disk image.": "Níorbh fhéidir íomhá diosca an nuashonraithe a oscailt."
 }

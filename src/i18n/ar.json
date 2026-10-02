@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "لا يتسع النموذج في الذاكرة المتاحة.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "يمكن لـ Scoobert تشغيله بقراءة الجزء الذي لا يتسع من القرص أثناء العمل. تصل الردود أبطأ بكثير.",
   "Run it from disk and continue": "التشغيل من القرص والمتابعة",
-  "Not now": "ليس الآن"
+  "Not now": "ليس الآن",
+  "Could not find the folder Scoobert is in.": "تعذّر العثور على المجلد الذي يوجد فيه Scoobert.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "تعذّر وضع النسخة الجديدة في {folder}. نزّلها من صفحة الإصدار بدلًا من ذلك.",
+  "Could not open the update's disk image.": "تعذّر فتح صورة القرص الخاصة بالتحديث."
 }

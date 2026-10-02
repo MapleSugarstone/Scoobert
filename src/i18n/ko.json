@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "모델이 사용 가능한 메모리에 들어가지 않습니다.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert는 들어가지 않는 부분을 필요할 때마다 디스크에서 읽으며 실행할 수 있습니다. 답변이 훨씬 느려집니다.",
   "Run it from disk and continue": "디스크에서 실행하고 계속",
-  "Not now": "나중에"
+  "Not now": "나중에",
+  "Could not find the folder Scoobert is in.": "Scoobert가 있는 폴더를 찾지 못했습니다.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "새 버전을 {folder}에 넣지 못했습니다. 대신 릴리스 페이지에서 내려받으세요.",
+  "Could not open the update's disk image.": "업데이트 디스크 이미지를 열지 못했습니다."
 }

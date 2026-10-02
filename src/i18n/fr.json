@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "Le modèle ne tient pas dans la mémoire libre.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobert peut l'exécuter en lisant au fur et à mesure depuis le disque la partie qui ne tient pas. Les réponses arrivent beaucoup plus lentement.",
   "Run it from disk and continue": "L'exécuter depuis le disque et continuer",
-  "Not now": "Pas maintenant"
+  "Not now": "Pas maintenant",
+  "Could not find the folder Scoobert is in.": "Impossible de trouver le dossier où se trouve Scoobert.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "Impossible de placer la nouvelle version dans {folder}. Téléchargez-la plutôt depuis la page de la version.",
+  "Could not open the update's disk image.": "Impossible d'ouvrir l'image disque de la mise à jour."
 }

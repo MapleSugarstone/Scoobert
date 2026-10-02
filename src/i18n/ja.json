@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "モデルが空きメモリに収まりません。",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Scoobertは、収まらない部分を必要に応じてディスクから読みながら実行できます。返答はかなり遅くなります。",
   "Run it from disk and continue": "ディスクから実行して続ける",
-  "Not now": "今はしない"
+  "Not now": "今はしない",
+  "Could not find the folder Scoobert is in.": "Scoobertがあるフォルダーが見つかりませんでした。",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "新しいバージョンを{folder}に置けませんでした。代わりにリリースページからダウンロードしてください。",
+  "Could not open the update's disk image.": "アップデートのディスクイメージを開けませんでした。"
 }

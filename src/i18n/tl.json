@@ -445,5 +445,8 @@
   "The model does not fit in free memory.": "Hindi kasya ang modelo sa bakanteng memory.",
   "Scoobert can run it with the part that does not fit read from disk as it goes. Replies come much more slowly.": "Kayang patakbuhin ito ng Scoobert habang binabasa mula sa disk ang bahaging hindi kasya. Mas mabagal nang husto ang mga sagot.",
   "Run it from disk and continue": "Patakbuhin mula sa disk at magpatuloy",
-  "Not now": "Hindi ngayon"
+  "Not now": "Hindi ngayon",
+  "Could not find the folder Scoobert is in.": "Hindi mahanap ang folder kung nasaan ang Scoobert.",
+  "Could not put the new version in {folder}. Download it from the release page instead.": "Hindi mailagay ang bagong bersyon sa {folder}. I-download na lang ito mula sa page ng release.",
+  "Could not open the update's disk image.": "Hindi mabuksan ang disk image ng update."
 }
