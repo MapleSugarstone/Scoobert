@@ -73,6 +73,12 @@ Hosted models run on the provider's servers, so Scoobert sends them your prompts
 - **Notes pane:** read and edit notes beside the conversation. The pane shows which notes link to the open note, searches their text, and draws a graph of the links. You can save any reply as a note. The notes are plain Markdown files, so any Markdown note app can open the same folder.
 - **Saved prompt cache:** Scoobert saves each conversation's processed prompt to disk, so returning to a long conversation takes seconds instead of the minutes a CPU needs to reread it. It also saves the prompt every new conversation starts with, for Chats and for each project, so a new conversation reads little more than your message. The first time Scoobert runs, and after an update, it loads your default model and builds these saved prompts in the background. The sidebar shows **Preparing** while it works.
 - **Images:** attach screenshots when the model supports images.
+- **Model lab:** select **Model lab** on a local model in Settings to see its layers, number formats, and every tensor and setting. You can make a variant there that appears in the Model menu under a name you choose. Scoobert checks for disk space first.
+  - **Steering** measures how the model's layers respond to a persona you describe and adds that difference while the variant runs. You can change its strength later.
+  - **Adapter** adds a LoRA adapter in GGUF format from Hugging Face or a file.
+  - **Layer strength** turns the attention or feed-forward output of chosen layers up or down.
+  - **Layer surgery** repeats or removes chosen layers.
+  - **Size conversion** writes a copy in a smaller or larger number format.
 
 ## Use Scoobert
 
@@ -112,6 +118,7 @@ Tasks that need new packages from the internet fail in this mode, so install a p
 | Log finished tasks | Adds each finished task to that day's note. |
 | Ask the model what to remember | After a task, a local model lists up to three facts for the related note. |
 | Context, per model | How many tokens of conversation a local model holds. Larger contexts need more memory. |
+| System prompt, per model | The instructions every conversation on that model starts with. **Reset to Scoobert's prompt** restores the original. |
 | Unload the model after | How long an idle model keeps its memory. |
 | Load the model when Scoobert starts | Loads your default model at startup, so the first reply does not wait for it. Off by default, because the model then holds its memory from the start. |
 | Where models live | The folder Scoobert looks in for GGUF models. |

@@ -18,6 +18,8 @@ bin="$(dirname "$(find "$tmp/src" -name llama-server -type f | head -n 1)")"
 rm -rf "$out"
 mkdir -p "$out"
 cp "$bin/llama-server" "$out/"
+# The model lab converts models with llama-quantize.
+cp "$bin/llama-quantize" "$out/"
 # The server loads the ggml backends and libllama from its own folder.
 find "$bin" -maxdepth 1 -name '*.so*' ! -name '*vulkan*' ! -name '*cuda*' -exec cp -P {} "$out/" \;
 vulkan_url="https://github.com/ggml-org/llama.cpp/releases/download/$release/llama-$release-bin-ubuntu-vulkan-x64.tar.gz"
@@ -27,7 +29,7 @@ tar -xzf "$tmp/vulkan.tar.gz" -C "$tmp/vulkan"
 find "$tmp/vulkan" -name 'libggml-vulkan.so*' -exec cp -P {} "$out/" \;
 find "$tmp/src" -maxdepth 3 -name 'LICENSE*' -exec cp {} "$out/" \; || true
 [ -e "$out/LICENSE" ] || curl -fsSL -o "$out/LICENSE-llama.cpp" https://raw.githubusercontent.com/ggml-org/llama.cpp/master/LICENSE
-chmod +x "$out/llama-server"
+chmod +x "$out/llama-server" "$out/llama-quantize"
 
 {
   echo "llama.cpp $release"

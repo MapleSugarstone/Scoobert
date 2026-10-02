@@ -20,6 +20,10 @@ async fn main() {
     }
     // SCOOBERT_GPU runs the model on the graphics card.
     settings.use_gpu = std::env::var_os("SCOOBERT_GPU").is_some();
+    // SCOOBERT_MODELS points at another models folder, such as one holding model lab variants.
+    if let Some(dir) = std::env::var_os("SCOOBERT_MODELS") {
+        settings.models_dir = dir.to_string_lossy().into_owned();
+    }
     let shared = Arc::new(RwLock::new(settings));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let host = Host::new(shared, tx);

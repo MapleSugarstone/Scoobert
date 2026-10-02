@@ -4,6 +4,7 @@ pub mod chat;
 pub mod fonts;
 pub mod graph;
 pub mod icons;
+pub mod lab;
 pub mod notes;
 pub mod settings;
 pub mod setup;

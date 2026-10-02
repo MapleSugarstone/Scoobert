@@ -358,7 +358,7 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     let mut output = format!("{verb} {shown} (now {} bytes).", new.len());
     // The note that replaces long content in the conversation reads like a failed write unless it is explained.
     if content.len() > SHORTENED_WRITE {
-        output.push_str(" From here on the conversation shows this call without its content, to save room. The file holds all of it.");
+        output.push_str(SHORTENED_NOTICE);
     }
     // After a part is added, the file's top-level lines show what earlier parts already declared.
     if append {
@@ -381,6 +381,10 @@ const OUTLINE_LINES: usize = 40;
 /// Writes longer than this show as a short note in later requests.
 pub const SHORTENED_WRITE: usize = 1500;
 
+/// Ends the result of a long write. `shorten_saved_writes` looks for it, so writes made before it existed keep the
+/// older, shorter note and their conversations keep their saved caches.
+pub const SHORTENED_NOTICE: &str = " From here on the conversation shows this call by its first and last lines, to save room. The file holds all of it.";
+
 /// Whether a command writes a file from a heredoc or a PowerShell here-string. Only the line that opens a heredoc
 /// is checked for a redirect, since the text inside it is often code with `>` in it.
 fn writes_heredoc(command: &str) -> bool {
@@ -395,9 +399,11 @@ fn writes_heredoc(command: &str) -> bool {
 }
 
 /// The notes `shorten_saved_writes` put in place of an earlier write's content before 0.2.6, and the
-/// `content_saved` text it uses now, either of which a model may copy into content.
-static SAVED_WRITE_NOTE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$|^\d+ characters, saved in full in \S+$").unwrap());
+/// `content_saved` texts it has used since, any of which a model may copy into content.
+static SAVED_WRITE_NOTE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$|^\d+ characters, saved in full in \S+$|^\d+ lines saved in full in .+, shown here by")
+        .unwrap()
+});
 
 /// The lines at a file's left margin, which name what it imports and declares, or a Markdown file's headings.
 fn outline(text: &str, markdown: bool) -> Vec<String> {

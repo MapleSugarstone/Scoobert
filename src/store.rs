@@ -152,6 +152,8 @@ pub struct Settings {
     pub models_from_disk: bool,
     /// What the first message of a new conversation in a project does before any code.
     pub plan_first: PlanFirst,
+    /// System prompts the user wrote, by model name. A model without one uses Scoobert's own.
+    pub model_prompts: BTreeMap<String, String>,
 }
 
 /// Whether a new conversation's first task plans the project in its notes before it writes code.
@@ -203,11 +205,17 @@ impl Default for Settings {
             gpu_failed: Vec::new(),
             models_from_disk: false,
             plan_first: PlanFirst::Off,
+            model_prompts: BTreeMap::new(),
         }
     }
 }
 
 impl Settings {
+    /// The user's own system prompt for `model`, if they wrote one.
+    pub fn model_prompt(&self, model: &str) -> Option<&str> {
+        self.model_prompts.get(model).map(|p| p.as_str()).filter(|p| !p.trim().is_empty())
+    }
+
     /// The language in use: the one picked, else the one chosen in the Windows installer, else the computer's own.
     pub fn language(&self) -> &'static crate::i18n::Language {
         let picked = Some(self.language.as_str()).filter(|c| !c.is_empty()).and_then(crate::i18n::find);

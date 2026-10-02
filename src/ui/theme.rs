@@ -521,6 +521,16 @@ pub fn meter(theme: &Theme) -> progress_bar::Style {
     progress_bar::Style { background: t.surface2.into(), bar: t.accent.into(), border: border::rounded(99) }
 }
 
+pub fn slider(theme: &Theme, status: iced::widget::slider::Status) -> iced::widget::slider::Style {
+    use iced::widget::slider::{Handle, HandleShape, Rail, Status, Style};
+    let t = tokens(theme);
+    let handle = if matches!(status, Status::Active) { t.accent } else { mix(t.accent, t.text, 0.25) };
+    Style {
+        rail: Rail { backgrounds: (t.accent.into(), t.surface2.into()), width: 4.0, border: border::rounded(99) },
+        handle: Handle { shape: HandleShape::Circle { radius: 7.0 }, background: handle.into(), border_width: 2.0, border_color: t.surface },
+    }
+}
+
 pub fn divider(theme: &Theme) -> rule::Style {
     rule::Style { color: tokens(theme).line, radius: Radius::new(0.0), fill_mode: rule::FillMode::Full, snap: true }
 }

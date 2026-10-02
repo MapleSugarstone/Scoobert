@@ -18,6 +18,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Fetch llama.cpp
         run: ./scripts/fetch-llama.ps1 -Release $env:LLAMA_RELEASE
+      - name: Build the steering tool
+        run: ./scripts/build-llama-tools.ps1 -Release $env:LLAMA_RELEASE
       # Newer Windows runner images no longer include NSIS.
       - name: Install NSIS
         run: |
@@ -46,6 +48,8 @@ jobs:
         run: cargo test --lib
       - name: Fetch llama.cpp
         run: bash scripts/fetch-llama.sh "$LLAMA_RELEASE"
+      - name: Build the steering tool
+        run: bash scripts/build-llama-tools.sh "$LLAMA_RELEASE"
       - name: Build the AppImage and tarball
         run: bash scripts/package-linux.sh
       - uses: actions/upload-artifact@v4

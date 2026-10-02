@@ -3,6 +3,8 @@
 pub mod catalog;
 pub mod download;
 pub mod gguf;
+pub mod gguf_file;
+pub mod lab;
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -53,6 +55,12 @@ pub struct LocalModel {
     pub path: PathBuf,
     pub mmproj: Option<PathBuf>,
     pub size: u64,
+    /// Extra llama-server arguments, such as a variant's steering vectors, with paths relative to the models folder.
+    pub args: Vec<String>,
+    /// The model it descends from, which sets its default context size. A downloaded model is its own family.
+    pub family: String,
+    /// The folder of a variant made in the model lab.
+    pub variant: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,10 +170,16 @@ impl LlamaServer {
         std::env::split_paths(&path).map(|d| d.join(paths::llama_server_name())).find(|p| p.is_file())
     }
 
+    /// The folder with llama-server and the llama.cpp tools Scoobert bundles beside it.
+    pub fn tools_dir(&self) -> Option<PathBuf> {
+        self.executable()?.parent().map(Path::to_path_buf)
+    }
+
     /// GGUF models in the models folder. A projector file beside a model in its own folder enables images.
     pub fn models(&self) -> Vec<LocalModel> {
         let mut out = Vec::new();
-        scan(&self.models_dir(), 0, &mut out);
+        let dir = self.models_dir();
+        scan(&dir, &dir, 0, &mut out);
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         out
     }
@@ -176,7 +190,7 @@ impl LlamaServer {
         if let Some(&ctx) = s.context_sizes.get(&model.name) {
             return ctx;
         }
-        if let Some(listed) = catalog::find(&model.name) {
+        if let Some(listed) = catalog::find(&model.family) {
             return listed.context_size;
         }
         if model.size > LARGE_MODEL_BYTES { 16_384 } else { DEFAULT_CONTEXT }
@@ -219,7 +233,8 @@ impl LlamaServer {
         }
         if let Some(running) = proc.as_mut() {
             let alive = matches!(running.child.try_wait(), Ok(None));
-            if alive && running.model.path == model.path {
+            // A variant can run on another model's file with its own steering, so the arguments count too.
+            if alive && running.model.path == model.path && running.model.args == model.args {
                 if running.ready {
                     return Ok(());
                 }
@@ -315,6 +330,7 @@ impl LlamaServer {
         if !gpu {
             args.extend(["--device", "none", "-ngl", "0"].map(String::from));
         }
+        args.extend(model.args.iter().cloned());
         // For diagnosing the server, such as -v for its detailed log.
         if let Some(extra) = std::env::var_os("SCOOBERT_SERVER_ARGS") {
             args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
@@ -324,6 +340,11 @@ impl LlamaServer {
         let _ = std::fs::rename(paths::get().server_log(), paths::get().server_log().with_extension("previous.log"));
         let log = std::fs::File::create(paths::get().server_log()).context("Could not create the server log")?;
         let mut cmd = tokio::process::Command::new(&exe);
+        // A variant's steering vectors and adapters are named relative to the models folder.
+        let models_dir = self.models_dir();
+        if models_dir.is_dir() {
+            cmd.current_dir(&models_dir);
+        }
         cmd.args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.try_clone()?))
@@ -724,7 +745,12 @@ async fn watch(server: Weak<LlamaServer>) {
     }
 }
 
-fn scan(dir: &Path, depth: u32, out: &mut Vec<LocalModel>) {
+fn scan(root: &Path, dir: &Path, depth: u32, out: &mut Vec<LocalModel>) {
+    // A variant's folder holds steering vectors and adapters that are not models, so only its description counts.
+    if depth > 0 && dir.join(lab::VARIANT_FILE).is_file() {
+        out.extend(lab::model_from(root, dir));
+        return;
+    }
     let Ok(read) = std::fs::read_dir(dir) else { return };
     let entries: Vec<_> = read.flatten().collect();
     let name_of = |e: &std::fs::DirEntry| e.file_name().to_string_lossy().into_owned();
@@ -758,12 +784,12 @@ fn scan(dir: &Path, depth: u32, out: &mut Vec<LocalModel>) {
         } else {
             e.metadata().map(|m| m.len()).unwrap_or(0)
         };
-        out.push(LocalModel { name, path: e.path(), mmproj: mmproj.map(|m| m.path()), size });
+        out.push(LocalModel { family: name.clone(), name, path: e.path(), mmproj: mmproj.map(|m| m.path()), size, args: Vec::new(), variant: None });
     }
     if depth < 2 {
         for e in &entries {
             if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                scan(&e.path(), depth + 1, out);
+                scan(root, &e.path(), depth + 1, out);
             }
         }
     }

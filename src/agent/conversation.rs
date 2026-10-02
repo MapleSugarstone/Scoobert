@@ -139,7 +139,15 @@ enum Entry {
     /// The part of a summary written before the summary step was interrupted.
     SummaryDraft { start: usize, kept_from: usize, text: String },
     /// The system prompt and tools the conversation is sent with until its next summary.
-    Prompt { system: String, tools: Vec<Value>, notes_folder: String, web: bool, general: bool },
+    Prompt {
+        system: String,
+        tools: Vec<Value>,
+        notes_folder: String,
+        web: bool,
+        general: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        custom: String,
+    },
     /// The conversation moved to another folder, when a conversation without a project started one.
     Cwd { cwd: PathBuf },
     /// Messages from `to` on were discarded. They stay in the file above this line.
@@ -177,6 +185,8 @@ pub struct PinnedPrompt {
     pub notes_folder: String,
     pub web: bool,
     pub general: bool,
+    /// The user's own system prompt template it was built from, empty for Scoobert's.
+    pub custom: String,
 }
 
 #[derive(Clone, Debug)]
@@ -256,8 +266,8 @@ impl Conversation {
                     c.prompt = None;
                 }
                 (Entry::SummaryDraft { start, kept_from, text }, Some(c)) => c.summary_draft = Some(SummaryDraft { start, kept_from, text }),
-                (Entry::Prompt { system, tools, notes_folder, web, general }, Some(c)) => {
-                    c.prompt = Some(PinnedPrompt { system, tools, notes_folder, web, general });
+                (Entry::Prompt { system, tools, notes_folder, web, general, custom }, Some(c)) => {
+                    c.prompt = Some(PinnedPrompt { system, tools, notes_folder, web, general, custom });
                 }
                 (Entry::Cwd { cwd }, Some(c)) => c.cwd = cwd,
                 (Entry::Rewind { to }, Some(c)) => c.truncate(to),
@@ -329,6 +339,7 @@ impl Conversation {
             notes_folder: prompt.notes_folder.clone(),
             web: prompt.web,
             general: prompt.general,
+            custom: prompt.custom.clone(),
         };
         self.prompt = Some(prompt);
         if self.file.exists() { self.append(&entry) } else { Ok(()) }

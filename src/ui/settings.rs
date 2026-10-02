@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use iced::widget::{Column, button, checkbox, column, container, pick_list, progress_bar, row, rule, scrollable, space, text, text_input, toggler};
+use iced::widget::scrollable::RelativeOffset;
+use iced::widget::{Column, button, checkbox, column, container, operation, pick_list, progress_bar, row, rule, scrollable, space, text, text_editor, text_input, toggler};
 use iced::{Alignment, Element, Fill, Length, Task};
 
 use super::Message;
@@ -11,6 +12,7 @@ use super::fonts;
 use super::icons::{Icon, icon};
 use super::setup::{self, Download, Job};
 use super::theme;
+use crate::agent::prompt::DEFAULT_PROMPT;
 use crate::agent::providers::{self, Provider};
 use crate::agent::{Host, ModelOption};
 use crate::i18n::{tr, trf};
@@ -21,6 +23,7 @@ use crate::util::gb;
 const KEEP_ALIVE: [KeepAlive; 4] = [KeepAlive(5), KeepAlive(30), KeepAlive(120), KeepAlive(0)];
 const CONTEXT_SIZES: [u32; 6] = [8192, 16_384, 32_768, 65_536, 131_072, 262_144];
 const SUPPORT_URL: &str = "https://ko-fi.com/krazvalt";
+const PAGE_ID: &str = "settings-page";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -96,6 +99,17 @@ pub struct Panel {
     custom_name: String,
     custom_url: String,
     custom_spec: String,
+    /// The model lab page, which replaces the model list while it is open.
+    lab: Option<super::lab::Lab>,
+    /// The system prompt page for one model, which replaces the section while it is open.
+    prompt: Option<PromptPage>,
+}
+
+struct PromptPage {
+    /// The model's name, or a hosted model's reference.
+    model: String,
+    label: String,
+    content: text_editor::Content,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +157,16 @@ pub enum Msg {
     Uninstall,
     CheckUpdates,
     ShowFile(PathBuf),
+    OpenLab(String),
+    Lab(super::lab::Msg),
+    LabDeleted,
+    LabFailed(String),
+    /// Opens the system prompt page for a model, by name or reference, with the label to show.
+    OpenPrompt(String, String),
+    PromptEdit(text_editor::Action),
+    SavePrompt,
+    ResetPrompt,
+    ClosePrompt,
     Close,
 }
 
@@ -164,6 +188,8 @@ impl Panel {
             custom_name: String::new(),
             custom_url: String::new(),
             custom_spec: String::new(),
+            lab: None,
+            prompt: None,
         }
     }
 
@@ -190,6 +216,7 @@ impl Panel {
             }
             Msg::Section(section) => {
                 self.section = section;
+                self.prompt = None;
                 if section == Section::Hosted {
                     return self.update(Msg::Init, ctx);
                 }
@@ -392,7 +419,61 @@ impl Panel {
             Msg::ShowFile(path) => {
                 let _ = opener::reveal(path);
             }
-            Msg::Close => return (Task::done(Message::CloseModal), Effect::None),
+            Msg::OpenLab(name) => {
+                let Some(model) = ctx.host.and_then(|h| h.llama.models().into_iter().find(|m| m.name == name)) else {
+                    return (Task::none(), Effect::Toast(tr("That model is no longer in the models folder.").into()));
+                };
+                let (lab, task) = super::lab::Lab::open(model);
+                self.lab = Some(lab);
+                return (Task::batch([task, operation::snap_to(PAGE_ID, RelativeOffset::START)]), Effect::None);
+            }
+            Msg::Lab(m) => {
+                let Some(lab) = &mut self.lab else { return (Task::none(), Effect::None) };
+                let (closed, task, effect) = lab.update(m, ctx.host);
+                if closed {
+                    self.lab = None;
+                }
+                return (task, effect);
+            }
+            Msg::LabDeleted => return (Task::none(), Effect::ModelsChanged),
+            Msg::LabFailed(e) => return (Task::none(), Effect::Toast(trf("The variant could not be moved to the trash: {error}", &[("error", &e)]))),
+            Msg::OpenPrompt(model, label) => {
+                let mut content = text_editor::Content::with_text(s.model_prompt(&model).unwrap_or(DEFAULT_PROMPT));
+                content.perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
+                self.prompt = Some(PromptPage { model, label, content });
+                return (operation::snap_to(PAGE_ID, RelativeOffset::START), Effect::None);
+            }
+            Msg::PromptEdit(action) => {
+                if let Some(p) = &mut self.prompt {
+                    p.content.perform(action);
+                }
+            }
+            Msg::ResetPrompt => {
+                if let Some(p) = &mut self.prompt {
+                    p.content = text_editor::Content::with_text(DEFAULT_PROMPT);
+                }
+            }
+            Msg::SavePrompt => {
+                let Some(p) = self.prompt.take() else { return (Task::none(), Effect::None) };
+                let written = p.content.text();
+                let written = written.trim_end();
+                if written.trim().is_empty() || written == DEFAULT_PROMPT {
+                    s.model_prompts.remove(&p.model);
+                } else {
+                    s.model_prompts.insert(p.model, written.to_string());
+                }
+                return (Task::none(), Effect::Saved);
+            }
+            Msg::ClosePrompt => self.prompt = None,
+            Msg::Close => {
+                // Closing Settings stops a variant that is being made, and its half-written files are removed.
+                if let Some(lab) = &mut self.lab
+                    && lab.is_running()
+                {
+                    let _ = lab.update(super::lab::Msg::Cancel, ctx.host);
+                }
+                return (Task::done(Message::CloseModal), Effect::None);
+            }
         }
         (Task::none(), Effect::None)
     }
@@ -425,13 +506,15 @@ impl Panel {
         .width(210)
         .height(Fill)
         .padding(16);
-        let content = match self.section {
-            Section::General => self.general(ctx.state, ctx.isolation),
-            Section::Local => self.local(ctx),
-            Section::Hosted => self.hosted(ctx.state),
+        let content = match (&self.prompt, self.section) {
+            (Some(p), _) => prompt_view(p),
+            (None, Section::General) => self.general(ctx.state, ctx.isolation),
+            (None, Section::Local) => self.local(ctx),
+            (None, Section::Hosted) => self.hosted(ctx.state),
         };
         let close = button(icon(Icon::Close, 16.0)).padding(6).style(theme::ghost).on_press(Msg::Close);
-        let body = column![row![space::horizontal(), close], scrollable(container(content).padding(iced::Padding { top: 0.0, right: 24.0, bottom: 24.0, left: 8.0 })).height(Fill).style(theme::scrollbar)];
+        let page = scrollable(container(content).padding(iced::Padding { top: 0.0, right: 24.0, bottom: 24.0, left: 8.0 })).id(PAGE_ID).height(Fill).style(theme::scrollbar);
+        let body = column![row![space::horizontal(), close], page];
         container(row![sidebar, rule::vertical(1).style(theme::divider), body.width(Fill)]).height(600).into()
     }
 
@@ -509,6 +592,9 @@ impl Panel {
     }
 
     fn local<'a>(&'a self, ctx: ViewCtx<'a>) -> Element<'a, Msg> {
+        if let Some(lab) = &self.lab {
+            return lab.view().map(Msg::Lab);
+        }
         let s = &ctx.state.settings;
         let installed: Vec<&ModelOption> = ctx.models.iter().filter(|m| m.provider.is_empty()).collect();
         let mut list = Column::new().spacing(8);
@@ -540,6 +626,8 @@ impl Panel {
                             .text_size(12)
                             .style(theme::select)
                             .menu_style(theme::menu),
+                        button(text(tr("System prompt")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::OpenPrompt(m.name.clone(), m.label.clone())),
+                        button(text(tr("Model lab")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::OpenLab(m.name.clone())),
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center),
@@ -747,8 +835,10 @@ impl Panel {
                 list = list.push(
                     row![
                         text(format!("{} ({provider})", m.name)).size(13).width(Fill),
+                        button(text(tr("System prompt")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::OpenPrompt(m.reference(), m.name.clone())),
                         button(icon(Icon::Close, 14.0)).padding(4).style(theme::ghost).on_press(Msg::RemoveHosted(m.reference())),
                     ]
+                    .spacing(6)
                     .align_y(Alignment::Center),
                 );
             }
@@ -874,6 +964,30 @@ fn removal<'a>() -> Element<'a, Msg> {
 
 fn icons_ok<'a>() -> Element<'a, Msg> {
     super::icons::tinted(Icon::Check, 16.0, |t| t.ok).into()
+}
+
+/// The page that edits one model's system prompt.
+fn prompt_view(p: &PromptPage) -> Element<'_, Msg> {
+    let back = button(row![icon(Icon::ArrowLeft, 14.0), text(tr("Back")).size(13)].spacing(4).align_y(Alignment::Center))
+        .padding([4, 8])
+        .style(theme::ghost)
+        .on_press(Msg::ClosePrompt);
+    let editor = text_editor(&p.content).on_action(Msg::PromptEdit).height(360).size(13).padding(12).font(fonts::mono()).style(theme::bare_editor);
+    let changed = p.content.text().trim_end() != DEFAULT_PROMPT;
+    column![
+        back,
+        text(trf("System prompt: {model}", &[("model", &p.label)])).size(20).font(fonts::ui_semibold()),
+        text(tr("Every conversation on this model starts with these instructions. Scoobert fills in {notes_folder} with the notes folder's name and {shell_tool} with the name of its command tool. Removing the parts about tools, writing files, or notes makes the model use them worse.")).size(12).style(theme::muted),
+        container(editor).width(Fill).style(theme::card),
+        text(tr("A conversation that already started switches to the new prompt at its next message, and the model reads the whole conversation again then, which takes a while on a long one.")).size(12).style(theme::muted),
+        row![
+            button(text(tr("Save")).size(13)).padding([6, 16]).style(theme::primary).on_press(Msg::SavePrompt),
+            button(text(tr("Reset to Scoobert's prompt")).size(13)).padding([6, 12]).style(theme::secondary).on_press_maybe(changed.then_some(Msg::ResetPrompt)),
+        ]
+        .spacing(8),
+    ]
+    .spacing(12)
+    .into()
 }
 
 fn heading<'a>(label: &'static str) -> Element<'a, Msg> {

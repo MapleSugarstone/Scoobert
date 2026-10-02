@@ -40,6 +40,15 @@ pub fn gb(bytes: u64) -> String {
     crate::i18n::trf("{size} GB", &[("size", &n)])
 }
 
+/// Megabytes below a tenth of a gigabyte, where `gb` would show 0.0.
+pub fn size(bytes: u64) -> String {
+    if bytes >= 100_000_000 {
+        return gb(bytes);
+    }
+    let n = format!("{:.1}", bytes as f64 / 1e6).replace('.', &crate::i18n::current().decimal.to_string());
+    crate::i18n::trf("{size} MB", &[("size", &n)])
+}
+
 /// "2.1K" style token counts for the context meter.
 pub fn short_count(n: u64) -> String {
     // Context sizes are powers of two and read as 32K rather than 32.8K.

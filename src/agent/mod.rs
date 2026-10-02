@@ -290,6 +290,11 @@ impl Host {
         &self.http
     }
 
+    /// Whether a task, or the steps after one, is using the local model, so the model lab must not unload it.
+    pub fn model_in_use(&self) -> bool {
+        self.turn_holder.lock().unwrap().is_some() || self.llama.in_use()
+    }
+
     fn emit(&self, event: Event) {
         let _ = self.events.send(event);
     }
@@ -330,7 +335,8 @@ impl Host {
                     usable: true,
                     context: ctx,
                     vision: m.mmproj.is_some(),
-                    reasoning: REASONING_LOCAL.is_match(&m.name),
+                    // A variant made in the model lab carries the name it was given, and its family says what it is.
+                    reasoning: REASONING_LOCAL.is_match(&m.name) || REASONING_LOCAL.is_match(&m.family),
                     size: m.size,
                     memory_needed: self.llama.memory_needed(&m, ctx),
                     name: m.name,
@@ -392,7 +398,7 @@ impl Host {
                 model: m.name.clone(),
                 local: true,
                 thinking_style: providers::ThinkingStyle::None,
-                reasoning: REASONING_LOCAL.is_match(&m.name),
+                reasoning: REASONING_LOCAL.is_match(&m.name) || REASONING_LOCAL.is_match(&m.family),
                 max_tokens_field: "max_tokens",
                 provider_name: "llama-server".into(),
             },
@@ -1463,23 +1469,30 @@ impl Host {
         let s = self.settings();
         let mut c = live.conv.lock().unwrap();
         let general = is_general(&c.cwd);
+        let custom = s.model_prompt(&c.model).unwrap_or_default().to_string();
         if let Some(p) = &c.prompt
             && p.notes_folder == s.notes_folder
             && p.web == s.web_access
             && p.general == general
+            && p.custom == custom
         {
             return (p.system.clone(), p.tools.clone());
         }
-        let system = prompt::system_prompt(&s.notes_folder, self.shell.tool_name());
+        let system = self.system_prompt(&s, &c.model);
         let tools = tools::specs(&self.shell, general, s.web_access);
         // Only a running task pins them, so opening a conversation to read it does not write to its file.
         if live.running.load(Ordering::SeqCst) {
-            let pin = conversation::PinnedPrompt { system: system.clone(), tools: tools.clone(), notes_folder: s.notes_folder.clone(), web: s.web_access, general };
+            let pin = conversation::PinnedPrompt { system: system.clone(), tools: tools.clone(), notes_folder: s.notes_folder.clone(), web: s.web_access, general, custom };
             if let Err(err) = c.set_prompt(pin) {
                 eprintln!("[prompt] {err:#}");
             }
         }
         (system, tools)
+    }
+
+    /// The system prompt for `model`: the user's own for it, or Scoobert's.
+    fn system_prompt(&self, s: &Settings, model: &str) -> String {
+        prompt::system_prompt(s.model_prompt(model).unwrap_or(prompt::DEFAULT_PROMPT), &s.notes_folder, self.shell.tool_name())
     }
 
     /// Creates a project folder for a conversation that has none and moves the conversation into it.
@@ -1635,7 +1648,11 @@ impl Host {
     /// opens its first message.
     async fn opening_prefix(&self, target: &Target, cwd: &Path, thinking: Thinking, environment: &str) -> anyhow::Result<String> {
         let s = self.settings();
-        let system = prompt::system_prompt(&s.notes_folder, self.shell.tool_name());
+        let model = match target {
+            Target::Local(m) => m.name.clone(),
+            Target::Hosted(h, ..) => h.reference(),
+        };
+        let system = self.system_prompt(&s, &model);
         let tools = tools::specs(&self.shell, is_general(cwd), s.web_access);
         let req = ChatRequest { system: &system, messages: &[], tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(target) };
         self.llama.shared_prefix(&stream::payload(&self.endpoint(target), &req), &format!("{environment}\n\n")).await
@@ -1954,27 +1971,39 @@ fn clean_title(answer: &str) -> Option<String> {
 /// for the model to read again, and keeping every written file in the prompt would fill a small context fast.
 fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
     const LONG: usize = tools::SHORTENED_WRITE;
-    let saved: HashSet<String> = messages
+    // Each saved call, and whether its result promised the first and last lines.
+    let saved: HashMap<String, bool> = messages
         .iter()
         .filter_map(|m| match m {
-            Message::Tool(t) if !t.is_error => Some(t.call_id.clone()),
+            Message::Tool(t) if !t.is_error => Some((t.call_id.clone(), t.output.contains(tools::SHORTENED_NOTICE.trim()))),
             _ => None,
         })
         .collect();
     for m in &mut messages {
         let Message::Assistant(a) = m else { continue };
         for call in &mut a.tool_calls {
-            if !saved.contains(&call.id) {
-                continue;
-            }
+            let Some(&ends) = saved.get(&call.id) else { continue };
             let path = call.arg("path").to_string();
             let Some(args) = call.arguments.as_object_mut() else { continue };
             // The text moves to a field of another name, so the history never shows a note where file content goes,
             // which a model copied into new writes.
             for key in ["content", "new_text", "old_text"] {
-                let Some(len) = args.get(key).and_then(Value::as_str).map(|s| s.chars().count()).filter(|&n| n > LONG) else { continue };
+                let Some(text) = args.get(key).and_then(Value::as_str).filter(|s| s.chars().count() > LONG).map(String::from) else { continue };
+                // A note alone read to a model as if it had sent the note instead of code, so it wrote the file again.
+                // Its own first and last lines show that the code went out.
+                let note = if ends {
+                    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+                    format!(
+                        "{} lines saved in full in {path}, shown here by their first and last line to save room.\nFirst line: {}\nLast line: {}",
+                        text.lines().count(),
+                        crate::util::clip(lines.first().copied().unwrap_or_default(), 120),
+                        crate::util::clip(lines.last().copied().unwrap_or_default(), 120),
+                    )
+                } else {
+                    format!("{} characters, saved in full in {path}", text.chars().count())
+                };
                 args.remove(key);
-                args.insert(format!("{key}_saved"), format!("{len} characters, saved in full in {path}").into());
+                args.insert(format!("{key}_saved"), note.into());
             }
         }
     }
@@ -2189,6 +2218,22 @@ mod tests {
         assert!(a.tool_calls[0].arguments.get("content").is_none());
         assert_eq!(a.tool_calls[0].arg("content_saved"), "3000 characters, saved in full in a.ts");
         assert_eq!(a.tool_calls[1].arg("content").len(), 3000);
+    }
+
+    #[test]
+    fn new_long_writes_show_their_first_and_last_lines() {
+        let code = format!("import x from \"y\";\n{}console.log(done);\n", "let a = 1;\n".repeat(200));
+        let call = ToolCall { id: "w".into(), name: "write".into(), arguments: serde_json::json!({ "path": "a.ts", "content": code }) };
+        let output = format!("Created a.ts (now 9 bytes).{}", super::tools::SHORTENED_NOTICE);
+        let messages = vec![
+            Message::Assistant(AssistantMessage { tool_calls: vec![call], ..Default::default() }),
+            Message::Tool(ToolResult { call_id: "w".into(), name: "write".into(), output, is_error: false, diff: None, time: 0 }),
+        ];
+        let out = super::shorten_saved_writes(messages);
+        let Message::Assistant(a) = &out[0] else { panic!() };
+        let note = a.tool_calls[0].arg("content_saved").to_string();
+        assert!(note.starts_with("202 lines saved in full in a.ts"), "{note}");
+        assert!(note.ends_with("First line: import x from \"y\";\nLast line: console.log(done);"), "{note}");
     }
 
     #[test]

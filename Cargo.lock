@@ -4512,13 +4512,14 @@ dependencies = [
 
 [[package]]
 name = "scoobert"
-version = "0.2.12"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "directories",
  "futures",
+ "half",
  "hex",
  "iced",
  "keyring",

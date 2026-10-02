@@ -33,10 +33,11 @@ if ($Release) {
 	$origin = "Copied from $($pkg.Name)"
 }
 
+# The model lab converts models with llama-quantize, so it comes along with the server.
 $keep = Get-ChildItem $source -File | Where-Object {
-	$_.Name -eq 'llama-server.exe' -or
+	$_.Name -in 'llama-server.exe', 'llama-quantize.exe' -or
 	$_.Name -like 'LICENSE*' -or
-	($_.Name -like '*.dll' -and $_.Name -notlike 'ggml-cuda*' -and ($_.Name -notlike 'llama-*-impl.dll' -or $_.Name -eq 'llama-server-impl.dll'))
+	($_.Name -like '*.dll' -and $_.Name -notlike 'ggml-cuda*' -and ($_.Name -notlike 'llama-*-impl.dll' -or $_.Name -in 'llama-server-impl.dll', 'llama-quantize-impl.dll'))
 }
 $keep | Copy-Item -Destination $out
 if (-not (Test-Path (Join-Path $out 'LICENSE*'))) {
