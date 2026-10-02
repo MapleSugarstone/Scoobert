@@ -364,7 +364,7 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if append {
         let lines = outline(&new, path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")));
         if !lines.is_empty() {
-            output.push_str("\nTop-level lines in the file now:");
+            output.push_str("\nTop-level lines in the file now, without the lines inside classes and functions:");
             for line in lines.iter().take(OUTLINE_LINES) {
                 output.push_str(&format!("\n{line}"));
             }
@@ -770,7 +770,7 @@ mod tests {
         assert!(!run(&first, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains("Top-level"));
         let second = call("write", json!({"path": "a.ts", "content": "// weapons\nfunction W() {\n  return 1;\n}\n", "append": true}));
         let out = run(&second, &dir, &shell, &limits, &cancel, |_| {}).await;
-        assert!(out.output.contains("Top-level lines in the file now:\nimport x from \"y\";\nexport const PASSIVES = {\nfunction W() {"), "{}", out.output);
+        assert!(out.output.contains("Top-level lines in the file now, without the lines inside classes and functions:\nimport x from \"y\";\nexport const PASSIVES = {\nfunction W() {"), "{}", out.output);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

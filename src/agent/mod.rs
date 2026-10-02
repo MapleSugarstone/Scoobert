@@ -226,6 +226,26 @@ const NOTES_UPDATE: &str = "<notes_update>Update the project notes from this who
 const PLAN: &str = "Before you write any code, plan this project in its notes. Think through the features the request needs, including the ones it implies but does not name. Write {notes}/Features.md with a # Features heading, an empty ## Done section, and a ## To do section with one line per feature, written as - **Short name**: one sentence about what it does, linked to its page as [[Short name]]. For each feature that needs more than a few lines of code, write {notes}/Short name.md with what it does, the files it will add or change, how it connects to other features through [[links]], and how to check that it works. Put decisions that affect the whole project in {notes}/Decisions.md, with the reason for each. Keep each page short, since you will read them again later instead of the whole conversation.";
 const PLAN_DISCUSS: &str = "Then stop without writing code, and reply with a short summary of the plan and the questions the user should answer before you build.";
 const PLAN_BUILD: &str = "Then build the project from the plan, one feature at a time, in an order where each step can be checked. After each feature works, move its line from To do to Done in Features.md, and correct its page where the build differs from the plan.";
+/// Lines from the end of a file that a cut-off write's result shows.
+const FILE_END_LINES: usize = 6;
+
+/// The last lines of a file with their line numbers, so the model sees exactly where a cut-off write stopped.
+fn file_end(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    let shown: Vec<String> = lines[start..].iter().enumerate().map(|(i, l)| format!("{}: {}", start + i + 1, crate::util::clip(l, 160))).collect();
+    format!("\nThe file now has {} lines and ends with:\n{}", lines.len(), shown.join("\n"))
+}
+
+#[cfg(test)]
+mod file_end_tests {
+    #[test]
+    fn the_end_of_a_file_is_numbered() {
+        let text: String = (1..=10).map(|i| format!("line {i}\n")).collect();
+        assert_eq!(super::file_end(&text, 2), "\nThe file now has 10 lines and ends with:\n9: line 9\n10: line 10");
+    }
+}
+
 /// Context for a message the user sent while a task ran.
 pub const QUEUED: &str = "<queued>The user sent this while you were working. Take it into account, and carry on with the task unless it asks you to change course.</queued>";
 const INTERRUPTED: &str = "<interrupted>The user stopped your previous reply before it finished. Follow this message. Do not resume the stopped work unless this message asks you to.</interrupted>";
@@ -1069,15 +1089,21 @@ impl Host {
                     let mut r = self.run_tool(live, id, &cwd, &call, cancel).await;
                     if !r.is_error {
                         let why = match cut {
-                            Cut::Stopped => format!("The reply was stopped while writing this file, so only its first {lines} lines were saved."),
-                            Cut::Split => format!("One write holds about 200 lines, so Scoobert stopped this one and saved its first {lines} lines."),
-                            Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only its first {lines} lines were saved."),
+                            Cut::Stopped => format!("The reply was stopped while writing this file, so only the first {lines} lines of this call were saved."),
+                            Cut::Split => format!("One write holds about 200 lines, so Scoobert stopped this one and saved the first {lines} lines of this call."),
+                            Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only the first {lines} lines of this call were saved."),
                         };
                         r.output = format!(
-                            "{} {why} Continue from line {} with write and append set to true, and do not write the saved lines again.",
-                            r.output,
-                            lines + 1
+                            "{} {why} Continue from where the file now ends with write and append set to true, and do not write the saved lines again.",
+                            r.output
                         );
+                        // The conversation later shows this call without its text, so the end of the file is the
+                        // only record of where to continue. The outline above leaves out everything inside a class.
+                        if let Some(file) = tools::target_path(&cwd, &call, Some(&notes))
+                            && let Ok(text) = tokio::fs::read_to_string(&file).await
+                        {
+                            r.output.push_str(&file_end(&text, FILE_END_LINES));
+                        }
                     }
                     r
                 }
