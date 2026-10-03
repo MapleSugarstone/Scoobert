@@ -200,8 +200,11 @@ pub enum Message {
     /// Resumes an interrupted task with a hidden note that explains what happened.
     Continue,
     Stop,
-    AttachImage,
-    ImagesPicked(Vec<Image>),
+    AttachFiles,
+    FilesPicked(Vec<PathBuf>),
+    /// Ctrl+V in the message box, which also attaches an image or files from the clipboard.
+    PasteExtra,
+    Pasted(Option<crate::sys::Clipped>),
     FileDropped(PathBuf),
     RemoveImage(usize),
     SetModel(ModelChoice),
@@ -218,6 +221,10 @@ pub enum Message {
     StopJob(u32),
     /// A downloaded model was deleted, by name, or could not be.
     ModelDeleted(Result<String, String>),
+    /// Takes back the newest reply and asks again, saving it as a bad example when true.
+    Retry(bool),
+    /// Saves the newest reply as a good example.
+    RateGood,
     Toggle(String),
     Link(String),
     Copy(String),
@@ -593,6 +600,30 @@ impl App {
             .collect()
     }
 
+    /// Attaches a file to the message being written: an image goes with it when a model can see or describe it, and
+    /// any other file goes in as its path, which the model reads with its tools.
+    fn attach_file(&mut self, path: &std::path::Path) {
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let mime = match ext.as_str() {
+            "png" => Some("image/png"),
+            "jpg" | "jpeg" => Some("image/jpeg"),
+            "gif" => Some("image/gif"),
+            "webp" => Some("image/webp"),
+            _ => None,
+        };
+        if let Some(mime) = mime.filter(|_| self.can_attach_images())
+            && let Ok(bytes) = std::fs::read(path)
+        {
+            use base64::Engine;
+            self.images.push(Image { mime: mime.into(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
+            return;
+        }
+        let shown = crate::paths::display(path);
+        self.composer.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+        let text = if self.composer.text().trim().is_empty() { shown } else { format!(" {shown}") };
+        self.composer.perform(text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(text))));
+    }
+
     /// Whether images can go with a message: the model sees them, or another model can describe them for it.
     fn can_attach_images(&self) -> bool {
         self.models.iter().any(|m| m.usable && m.vision)
@@ -947,58 +978,35 @@ impl App {
                     chat.approvals.clear();
                 }
             }
-            Message::AttachImage => {
+            Message::AttachFiles => {
                 return Task::perform(
-                    async {
-                        let files = rfd::AsyncFileDialog::new()
-                            .add_filter(tr("Images"), &["png", "jpg", "jpeg", "gif", "webp"])
-                            .set_title(tr("Attach images"))
-                            .pick_files()
-                            .await
-                            .unwrap_or_default();
-                        let mut out = Vec::new();
-                        for f in files {
-                            let bytes = f.read().await;
-                            let name = f.file_name().to_lowercase();
-                            let mime = match name.rsplit('.').next() {
-                                Some("jpg" | "jpeg") => "image/jpeg",
-                                Some("gif") => "image/gif",
-                                Some("webp") => "image/webp",
-                                _ => "image/png",
-                            };
-                            use base64::Engine;
-                            out.push(Image { mime: mime.into(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
-                        }
-                        out
-                    },
-                    Message::ImagesPicked,
+                    async { rfd::AsyncFileDialog::new().set_title(tr("Attach files")).pick_files().await.unwrap_or_default().into_iter().map(|f| f.path().to_path_buf()).collect() },
+                    Message::FilesPicked,
                 );
             }
-            Message::ImagesPicked(images) => self.images.extend(images),
-            Message::FileDropped(path) => {
-                let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-                let mime = match ext.as_str() {
-                    "png" => Some("image/png"),
-                    "jpg" | "jpeg" => Some("image/jpeg"),
-                    "gif" => Some("image/gif"),
-                    "webp" => Some("image/webp"),
-                    _ => None,
-                };
-                let vision = self.can_attach_images();
-                match (mime, std::fs::read(&path)) {
-                    (Some(mime), Ok(bytes)) if vision => {
-                        use base64::Engine;
-                        self.images.push(Image { mime: mime.into(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
-                    }
-                    _ => {
-                        // Other files go into the message as a path, which the model can read.
-                        let shown = crate::paths::display(&path);
-                        self.composer.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-                        let text = if self.composer.text().trim().is_empty() { shown } else { format!(" {shown}") };
-                        self.composer.perform(text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(text))));
-                    }
+            Message::FilesPicked(files) => {
+                for file in files {
+                    self.attach_file(&file);
                 }
             }
+            Message::FileDropped(path) => self.attach_file(&path),
+            Message::PasteExtra => {
+                return Task::perform(async { tokio::task::spawn_blocking(crate::sys::clipboard_extra).await.ok().flatten() }, Message::Pasted);
+            }
+            Message::Pasted(Some(crate::sys::Clipped::Image(mime, bytes))) => {
+                if self.can_attach_images() {
+                    use base64::Engine;
+                    self.images.push(Image { mime: mime.into(), data: base64::engine::general_purpose::STANDARD.encode(bytes) });
+                } else {
+                    self.toast(tr("No model that can see images is set up, so the image was left out. Download Qwen3.5 9B in Settings so Scoobert can describe images."));
+                }
+            }
+            Message::Pasted(Some(crate::sys::Clipped::Files(files))) => {
+                for file in files {
+                    self.attach_file(&file);
+                }
+            }
+            Message::Pasted(None) => {}
             Message::RemoveImage(i) => {
                 if i < self.images.len() {
                     self.images.remove(i);
@@ -1053,6 +1061,29 @@ impl App {
                 }
             }
             Message::CloseDrawer => self.sidebar_drawer = false,
+            Message::Retry(bad) => {
+                let (Some(host), Some(id)) = (self.host.clone(), self.chat.as_ref().map(|c| c.id.clone())) else { return Task::none() };
+                match host.retry(&id, bad) {
+                    Ok(()) => {
+                        if let Some(chat) = self.chat.as_mut() {
+                            chat.running = true;
+                            chat.error = None;
+                        }
+                    }
+                    Err(e) => self.toast(format!("{e:#}")),
+                }
+            }
+            Message::RateGood => {
+                let (Some(host), Some(id)) = (self.host.clone(), self.chat.as_ref().map(|c| c.id.clone())) else { return Task::none() };
+                match host.rate_good(&id) {
+                    Ok(()) => {
+                        if let Some(chat) = self.chat.as_mut() {
+                            chat.rated = true;
+                        }
+                    }
+                    Err(e) => self.toast(format!("{e:#}")),
+                }
+            }
             Message::StopJob(job) => {
                 if let (Some(host), Some(chat)) = (&self.host, &self.chat) {
                     host.stop_job(&chat.id, job);
@@ -1986,6 +2017,8 @@ impl App {
                 }
                 match kp.key.as_ref() {
                     Key::Named(Named::Enter) if !kp.modifiers.shift() => Some(Binding::Custom(Message::Send)),
+                    // Text pastes as usual, and an image or copied files on the clipboard attach.
+                    Key::Character(c) if c.eq_ignore_ascii_case("v") && kp.modifiers.command() => Some(Binding::Sequence(vec![Binding::Paste, Binding::Custom(Message::PasteExtra)])),
                     _ => Binding::from_key_press(kp),
                 }
             })
@@ -2037,15 +2070,16 @@ impl App {
                 .into()
         };
         let mut tools = row![].spacing(8).align_y(Alignment::Center);
-        if vision {
-            tools = tools.push(
-                tooltip(
-                    button(icon(Icon::Image, 16.0)).padding(4).style(theme::ghost).on_press(Message::AttachImage),
-                    container(text(tr("Attach images")).size(12)).padding([4, 8]).style(theme::tooltip),
-                    tooltip::Position::Top,
-                ),
-            );
-        }
+        let attach_help = if vision {
+            trf("Attach files or images. You can also paste an image or files with {keys}.", &[("keys", &if cfg!(target_os = "macos") { "Cmd+V" } else { "Ctrl+V" })])
+        } else {
+            tr("Attach files, which the model reads by their path.").to_string()
+        };
+        tools = tools.push(tooltip(
+            button(icon(Icon::Paperclip, 16.0)).padding(4).style(theme::ghost).on_press(Message::AttachFiles),
+            container(text(attach_help).size(12).width(260)).padding([4, 8]).style(theme::tooltip),
+            tooltip::Position::Top,
+        ));
         tools = tools.push(text(tr("Enter to send, Shift+Enter for a new line")).size(12).style(theme::muted));
         tools = tools.push(space::horizontal());
         // Update notes covers the whole conversation, so it sits beside Send rather than on one reply.

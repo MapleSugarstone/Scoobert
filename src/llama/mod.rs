@@ -6,6 +6,7 @@ pub mod download;
 pub mod gguf;
 pub mod gguf_file;
 pub mod lab;
+pub mod learn;
 
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -227,8 +228,32 @@ impl LlamaServer {
             }
             out.push(model);
         }
+        // A model learning from ratings runs with the direction it learned. Variants keep their own steering, whose
+        // layer range the learned direction would have to share.
+        let learning = self.settings().learning;
+        for m in out.iter_mut().filter(|m| m.variant.is_none()) {
+            if let Some(&strength) = learning.get(&m.name) {
+                m.args.extend(learn::args(&dir, m, strength));
+            }
+        }
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         out
+    }
+
+    /// Builds the direction a model learned from its ratings. The steering tool loads the model on its own, so the
+    /// server stops first, and the prompts saved without the direction go.
+    pub async fn learn(&self, name: &str, cancel: &Arc<AtomicBool>, progress: impl Fn(lab::Progress) + Send + Sync + 'static) -> anyhow::Result<()> {
+        let model = self.models().into_iter().find(|m| m.name == name && m.variant.is_none()).with_context(|| format!("There is no model named {name}."))?;
+        let tools = self.tools_dir().context("Scoobert could not find llama.cpp's tools. Reinstall Scoobert.")?;
+        if self.loaded_model().as_deref() == Some(name) {
+            if self.in_use() {
+                bail!(crate::i18n::tr("Scoobert is using this model. Try again after the task finishes."));
+            }
+            self.stop().await;
+        }
+        learn::build(&tools, &model, &self.models_dir(), cancel, progress).await?;
+        forget_slots(name);
+        Ok(())
     }
 
     /// Large models get a smaller default context so the weights and the cache fit in memory together.
@@ -1115,6 +1140,14 @@ fn reasoning_keeping_template(model: &LocalModel) -> Option<PathBuf> {
 /// Deletes what Scoobert stored for a model besides its files: saved prompts, which can take gigabytes, the copy of
 /// its chat template, and the record that it loaded before.
 pub fn forget_saved(model: &str) {
+    forget_slots(model);
+    let safe: String = model.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    let _ = std::fs::remove_file(paths::get().cache.join("templates").join(format!("{safe}.jinja")));
+    let _ = std::fs::remove_file(loaded_marker(model));
+}
+
+/// Deletes a model's saved prompts, which can take gigabytes, as when they no longer match how the model runs.
+pub fn forget_slots(model: &str) {
     let safe: String = model.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
     // Slot files are named model-context-kind-id, and the context keeps one model's prefix from matching another's.
     let saved = regex::Regex::new(&format!(r"^{}-\d+-", regex::escape(&safe))).unwrap();
@@ -1123,8 +1156,6 @@ pub fn forget_saved(model: &str) {
             let _ = std::fs::remove_file(slot.path());
         }
     }
-    let _ = std::fs::remove_file(paths::get().cache.join("templates").join(format!("{safe}.jinja")));
-    let _ = std::fs::remove_file(loaded_marker(model));
 }
 
 fn loaded_marker(model: &str) -> PathBuf {

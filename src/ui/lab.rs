@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::futures::SinkExt;
-use iced::widget::{Column, button, column, container, pick_list, progress_bar, row, slider, space, text, text_input};
+use iced::widget::{Column, button, column, container, pick_list, progress_bar, row, slider, space, text, text_editor, text_input};
 use iced::{Alignment, Element, Fill, Task};
 
 use super::Message;
@@ -84,8 +84,8 @@ pub enum Msg {
     Tab(Tab),
     ToggleTensors,
     Name(String),
-    Toward(String),
-    Away(String),
+    Toward(text_editor::Action),
+    Away(text_editor::Action),
     SteerStrength(f32),
     SteerFirst(LayerChoice),
     SteerLast(LayerChoice),
@@ -119,8 +119,9 @@ pub struct Lab {
     tab: Tab,
     show_tensors: bool,
     name: String,
-    toward: String,
-    away: String,
+    /// The personas, which can run to several paragraphs with example replies.
+    toward: text_editor::Content,
+    away: text_editor::Content,
     steer_strength: f32,
     steer_first: u32,
     steer_last: u32,
@@ -149,8 +150,8 @@ impl Lab {
             details: None,
             tab: Tab::Steer,
             show_tensors: false,
-            toward: String::new(),
-            away: String::new(),
+            toward: text_editor::Content::new(),
+            away: text_editor::Content::new(),
             steer_strength: 2.0,
             steer_first: 0,
             steer_last: 0,
@@ -205,8 +206,8 @@ impl Lab {
             }
             Msg::ToggleTensors => self.show_tensors = !self.show_tensors,
             Msg::Name(v) => self.name = v,
-            Msg::Toward(v) => self.toward = v,
-            Msg::Away(v) => self.away = v,
+            Msg::Toward(action) => self.toward.perform(action),
+            Msg::Away(action) => self.away.perform(action),
             Msg::SteerStrength(v) => self.steer_strength = v,
             Msg::SteerFirst(c) => {
                 self.steer_first = c.first;
@@ -324,7 +325,7 @@ impl Lab {
                 if first < 1 || first > last || last >= l.main {
                     return Err(trf("Steer layers from 1 to {last}.", &[("last", &(l.main.saturating_sub(1)))]));
                 }
-                Job::Steer { toward: self.toward.clone(), away: self.away.clone(), strength: round(self.steer_strength), first, last }
+                Job::Steer { toward: self.toward.text().trim().to_string(), away: self.away.text().trim().to_string(), strength: round(self.steer_strength), first, last }
             }
             Tab::Adapter => Job::Adapter { source: self.source.clone(), strength: round(self.adapter_strength) },
             Tab::Strength => {
@@ -531,8 +532,9 @@ impl Lab {
         let body: Element<'a, Msg> = match self.tab {
             Tab::Steer => column![
                 text(tr("Scoobert runs the model on 24 pairs of the same question with two different personas, measures how each layer responds differently, and adds that difference while the variant runs. Describe each persona as an instruction to the model.")).size(12).style(theme::muted),
-                text_input(tr("Toward, such as: You answer like a pirate captain."), &self.toward).on_input(Msg::Toward).size(13).padding([6, 10]).style(theme::input),
-                text_input(tr("Away from, such as: You answer plainly. (Optional)"), &self.away).on_input(Msg::Away).size(13).padding([6, 10]).style(theme::input),
+                text(tr("A longer description with a few example replies in the voice you want pins the persona down better than one line.")).size(12).style(theme::muted),
+                persona_box(&self.toward, tr("Toward, such as: You answer like a pirate captain."), Msg::Toward),
+                persona_box(&self.away, tr("Away from, such as: You answer plainly. (Optional)"), Msg::Away),
                 strength_row(tr("Strength").to_string(), self.steer_strength, -6.0..=6.0, Msg::SteerStrength),
                 steer_layers,
                 text(tr("The middle layers respond best, so the menus start on the middle half of the model. A narrower range pushes harder on each layer, so it may need a lower strength.")).size(12).style(theme::muted),
@@ -704,6 +706,20 @@ impl Lab {
 /// Two decimals are enough for a strength, and the server's argument stays short.
 fn round(v: f32) -> f32 {
     (v * 100.0).round() / 100.0
+}
+
+/// A persona field that grows with its text and scrolls past a few paragraphs.
+fn persona_box<'a>(content: &'a text_editor::Content, placeholder: &'a str, on_edit: fn(text_editor::Action) -> Msg) -> Element<'a, Msg> {
+    text_editor(content)
+        .placeholder(placeholder)
+        .on_action(on_edit)
+        .height(iced::Length::Shrink)
+        .min_height(34.0)
+        .max_height(260.0)
+        .size(13)
+        .padding([6, 10])
+        .style(theme::field_editor)
+        .into()
 }
 
 fn strength_row<'a>(label: String, value: f32, range: std::ops::RangeInclusive<f32>, on_change: impl Fn(f32) -> Msg + 'a) -> Element<'a, Msg> {

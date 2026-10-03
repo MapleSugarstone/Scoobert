@@ -156,6 +156,8 @@ pub struct Settings {
     pub model_prompts: BTreeMap<String, String>,
     /// Model files the user added from other folders, which Scoobert runs where they are.
     pub model_files: Vec<String>,
+    /// Models that run with the direction they learned from ratings, with its strength.
+    pub learning: BTreeMap<String, f32>,
 }
 
 /// Whether a new conversation's first task plans the project in its notes before it writes code.
@@ -210,6 +212,7 @@ impl Default for Settings {
             plan_first: PlanFirst::Off,
             model_prompts: BTreeMap::new(),
             model_files: Vec::new(),
+            learning: BTreeMap::new(),
         }
     }
 }

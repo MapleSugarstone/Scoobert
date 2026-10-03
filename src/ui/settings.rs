@@ -110,6 +110,9 @@ pub struct Panel {
     cuda_progress: Option<(u64, u64)>,
     cuda_cancel: Option<CancellationToken>,
     cuda_error: Option<String>,
+    /// Ratings and learning for each local model, read when the panel opens and after each change.
+    learned: std::collections::HashMap<String, crate::llama::learn::Summary>,
+    learn_run: Option<LearnRun>,
 }
 
 struct PromptPage {
@@ -188,6 +191,14 @@ pub enum Msg {
     SavePrompt,
     ResetPrompt,
     ClosePrompt,
+    /// Turns learning from ratings on or off for a model.
+    Learning(String, bool),
+    LearnStrength(String, LearnStrength),
+    ApplyLearning(String),
+    LearnProgress(u64, u64),
+    LearnDone(String, Result<(), String>),
+    LearnCancel,
+    ResetLearning(String),
     Close,
 }
 
@@ -214,6 +225,8 @@ impl Panel {
             cuda_progress: None,
             cuda_cancel: None,
             cuda_error: None,
+            learned: std::collections::HashMap::new(),
+            learn_run: None,
         }
     }
 
@@ -234,6 +247,7 @@ impl Panel {
         let s = &mut ctx.state.settings;
         match msg {
             Msg::Init => {
+                self.refresh_learned(ctx.host, s);
                 if let Some(p) = self.provider.clone() {
                     return (self.select_provider(p, ctx.host), Effect::None);
                 }
@@ -427,6 +441,81 @@ impl Panel {
                 return (Task::none(), Effect::ModelsChanged);
             }
             Msg::ModelFilePicked(None) => {}
+            Msg::Learning(name, on) => {
+                if on {
+                    s.learning.insert(name.clone(), 2.0);
+                } else {
+                    s.learning.remove(&name);
+                }
+                // Prompts saved with or without the learned direction no longer match how the model runs.
+                crate::llama::forget_slots(&name);
+                return (Task::none(), Effect::ModelsChanged);
+            }
+            Msg::LearnStrength(name, strength) => {
+                s.learning.insert(name.clone(), strength.0);
+                crate::llama::forget_slots(&name);
+                return (Task::none(), Effect::ModelsChanged);
+            }
+            Msg::ApplyLearning(name) => {
+                let Some(host) = ctx.host.cloned() else { return (Task::none(), Effect::None) };
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.learn_run = Some(LearnRun { model: name.clone(), done: 0, total: 1, cancel: cancel.clone() });
+                let stream = iced::stream::channel(16, async move |mut out: iced::futures::channel::mpsc::Sender<Message>| {
+                    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u64)>();
+                    let model = name.clone();
+                    let job = tokio::spawn(async move {
+                        host.llama
+                            .learn(&model, &cancel, move |p| {
+                                let _ = tx.send((p.done, p.total));
+                            })
+                            .await
+                    });
+                    let mut job = std::pin::pin!(job);
+                    let result = loop {
+                        tokio::select! {
+                            Some((done, total)) = rx.recv() => {
+                                let _ = iced::futures::SinkExt::send(&mut out, Message::Settings(Msg::LearnProgress(done, total))).await;
+                            }
+                            r = &mut job => break r,
+                        }
+                    };
+                    let result = match result {
+                        Ok(r) => r.map_err(|e| if crate::util::is_cancelled(&e) { String::new() } else { format!("{e:#}") }),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = iced::futures::SinkExt::send(&mut out, Message::Settings(Msg::LearnDone(name, result))).await;
+                });
+                return (Task::run(stream, std::convert::identity), Effect::None);
+            }
+            Msg::LearnProgress(done, total) => {
+                if let Some(run) = &mut self.learn_run {
+                    (run.done, run.total) = (done, total);
+                }
+            }
+            Msg::LearnDone(name, result) => {
+                self.learn_run = None;
+                self.refresh_learned(ctx.host, s);
+                return match result {
+                    Ok(()) => {
+                        // Learning that was off turns on, since applying the ratings is asking for it.
+                        s.learning.entry(name.clone()).or_insert(2.0);
+                        (Task::none(), Effect::Toast(trf("{model} now leans toward the replies you rated good.", &[("model", &name)])))
+                    }
+                    Err(e) if e.is_empty() => (Task::none(), Effect::None),
+                    Err(e) => (Task::none(), Effect::Toast(e)),
+                };
+            }
+            Msg::LearnCancel => {
+                if let Some(run) = &self.learn_run {
+                    run.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            Msg::ResetLearning(name) => {
+                crate::llama::learn::reset(&s.models_dir(), &name);
+                crate::llama::forget_slots(&name);
+                self.refresh_learned(ctx.host, s);
+                return (Task::none(), Effect::ModelsChanged);
+            }
             Msg::DeleteModel { name, size, variants } => {
                 return (Task::done(Message::AskConfirm(super::Confirm::DeleteModel { name, size, variants })), Effect::None);
             }
@@ -766,6 +855,9 @@ impl Panel {
                 .padding(12)
                 .style(theme::card),
             );
+            if m.learnable {
+                list = list.push(self.learning_row(m, s));
+            }
         }
         if installed.is_empty() {
             list = list.push(text(tr("No models yet. Download one below.")).size(13).style(theme::muted));
@@ -1102,6 +1194,86 @@ impl Panel {
         .spacing(8)
         .into()
     }
+}
+
+impl Panel {
+    /// Under a model's card: learning from ratings, how many there are, and building or resetting what it learned.
+    fn learning_row<'a>(&'a self, m: &ModelOption, s: &crate::store::Settings) -> Element<'a, Msg> {
+        let summary = self.learned.get(&m.name).copied().unwrap_or_default();
+        let strength = s.learning.get(&m.name).copied();
+        let name = m.name.clone();
+        let mut line = row![
+            text(tr("Learn from ratings")).size(13),
+            super::switch::switch(strength.is_some(), move |on| Msg::Learning(name.clone(), on)),
+            text(trf("{good} good and {bad} bad ratings", &[("good", &summary.good), ("bad", &summary.bad)])).size(12).style(theme::muted),
+            space::horizontal(),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        if let Some(value) = strength {
+            let name = m.name.clone();
+            line = line.push(
+                pick_list(LEARN_STRENGTHS, Some(LearnStrength(value)), move |c| Msg::LearnStrength(name.clone(), c))
+                    .padding([4, 8])
+                    .text_size(12)
+                    .style(theme::select)
+                    .menu_style(theme::menu),
+            );
+        }
+        match &self.learn_run {
+            Some(run) if run.model == m.name => {
+                line = line.push(progress_bar(0.0..=run.total.max(1) as f32, run.done as f32).length(100).girth(6).style(theme::meter));
+                line = line.push(button(text(tr("Stop")).size(12)).padding([3, 10]).style(theme::secondary).on_press(Msg::LearnCancel));
+            }
+            _ => {
+                let label = if summary.learned { trf("Apply {count} new ratings", &[("count", &summary.new)]) } else { tr("Apply ratings").to_string() };
+                let can = summary.can_learn() && self.learn_run.is_none();
+                line = line.push(button(text(label).size(12)).padding([4, 10]).style(theme::secondary).on_press_maybe(can.then(|| Msg::ApplyLearning(m.name.clone()))));
+                if summary.good + summary.bad > 0 || summary.learned {
+                    line = line.push(button(text(tr("Reset")).size(12)).padding([4, 10]).style(theme::ghost).on_press(Msg::ResetLearning(m.name.clone())));
+                }
+            }
+        }
+        let help = if summary.good < crate::llama::learn::MIN_EACH || summary.bad < crate::llama::learn::MIN_EACH {
+            trf("Rate replies with Good and Bad, retry in the conversation. Learning needs at least {count} of each.", &[("count", &crate::llama::learn::MIN_EACH)])
+        } else {
+            tr("Applying unloads the model for several minutes while Scoobert compares the good replies with the bad ones. It changes the model's tone and style, not what it knows.").to_string()
+        };
+        container(column![line, text(help).size(12).style(theme::muted)].spacing(4)).padding(iced::Padding { top: 0.0, right: 12.0, bottom: 4.0, left: 24.0 }).into()
+    }
+
+    /// Reads how many ratings each local model has, for its learning row.
+    fn refresh_learned(&mut self, host: Option<&Arc<Host>>, settings: &crate::store::Settings) {
+        let Some(h) = host else { return };
+        let dir = settings.models_dir();
+        self.learned = h.llama.models().into_iter().filter(|m| m.variant.is_none()).map(|m| (m.name.clone(), crate::llama::learn::summary(&dir, &m.name))).collect();
+    }
+}
+
+/// How strongly a model leans toward what it learned from ratings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LearnStrength(pub f32);
+
+const LEARN_STRENGTHS: [LearnStrength; 3] = [LearnStrength(1.0), LearnStrength(2.0), LearnStrength(crate::llama::learn::MAX_STRENGTH)];
+
+impl std::fmt::Display for LearnStrength {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(tr(if self.0 <= 1.0 {
+            "Gentle"
+        } else if self.0 <= 2.0 {
+            "Moderate"
+        } else {
+            "Strong"
+        }))
+    }
+}
+
+/// Learning from ratings for one model, while the steering tool runs.
+struct LearnRun {
+    model: String,
+    done: u64,
+    total: u64,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The sizes a repository offered when the download did not name one it has.

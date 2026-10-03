@@ -4510,16 +4510,18 @@ dependencies = [
 
 [[package]]
 name = "scoobert"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "clipboard-win",
  "directories",
  "futures",
  "half",
  "hex",
  "iced",
+ "image",
  "keyring",
  "notify",
  "opener",

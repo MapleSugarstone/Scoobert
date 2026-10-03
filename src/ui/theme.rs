@@ -435,6 +435,23 @@ pub fn input(theme: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
+/// A text editor that looks like a text field, for a field that grows with its text.
+pub fn field_editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let t = tokens(theme);
+    let border_color = match status {
+        text_editor::Status::Focused { .. } => t.accent_ink,
+        text_editor::Status::Hovered => t.muted,
+        _ => t.line,
+    };
+    text_editor::Style {
+        background: t.input.into(),
+        border: Border { color: border_color, width: 1.0, radius: Radius::new(RADIUS) },
+        placeholder: t.muted,
+        value: t.text,
+        selection: Color { a: 0.35, ..t.accent },
+    }
+}
+
 pub fn bare_editor(theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
     let t = tokens(theme);
     text_editor::Style {

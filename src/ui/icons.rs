@@ -44,14 +44,17 @@ pub enum Icon {
     Restore,
     Globe,
     Sidebar,
+    ThumbUp,
+    ThumbDown,
+    Paperclip,
 }
 
-const ALL: [Icon; 34] = [
+const ALL: [Icon; 37] = [
     Icon::Plus, Icon::Close, Icon::ChevronRight, Icon::ChevronDown, Icon::ArrowRight, Icon::ArrowLeft, Icon::Search,
     Icon::Folder, Icon::FolderOpen, Icon::Calendar, Icon::Expand, Icon::Shrink, Icon::More, Icon::Copy, Icon::Trash,
     Icon::Pencil, Icon::Stop, Icon::Image, Icon::Panel, Icon::Graph, Icon::Gear, Icon::Check, Icon::Download, Icon::Eye,
     Icon::Refresh, Icon::External, Icon::File, Icon::Key, Icon::Undo,
-    Icon::Minimize, Icon::Maximize, Icon::Restore, Icon::Globe, Icon::Sidebar,
+    Icon::Minimize, Icon::Maximize, Icon::Restore, Icon::Globe, Icon::Sidebar, Icon::ThumbUp, Icon::ThumbDown, Icon::Paperclip,
 ];
 
 fn body(icon: Icon) -> String {
@@ -87,6 +90,9 @@ fn body(icon: Icon) -> String {
         Icon::File => r#"<path d="M14 3.5H7a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8.5z"/><path d="M14 3.5v5h5"/>"#,
         Icon::Key => r#"<circle cx="8" cy="15" r="4"/><path d="m11 12 8.5-8.5M16.5 6.5l2.5 2.5M14.5 8.5l2 2"/>"#,
         Icon::Undo => r#"<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>"#,
+        Icon::Paperclip => r#"<path d="m20 11.5-7.7 7.7a5 5 0 0 1-7.1-7.1l8-8a3.3 3.3 0 0 1 4.7 4.7l-8 8a1.7 1.7 0 0 1-2.4-2.4l7.3-7.3"/>"#,
+        Icon::ThumbUp =>r#"<path d="M7.5 10.5v9h-3a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z"/><path d="M7.5 10.5 11 4a2 2 0 0 1 3.7 1.3L14 9.5h5a2 2 0 0 1 2 2.3l-1.1 6A2 2 0 0 1 17.9 19.5H7.5"/>"#,
+        Icon::ThumbDown => r#"<path d="M7.5 13.5v-9h-3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1z"/><path d="M7.5 13.5 11 20a2 2 0 0 0 3.7-1.3L14 14.5h5a2 2 0 0 0 2-2.3l-1.1-6A2 2 0 0 0 17.9 4.5H7.5"/>"#,
         // Half a unit low, so the line covers one row of pixels at the window-button size instead of two faint ones.
         Icon::Minimize => r#"<path d="M6 12.5h12"/>"#,
         Icon::Maximize => r#"<rect x="6" y="6" width="12" height="12" rx="1.5"/>"#,

@@ -44,6 +44,97 @@ fn amd_free_vram() -> Option<u64> {
         .max()
 }
 
+/// What the clipboard holds besides text: an image with its type, or files copied in the file manager.
+#[derive(Debug, Clone)]
+pub enum Clipped {
+    Image(&'static str, Vec<u8>),
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// Reads an image or copied files from the clipboard, for pasting into a message. The text box pastes text itself.
+pub fn clipboard_extra() -> Option<Clipped> {
+    clip::read()
+}
+
+#[cfg(windows)]
+mod clip {
+    use super::Clipped;
+    use clipboard_win::{formats, get_clipboard};
+
+    pub fn read() -> Option<Clipped> {
+        if let Ok(files) = get_clipboard::<Vec<String>, _>(formats::FileList)
+            && !files.is_empty()
+        {
+            return Some(Clipped::Files(files.into_iter().map(std::path::PathBuf::from).collect()));
+        }
+        let bmp: Vec<u8> = get_clipboard(formats::Bitmap).ok()?;
+        let picture = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp).ok()?;
+        // Screenshots arrive as 32-bit bitmaps whose fourth byte is often zero, which would read as fully transparent.
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(picture.to_rgb8()).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).ok()?;
+        Some(Clipped::Image("image/png", png))
+    }
+}
+
+/// Linux has no clipboard API outside the desktop's own tools, so this asks wl-paste on Wayland and xclip on X11.
+#[cfg(target_os = "linux")]
+mod clip {
+    use super::Clipped;
+    use std::process::{Command, Stdio};
+
+    fn run(program: &str, args: &[&str]) -> Option<Vec<u8>> {
+        let out = Command::new(program).args(args).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        out.status.success().then_some(out.stdout)
+    }
+
+    pub fn read() -> Option<Clipped> {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let get = |kind: &str| if wayland { run("wl-paste", &["--no-newline", "--type", kind]) } else { run("xclip", &["-selection", "clipboard", "-t", kind, "-o"]) };
+        let kinds = if wayland { run("wl-paste", &["--list-types"]) } else { run("xclip", &["-selection", "clipboard", "-t", "TARGETS", "-o"]) }?;
+        let kinds = String::from_utf8_lossy(&kinds).into_owned();
+        let has = |kind: &str| kinds.lines().any(|l| l.trim() == kind);
+        if has("text/uri-list")
+            && let Some(list) = get("text/uri-list")
+        {
+            let files: Vec<std::path::PathBuf> = String::from_utf8_lossy(&list)
+                .lines()
+                .filter_map(|l| reqwest::Url::parse(l.trim()).ok())
+                .filter_map(|u| u.to_file_path().ok())
+                .collect();
+            if !files.is_empty() {
+                return Some(Clipped::Files(files));
+            }
+        }
+        for (kind, mime) in [("image/png", "image/png"), ("image/jpeg", "image/jpeg")] {
+            if has(kind) {
+                return get(kind).filter(|b| !b.is_empty()).map(|b| Clipped::Image(mime, b));
+            }
+        }
+        None
+    }
+}
+
+/// macOS hands the clipboard to AppleScript as hexadecimal, which needs no extra tool.
+#[cfg(target_os = "macos")]
+mod clip {
+    use super::Clipped;
+    use std::process::{Command, Stdio};
+
+    fn script(line: &str) -> Option<String> {
+        let out = Command::new("osascript").args(["-e", line]).stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    pub fn read() -> Option<Clipped> {
+        if let Some(path) = script("POSIX path of (the clipboard as «class furl»)").filter(|p| p.starts_with('/')) {
+            return Some(Clipped::Files(vec![std::path::PathBuf::from(path)]));
+        }
+        let data = script("get the clipboard as «class PNGf»")?;
+        let hex = data.strip_prefix("«data PNGf")?.strip_suffix('»')?;
+        Some(Clipped::Image("image/png", hex::decode(hex).ok()?))
+    }
+}
+
 /// Free space on the drive that holds `path`, measured at the nearest folder that exists, since a models folder is
 /// often created only when the first download starts.
 pub fn free_space(path: &std::path::Path) -> Option<u64> {

@@ -73,6 +73,8 @@ pub struct Chat {
     pub interrupted: bool,
     /// Commands the model left running in the background, by job number.
     pub jobs: Vec<(u32, String)>,
+    /// The newest reply was rated good.
+    pub rated: bool,
     /// Screenshots from browser calls, by call id, decoded once.
     shots: HashMap<String, image::Handle>,
     counter: usize,
@@ -105,6 +107,7 @@ impl Chat {
             queued: Vec::new(),
             interrupted: s.interrupted,
             jobs: s.jobs,
+            rated: false,
             shots: HashMap::new(),
             counter: 0,
             seen: 0,
@@ -160,6 +163,7 @@ impl Chat {
 
     fn push_assistant(&mut self, a: AssistantMessage) {
         self.counter += 1;
+        self.rated = false;
         let key = format!("a{}", self.counter);
         let tools = a.tool_calls.into_iter().map(|call| ToolCard { call, result: None }).collect();
         self.entries.push(Entry::Assistant {
@@ -300,8 +304,10 @@ impl Chat {
         if let Some(n) = &self.notice {
             items = items.push(container(text(n).size(13)).padding([8, 12]).width(Fill).style(theme::banner));
         }
-        for entry in &self.entries {
-            items = items.push(self.entry(entry, md_settings));
+        let last = self.entries.len().saturating_sub(1);
+        for (i, entry) in self.entries.iter().enumerate() {
+            // Only the newest reply can be retried or rated, and only once the task is done.
+            items = items.push(self.entry(entry, md_settings, i == last && !self.running && self.stream.is_none()));
         }
         if let Some(p) = &self.pending {
             items = items.push(user_bubble(p, &[], 0, None));
@@ -371,7 +377,7 @@ impl Chat {
             .into()
     }
 
-    fn entry<'a>(&'a self, entry: &'a Entry, md_settings: markdown::Settings) -> Element<'a, Message> {
+    fn entry<'a>(&'a self, entry: &'a Entry, md_settings: markdown::Settings, newest: bool) -> Element<'a, Message> {
         match entry {
             Entry::User { text, notes, images, time, index } => sent_at(user_bubble(text, notes, *images, Some(*index)), *time),
             Entry::Notice(n) => row![
@@ -389,7 +395,7 @@ impl Chat {
                 }
                 if !md.items().is_empty() {
                     col = col.push(markdown::view_with(md.items(), with_font(md_settings, raw), &Viewer));
-                    col = col.push(reply_actions(raw));
+                    col = col.push(reply_actions(raw, newest.then_some(self.rated)));
                 }
                 for (i, card) in tools.iter().enumerate() {
                     col = col.push(self.tool_card(&format!("{key}-t{i}"), card));
@@ -577,12 +583,18 @@ fn user_bubble<'a>(message: &str, notes: &[String], images: usize, index: Option
     container(row![col.width(Fill), actions].spacing(8)).padding([12, 16]).width(Fill).style(theme::bubble).into()
 }
 
-fn reply_actions<'a>(raw: &str) -> Element<'a, Message> {
-    button(row![icon(Icon::Copy, 13.0), text(tr("Copy")).size(12)].spacing(4).align_y(Alignment::Center))
-        .padding([2, 6])
-        .style(theme::ghost)
-        .on_press(Message::Copy(raw.to_string()))
-        .into()
+/// Copy for every reply. The newest reply also gets Retry, Retry marked bad, and Good, which `rated` says was pressed.
+fn reply_actions<'a>(raw: &str, rated: Option<bool>) -> Element<'a, Message> {
+    let action = |glyph: Icon, label: &str, msg: Option<Message>| {
+        button(row![icon(glyph, 13.0), text(label.to_string()).size(12)].spacing(4).align_y(Alignment::Center)).padding([2, 6]).style(theme::ghost).on_press_maybe(msg)
+    };
+    let mut actions = row![action(Icon::Copy, tr("Copy"), Some(Message::Copy(raw.to_string())))].spacing(2).align_y(Alignment::Center);
+    if let Some(rated) = rated {
+        actions = actions.push(action(Icon::Refresh, tr("Retry"), Some(Message::Retry(false))));
+        actions = actions.push(action(Icon::ThumbDown, tr("Bad, retry"), Some(Message::Retry(true))));
+        actions = actions.push(if rated { action(Icon::Check, tr("Rated good"), None) } else { action(Icon::ThumbUp, tr("Good"), Some(Message::RateGood)) });
+    }
+    actions.into()
 }
 
 fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {

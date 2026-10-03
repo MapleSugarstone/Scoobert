@@ -120,6 +120,8 @@ pub struct ModelOption {
     pub deletable: bool,
     /// Model lab variants that run on this model's file and stop working without it.
     pub variants: usize,
+    /// A local model that is not a variant, so it can learn from ratings.
+    pub learnable: bool,
 }
 
 struct Live {
@@ -151,6 +153,8 @@ struct Live {
     jobs: Arc<jobs::Jobs>,
     /// The browser the model tests pages in, which closes when the task ends.
     browser: tools::BrowserSlot,
+    /// The next run answers the conversation again instead of sending a message, after Retry took back a reply.
+    retry: AtomicBool,
 }
 
 /// Why a file write was cut off partway, which decides what is saved and what the model is told.
@@ -372,6 +376,7 @@ impl Host {
                 let ctx = self.llama.context_for(&m);
                 ModelOption {
                     deletable: m.variant.is_none() && m.path.starts_with(&models_dir),
+                    learnable: m.variant.is_none(),
                     variants: if m.variant.is_none() { variants_of(&m) } else { 0 },
                     label: m.name.clone(),
                     provider: String::new(),
@@ -402,6 +407,7 @@ impl Host {
                 added: None,
                 deletable: false,
                 variants: 0,
+                learnable: false,
             });
         }
         out
@@ -534,6 +540,7 @@ impl Host {
         let live = Arc::new(Live {
             jobs: Arc::new(jobs::Jobs::new(notify)),
             browser: tools::BrowserSlot::default(),
+            retry: AtomicBool::new(false),
             conv: Mutex::new(conv),
             running: AtomicBool::new(false),
             run_cancel: Mutex::new(None),
@@ -763,6 +770,42 @@ impl Host {
         self.start(id, text, images, resume, None, false)
     }
 
+    /// Takes back the last reply and asks the model again, keeping any tool results before it. With `bad`, the reply
+    /// is saved as a bad example for learning first.
+    pub fn retry(self: &Arc<Self>, id: &str, bad: bool) -> anyhow::Result<()> {
+        let live = self.live(id)?;
+        if live.running.load(Ordering::SeqCst) {
+            bail!("Scoobert is still working on the last message.");
+        }
+        {
+            let mut c = live.conv.lock().unwrap();
+            let Some(Message::Assistant(_)) = c.messages.last() else { bail!(tr("There is no reply to retry.")) };
+            let at = c.messages.len() - 1;
+            if c.compaction.as_ref().is_some_and(|k| k.kept_from > at) {
+                bail!(tr("That reply is part of a summary, so it cannot be retried."));
+            }
+            if bad && let Some(rating) = last_rating(&c, false) {
+                crate::llama::learn::record(&c.model, rating)?;
+            }
+            c.rewind(at)?;
+        }
+        self.emit(Event::Replacing { conv: id.into() });
+        live.retry.store(true, Ordering::SeqCst);
+        let started = self.start(id, String::new(), Vec::new(), false, None, false);
+        if started.is_err() {
+            live.retry.store(false, Ordering::SeqCst);
+        }
+        started
+    }
+
+    /// Saves the last reply as a good example for learning.
+    pub fn rate_good(&self, id: &str) -> anyhow::Result<()> {
+        let live = self.live(id)?;
+        let c = live.conv.lock().unwrap();
+        let rating = last_rating(&c, true).context(tr("There is no reply to rate."))?;
+        crate::llama::learn::record(&c.model, rating)
+    }
+
     /// Sends the first message of a conversation with instructions to plan the project in its notes first, and then
     /// either stop for the user or build from the plan.
     pub fn plan(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, then_build: bool) -> anyhow::Result<()> {
@@ -934,12 +977,14 @@ impl Host {
             let summarized = c.compaction.as_ref().is_some_and(|k| k.kept_from + 1 >= c.messages.len());
             (c.model.clone(), c.messages.last().cloned(), summarized)
         };
-        // A message whose run failed before the model answered it is answered now rather than sent again.
-        let unanswered = resume && matches!(last, Some(Message::User(_)));
+        // A message whose run failed before the model answered it is answered now rather than sent again, and so is
+        // the conversation after Retry took back its last reply.
+        let retry = live.retry.swap(false, Ordering::SeqCst);
+        let unanswered = retry || resume && matches!(last, Some(Message::User(_)));
         let target = self.target(&model_name)?;
         let ep = self.endpoint(&target);
         // A local model can start its reply with given text, so Continue picks up a stopped reply where it stopped.
-        let try_continue = resume && !summarized && matches!(target, Target::Local(_)) && matches!(&last, Some(Message::Assistant(a)) if continuable(a));
+        let try_continue = !retry && resume && !summarized && matches!(target, Target::Local(_)) && matches!(&last, Some(Message::Assistant(a)) if continuable(a));
         let mut message = (!unanswered).then_some((text, images, instructions));
         // A model that cannot see images gets the user's images described by one that can, before it loads.
         let mut described = false;
@@ -2270,6 +2315,19 @@ impl Host {
             self.llama.kill_now();
         }
     }
+}
+
+/// The last reply with the user message it answered, for learning. None when the reply holds no text.
+fn last_rating(c: &Conversation, good: bool) -> Option<crate::llama::learn::Rating> {
+    let Some(Message::Assistant(a)) = c.messages.last() else { return None };
+    if a.text.trim().is_empty() {
+        return None;
+    }
+    let asked = c.messages.iter().rev().find_map(|m| match m {
+        Message::User(u) => Some(u.text.clone()),
+        _ => None,
+    })?;
+    Some(crate::llama::learn::Rating { good, asked, reply: a.text.trim().to_string(), time: now_millis() })
 }
 
 /// Describes the run that just ended when it finished normally and changed files outside the notes folder.

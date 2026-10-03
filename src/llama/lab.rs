@@ -601,9 +601,10 @@ async fn steer(
     std::fs::write(&pos, prompt_lines(&model.path, toward.trim()))?;
     std::fs::write(&neg, prompt_lines(&model.path, away))?;
     let mut cmd = tokio::process::Command::new(tool);
-    // A short context keeps the tool from reserving a cache for the model's full context length.
+    // A short context keeps the tool from reserving a cache for the model's full context length, and 4096 tokens
+    // leave room for a persona of several paragraphs with example replies. The tool reads each prompt in one batch.
     cmd.arg("-m").arg(&model.path).arg("--positive-file").arg(&pos).arg("--negative-file").arg(&neg).arg("-o").arg(out);
-    cmd.args(["--method", "mean", "-c", "1024", "-b", "1024", "-ub", "1024"]);
+    cmd.args(["--method", "mean", "-c", "4096", "-b", "4096", "-ub", "512"]);
     let total = QUESTIONS.len() as u64;
     let re = regex::Regex::new(r"Evaluating prompt\[(\d+)/(\d+)\]").unwrap();
     let p = progress.clone();
@@ -673,14 +674,14 @@ async fn adapter(http: &reqwest::Client, model: &LocalModel, folder: &Path, sour
     Ok(file)
 }
 
-fn tool_path(tools: &Path, name: &str) -> anyhow::Result<PathBuf> {
+pub(super) fn tool_path(tools: &Path, name: &str) -> anyhow::Result<PathBuf> {
     let file = tools.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_string() });
     ensure!(file.is_file(), trf("{tool} is missing from {folder}. Reinstall Scoobert to get it.", &[("tool", &name), ("folder", &tools.display())]));
     Ok(file)
 }
 
 /// Runs a llama.cpp tool, passing each line it prints to `on_line`, and stops it when `cancel` is set.
-async fn run_tool(mut cmd: tokio::process::Command, tools: &Path, cancel: &Arc<AtomicBool>, mut on_line: impl FnMut(&str) + Send + 'static) -> anyhow::Result<()> {
+pub(super) async fn run_tool(mut cmd: tokio::process::Command, tools: &Path, cancel: &Arc<AtomicBool>, mut on_line: impl FnMut(&str) + Send + 'static) -> anyhow::Result<()> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     #[cfg(windows)]
     {
