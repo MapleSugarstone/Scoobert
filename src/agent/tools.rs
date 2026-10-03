@@ -482,6 +482,7 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if append && content.is_empty() {
         return Err("Nothing was added, because content was empty. Put the text to add in content.".into());
     }
+    refuse_system_text(&path, content)?;
     // A model writing a long file in parts sometimes leaves out append, and each part then replaces the whole file.
     let wipes = if append { None } else { old.as_deref().and_then(|existing| drops_most(existing, content)) };
     if !confirmed_replace(&path, content, wipes.is_some())
@@ -557,6 +558,36 @@ fn drops_most(old: &str, new: &str) -> Option<(usize, usize)> {
     let have: std::collections::HashSet<&str> = new.lines().map(str::trim).collect();
     let kept = lines.iter().filter(|l| have.contains(*l)).count();
     (kept * 2 < lines.len()).then_some((old.lines().count(), kept))
+}
+
+/// The first line of `text` that holds text Scoobert adds to messages and tool results, such as a ⟦System: …⟧ line or
+/// the link summary read used to put after a note, which a model copied into files.
+fn system_text(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| {
+        l.contains("⟦System") || l.starts_with("[Links in this note:") || l.starts_with("[Linked from:") || l.starts_with("[Scoobert's summary of the note's links")
+    })
+}
+
+/// Refuses text that holds Scoobert's own lines the first time, and lets the same text through when it is sent again,
+/// for the rare file that needs them, such as Scoobert's own source.
+fn refuse_system_text(path: &Path, text: &str) -> Result<(), String> {
+    use std::hash::{Hash, Hasher};
+    static REFUSED: Mutex<Option<std::collections::HashMap<PathBuf, u64>>> = Mutex::new(None);
+    let Some(line) = system_text(text) else { return Ok(()) };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    let hash = hasher.finish();
+    let mut refused = REFUSED.lock().unwrap();
+    let refused = refused.get_or_insert_with(std::collections::HashMap::new);
+    if refused.remove(path) == Some(hash) {
+        return Ok(());
+    }
+    refused.insert(path.to_path_buf(), hash);
+    Err(format!(
+        "Nothing was written to {}, because the text holds a line Scoobert adds to messages and tool results, which is never part of a file:\n{}\nRemove that line and send the text again. If the file really needs it, send the same text again unchanged.",
+        paths::display(path),
+        crate::util::clip(line, 200)
+    ))
 }
 
 /// Whether a write that `wipes` most of `path` repeats the one refused just before it, which means the model meant to
@@ -642,6 +673,10 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let shown = paths::display(&path);
     if old_text.is_empty() {
         return Err("old_text is empty. Use write to create a file.".into());
+    }
+    // Text old_text already holds is in the file, so only lines the edit would add count.
+    if system_text(new_text).is_some() && system_text(old_text).is_none() {
+        refuse_system_text(&path, new_text)?;
     }
     let original = tokio::fs::read_to_string(&path).await.map_err(|e| format!("Could not read {shown}: {e}"))?;
     // Models send \n line endings; a file saved with \r\n is matched and written back with \r\n.
@@ -1015,6 +1050,21 @@ mod tests {
         let long = "- line\n".repeat(400);
         let write = call("write", json!({"path": "Notes/Long.md", "content": long}));
         assert!(run(&write, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains(KEPT_IN_FULL.trim()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn writes_holding_system_text_are_refused_once() {
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (shell, limits, cancel) = (Shell::detect(), Limits::default(), CancellationToken::new());
+        let copied = call("write", json!({"path": "notes.md", "content": "## Progress\n- Done.\n\n⟦System: Showing lines 1-20 of 40.⟧\n"}));
+        let out = run(&copied, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(out.is_error && out.output.contains("Showing lines 1-20"), "{}", out.output);
+        assert!(!dir.join("notes.md").exists());
+        let footer = call("write", json!({"path": "other.md", "content": "text\n[Links in this note: [[Dialogue]] is Notes/Dialogue.md.]\n"}));
+        assert!(run(&footer, &dir, &shell, &limits, &cancel, |_| {}).await.is_error);
+        assert!(!run(&copied, &dir, &shell, &limits, &cancel, |_| {}).await.is_error, "the same text sent again goes through");
         let _ = std::fs::remove_dir_all(dir);
     }
 
