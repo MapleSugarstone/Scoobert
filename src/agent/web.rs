@@ -113,10 +113,11 @@ fn unwrap_redirect(href: &str) -> String {
 
 pub fn format_results(query: &str, results: &[SearchResult]) -> String {
     let mut out = format!("{UNTRUSTED}\nResults for \"{query}\":\n");
+    use super::prompt::outside;
     for (i, r) in results.iter().enumerate() {
-        out.push_str(&format!("\n{}. {}\n   {}\n", i + 1, r.title, r.url));
+        out.push_str(&format!("\n{}. {}\n   {}\n", i + 1, outside(&r.title), outside(&r.url)));
         if !r.snippet.is_empty() {
-            out.push_str(&format!("   {}\n", r.snippet));
+            out.push_str(&format!("   {}\n", outside(&r.snippet)));
         }
     }
     out.push_str("\nRead a promising result with web_read. Use its find option to jump to the part you need.");
@@ -138,7 +139,7 @@ fn check_address(url: &reqwest::Url) -> anyhow::Result<()> {
             Err(_) => false,
         };
     if private {
-        bail!("Scoobert only reads public web pages, not addresses on this computer or network.");
+        bail!("web_read only reads public web pages, not addresses on this computer or network. Use browser_open for a page on this computer.");
     }
     Ok(())
 }
@@ -162,7 +163,7 @@ pub async fn fetch(address: &str) -> anyhow::Result<Page> {
     let final_url = res.url().to_string();
     let kind = res.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_lowercase();
     if kind.contains("pdf") {
-        bail!("{final_url} is a PDF, which Scoobert cannot read yet.");
+        bail!("{final_url} is a PDF, which web_read cannot read yet.");
     }
     if !(kind.is_empty() || kind.contains("html") || kind.contains("text") || kind.contains("json") || kind.contains("xml")) {
         bail!("{final_url} is not a text page ({kind}).");
@@ -262,6 +263,13 @@ async fn render(url: &str) -> Option<String> {
 
 /// A section of the page, from `offset` characters, or the passages around `find` when it is given.
 pub fn format_page(page: &Page, offset: usize, find: Option<&str>, max_chars: usize) -> String {
+    use super::prompt::outside;
+    let page = &Page {
+        url: outside(&page.url),
+        title: outside(&page.title),
+        text: outside(&page.text),
+        links: page.links.iter().map(|(t, h)| (outside(t), outside(h))).collect(),
+    };
     let total = page.text.chars().count();
     let mut out = format!("{UNTRUSTED}\n# {}\n{}\n", if page.title.is_empty() { &page.url } else { &page.title }, page.url);
     if let Some(needle) = find.map(str::trim).filter(|f| !f.is_empty()) {

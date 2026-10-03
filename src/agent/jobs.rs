@@ -132,7 +132,7 @@ impl Jobs {
         let (text, exit) = self.take_new(id, max_output);
         let busy = PORT_IN_USE.is_match(&text).then(|| {
             format!(
-                "\n\nThe server's port is already in use, probably by a server from another test. Port {} is free, so start it there, or use $PORT in the command, which Scoobert sets to a free port. Stop an old server of yours with job_stop.\n{}",
+                "\n\nThe server's port is already in use, probably by a server from another test. Port {} is free, so start it there, or use $PORT in the command, which the system sets to a free port. Stop an old server of yours with job_stop.\n{}",
                 free_port(),
                 self.describe()
             )
@@ -239,7 +239,7 @@ impl Jobs {
         let Ok(output) = self.find(id) else { return (String::new(), Some(None)) };
         let mut o = output.lock().unwrap();
         let from = floor_char(&o.text, o.read.saturating_sub(o.dropped).min(o.text.len()));
-        let mut text = o.text[from..].to_string();
+        let mut text = super::prompt::outside(&o.text[from..]);
         o.read = o.dropped + o.text.len();
         if text.len() > max_output {
             let cut = floor_char(&text, text.len() - max_output);

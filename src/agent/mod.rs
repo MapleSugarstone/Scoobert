@@ -223,7 +223,7 @@ enum Verdict {
     Deny(String),
 }
 
-const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Start with one line that begins with Title: and names the whole task in three to six words. Then write what you need to continue the work without the older ones, as short bullet points under these headings, in this order: ## Goal, ## Next, ## Open problems, ## Decisions (with reasons), ## Done (files changed and why, with exact paths). Keep the whole summary under 400 words. Reply in plain text without tools.";
+const SUMMARY_PROMPT: &str = "Context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Start with one line that begins with Title: and names the whole task in three to six words. Then write what you need to continue the work without the older ones, as short bullet points under these headings, in this order: ## Goal, ## Next, ## Open problems, ## Decisions (with reasons), ## Done (files changed and why, with exact paths). Keep the whole summary under 400 words. Reply in plain text without tools.";
 /// Facts from the note step are three labeled lines of up to 160 characters.
 const REMEMBER_MAX_TOKENS: u32 = 160;
 const IMAGE_HELPER: &str = "You describe images for another AI model that cannot see them. Report only what the image shows.";
@@ -232,7 +232,7 @@ const HELPER_TOKENS: u32 = 800;
 const HELPER_CONTEXT: u32 = 8192;
 /// Free memory left over when the image helper runs beside the conversation's model.
 const HELPER_MARGIN: u64 = 1_000_000_000;
-const TITLE_PROMPT: &str = "Scoobert title step. Reply with a short title for this conversation: 3 to 6 words that name the task, with no quotes and no period. Reply in plain text without tools.";
+const TITLE_PROMPT: &str = "Title step. Reply with a short title for this conversation: 3 to 6 words that name the task, with no quotes and no period. Reply in plain text without tools.";
 const TITLE_MAX_TOKENS: u32 = 24;
 /// Summary length caps. A laptop CPU writes one to four tokens per second, so local summaries stay short.
 const SUMMARY_MAX_TOKENS_LOCAL: u32 = 700;
@@ -250,7 +250,7 @@ const SAVE_DURING_TASK: std::time::Duration = std::time::Duration::from_secs(300
 /// Thinking tokens a local model may spend on a side request before it must answer.
 const SIDE_THINKING_TOKENS: u32 = 16;
 /// Sent with the Continue button, after a crash, a close, or Stop left a task unfinished.
-const RESUME: &str = "Scoobert was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again.";
+const RESUME: &str = "The system was closed or stopped before the last task finished. Continue that task from where it stopped. Files you already read in this conversation have not changed, so do not read them again.";
 /// Added to RESUME when the last reply was stopped while it wrote a file.
 const RESUME_WRITE: &str = "A file you were writing when it stopped was saved up to its last complete line, as its result above says.";
 /// Added to RESUME when the last reply was stopped before it called a tool.
@@ -1262,7 +1262,7 @@ impl Host {
                 // A new project moves the conversation, so each call reads the current folder.
                 let cwd = live.conv.lock().unwrap().cwd.clone();
                 let result = if cancel.is_cancelled() {
-                    ToolResult { call_id: call.id.clone(), name: call.name.clone(), output: "The user stopped Scoobert before this ran.".into(), is_error: true, diff: None, time: now_millis(), ..Default::default() }
+                    ToolResult { call_id: call.id.clone(), name: call.name.clone(), output: "The user stopped the task before this ran.".into(), is_error: true, diff: None, time: now_millis(), ..Default::default() }
                 } else {
                     self.run_tool(live, id, &cwd, &call, cancel).await
                 };
@@ -1328,7 +1328,7 @@ impl Host {
                     if !r.is_error {
                         let why = match cut {
                             Cut::Stopped => format!("The reply was stopped while writing this file, so only the first {lines} lines of this call were saved."),
-                            Cut::Split => format!("One write holds about 200 lines, so Scoobert stopped this one and saved the first {lines} lines of this call."),
+                            Cut::Split => format!("One write holds about 200 lines, so the system stopped this one and saved the first {lines} lines of this call."),
                             Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only the first {lines} lines of this call were saved."),
                         };
                         r.output = format!(
@@ -1674,7 +1674,7 @@ impl Host {
             Ok((helper, text)) => {
                 result.output.push_str(&format!("\n\n{}", prompt::system_block(&format!("You cannot see images, so {helper} looked at the screenshot and described it:\n{text}"))));
             }
-            Err(err) if is_cancelled(&err) => result.output.push_str("\n\nThe user stopped Scoobert before the screenshot was described."),
+            Err(err) if is_cancelled(&err) => result.output.push_str("\n\nThe user stopped the task before the screenshot was described."),
             Err(err) => result.output.push_str(&format!("\n\nThe screenshot could not be described: {err:#} Check the page with browser_read and browser_script instead.")),
         }
     }
@@ -1710,7 +1710,7 @@ impl Host {
         question: &str,
         cancel: &CancellationToken,
     ) -> anyhow::Result<(String, String)> {
-        let helper = self.image_helper().context("No model that can see images is set up. Download Qwen3.5 9B in Settings so Scoobert can describe images.")?;
+        let helper = self.image_helper().context("No model that can see images is set up. Download Qwen3.5 9B in Settings so the system can describe images.")?;
         let mut prompt = format!(
             "Describe this {what} for a programmer who cannot see it. Give the text it shows word for word, then the layout, colors, and sizes of what is on it. Point out anything that looks wrong, such as overlapping or cut-off parts, blank areas, missing images, or error messages. Be specific and brief."
         );
@@ -1735,7 +1735,7 @@ impl Host {
                 if reply.stop == StopReason::Aborted {
                     return Err(crate::util::Cancelled.into());
                 }
-                return Ok((h.name.clone(), reply.text.trim().to_string()));
+                return Ok((h.name.clone(), prompt::outside(reply.text.trim())));
             }
             Target::Local(m) => m,
         };
@@ -1781,7 +1781,8 @@ impl Host {
         if text.is_empty() {
             bail!("{} returned no description.", model.name);
         }
-        Ok((model.name.clone(), text))
+        // An image can show text written to pass for the system's.
+        Ok((model.name.clone(), prompt::outside(&text)))
     }
 
     async fn approve(&self, live: &Live, id: &str, cwd: &Path, call: &ToolCall, cancel: &CancellationToken) -> Verdict {
@@ -1797,7 +1798,7 @@ impl Host {
                 return Verdict::Allow;
             }
             return Verdict::Deny(
-                "Scoobert is working unattended, so it only changes files inside the project folder. Continue without this change, and tell the user about it when they are back."
+                "This task runs unattended, so the system only changes files inside the project folder. Continue without this change, and tell the user about it when they are back."
                     .into(),
             );
         }
@@ -2392,13 +2393,22 @@ fn in_language(question: &str, ask: &str, settings: &Settings) -> String {
 
 /// The model's title answer, cleaned of labels, quotes, and trailing punctuation, when it is usable.
 fn clean_title(answer: &str) -> Option<String> {
-    // A small model can repeat the step's label before its answer.
-    const ECHO: &str = "Scoobert title step";
+    // A small model can repeat the step's label before its answer, with the frame it came in or the older
+    // "Scoobert title step" label.
+    const ECHO: &str = "Title step";
+    const OLD: &str = "Scoobert ";
     let line = answer
         .lines()
-        .map(|l| match l.trim().get(..ECHO.len()) {
-            Some(start) if start.eq_ignore_ascii_case(ECHO) => l.trim()[ECHO.len()..].trim_start_matches(['.', ':', '-', ' ']),
-            _ => l.trim(),
+        .map(|l| {
+            let l = l.trim().trim_start_matches("⟦System:").trim_end_matches('⟧').trim();
+            let l = match l.get(..OLD.len()) {
+                Some(start) if start.eq_ignore_ascii_case(OLD) => &l[OLD.len()..],
+                _ => l,
+            };
+            match l.get(..ECHO.len()) {
+                Some(start) if start.eq_ignore_ascii_case(ECHO) => l[ECHO.len()..].trim_start_matches(['.', ':', '-', ' ']),
+                _ => l,
+            }
         })
         .find(|l| !l.is_empty())?;
     let line = line.trim_start_matches(['#', '*', ' ']);
@@ -2511,7 +2521,7 @@ fn past_conversations(cwd: &Path, current: &str, message: &str) -> Option<String
         .take(15)
         .map(|s| {
             let date = chrono::DateTime::from_timestamp_millis(s.modified).map(|d| d.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()).unwrap_or_default();
-            format!("- {} ({date}): read conversation:{}", s.title, &s.id[..s.id.len().min(8)])
+            format!("- {} ({date}): read conversation:{}", prompt::outside(&s.title), &s.id[..s.id.len().min(8)])
         })
         .collect();
     if list.is_empty() {
@@ -2555,7 +2565,7 @@ fn answer_dangling_calls(conv: &mut Conversation) -> anyhow::Result<()> {
         conv.push(Message::Tool(ToolResult {
             call_id: c.id,
             name: c.name,
-            output: "Scoobert closed before this ran.".into(),
+            output: "The system closed before this ran.".into(),
             is_error: true,
             time: now_millis(),
             ..Default::default()
@@ -2760,6 +2770,7 @@ mod tests {
         assert_eq!(clean_title("Scoobert title step"), None);
         assert_eq!(clean_title("Scoobert title step.\nFind the first public function").as_deref(), Some("Find the first public function"));
         assert_eq!(clean_title("scoobert title step: Save loader").as_deref(), Some("Save loader"));
+        assert_eq!(clean_title("⟦System:\nTitle step\n⟧\nBattle engine fixes").as_deref(), Some("Battle engine fixes"));
     }
 
     fn user(n: usize) -> Message {

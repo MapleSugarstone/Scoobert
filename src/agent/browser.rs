@@ -17,7 +17,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::oneshot;
 
 use super::conversation::Image;
-use super::prompt::system_note;
+use super::prompt::{outside, system_note};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -205,9 +205,9 @@ impl Browser {
     /// The page's text from `offset`, its numbered controls, and console messages the model has not seen.
     pub async fn read(&mut self, offset: usize) -> anyhow::Result<String> {
         let page = self.eval(SNAPSHOT).await?["value"].clone();
-        let url = page["url"].as_str().unwrap_or_default();
-        let title = page["title"].as_str().unwrap_or_default();
-        let text = page["text"].as_str().unwrap_or_default();
+        let url = &outside(page["url"].as_str().unwrap_or_default());
+        let title = &outside(page["title"].as_str().unwrap_or_default());
+        let text = &outside(page["text"].as_str().unwrap_or_default());
         let mut out = String::new();
         if !is_local(url) {
             out.push_str(super::web::UNTRUSTED);
@@ -231,7 +231,7 @@ impl Browser {
         if !controls.is_empty() {
             out.push_str("\nControls, by the number browser_click and browser_type take as element:\n");
             for c in controls {
-                out.push_str(c);
+                out.push_str(&outside(c));
                 out.push('\n');
             }
             if let Some(n) = page["hidden"].as_u64().filter(|&n| n > 0) {
@@ -311,7 +311,7 @@ impl Browser {
         let params = json!({ "expression": code, "returnByValue": true, "awaitPromise": true, "userGesture": true, "replMode": true, "timeout": 20000 });
         let r = self.cdp.call("Runtime.evaluate", params).await?;
         if let Some(details) = r.get("exceptionDetails") {
-            bail!("The script threw an error: {}{}", exception_text(details), self.console_news());
+            bail!("The script threw an error: {}{}", outside(&exception_text(details)), self.console_news());
         }
         let result = &r["result"];
         let value = match result.get("value") {
@@ -319,7 +319,7 @@ impl Browser {
             Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
             None => result["unserializableValue"].as_str().or(result["description"].as_str()).unwrap_or("undefined").to_string(),
         };
-        let mut out = crate::util::clip(&value, SCRIPT_CHARS);
+        let mut out = crate::util::clip(&outside(&value), SCRIPT_CHARS);
         out.push_str(&self.console_news());
         Ok(out)
     }
@@ -328,8 +328,8 @@ impl Browser {
     pub async fn screenshot(&mut self) -> anyhow::Result<(Image, String)> {
         let r = self.cdp.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 })).await?;
         let data = r["data"].as_str().context("The browser returned no screenshot.")?.to_string();
-        let url = self.location().await;
-        let title = self.eval("document.title").await.ok().and_then(|v| v["value"].as_str().map(str::to_string)).unwrap_or_default();
+        let url = outside(&self.location().await);
+        let title = outside(&self.eval("document.title").await.ok().and_then(|v| v["value"].as_str().map(str::to_string)).unwrap_or_default());
         let what = if title.is_empty() { url.clone() } else { format!("{title} ({url})") };
         let mut line = format!("Took a screenshot of {what}.");
         line.push_str(&self.console_news());
@@ -729,13 +729,13 @@ async fn read_loop(mut read: BufReader<OwnedReadHalf>, writer: Writer, pending: 
             "Page.javascriptDialogOpening" => {
                 let answer = json!({ "id": 0, "method": "Page.handleJavaScriptDialog", "params": { "accept": true } }).to_string();
                 let _ = send(&writer, 0x1, answer.as_bytes()).await;
-                Some(format!("The page showed a {} box, which Scoobert accepted: {}", params["type"].as_str().unwrap_or("dialog"), params["message"].as_str().unwrap_or_default()))
+                Some(format!("The page showed a {} box, which the system accepted: {}", params["type"].as_str().unwrap_or("dialog"), params["message"].as_str().unwrap_or_default()))
             }
             _ => None,
         };
         if let Some(line) = line {
             let mut c = console.lock().unwrap();
-            c.lines.push_back(crate::util::clip(&line, 600));
+            c.lines.push_back(crate::util::clip(&outside(&line), 600));
             c.total += 1;
             while c.lines.len() > MAX_CONSOLE {
                 c.lines.pop_front();
