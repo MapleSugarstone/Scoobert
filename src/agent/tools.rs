@@ -505,7 +505,9 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     };
     let mut output = format!("{verb} {shown} (now {} bytes).", new.len());
     // The note that replaces long content in the conversation reads like a failed write unless it is explained.
-    if content.len() > SHORTENED_WRITE {
+    if content.len() > SHORTENED_WRITE && kept_in_full(limits, &path, content.len()) {
+        output.push_str(KEPT_IN_FULL);
+    } else if content.len() > SHORTENED_WRITE {
         output.push_str(SHORTENED_NOTICE);
     }
     // After a part is added, the file's top-level lines show what earlier parts already declared.
@@ -525,6 +527,23 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
 }
 
 const OUTLINE_LINES: usize = 40;
+
+/// The lines of `text` most like the start of `wanted`, as many as `wanted` has up to twelve, when some line is at
+/// least half alike. A model that remembers its own earlier text slightly wrong can then copy the real text.
+fn closest_text(text: &str, wanted: &str) -> Option<String> {
+    let first = wanted.lines().map(str::trim).find(|l| l.len() > 2)?;
+    let lines: Vec<&str> = text.lines().collect();
+    let (at, score) = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (i, similar::TextDiff::from_chars(first, l.trim()).ratio()))
+        .max_by(|a, b| a.1.total_cmp(&b.1))?;
+    if score < 0.5 {
+        return None;
+    }
+    let wanted_lines = wanted.lines().count().clamp(1, 12);
+    Some(lines[at..(at + wanted_lines).min(lines.len())].join("\n"))
+}
 
 /// The existing file's line count and how many of its lines `new` keeps, when a file of ten or more lines that say
 /// something would lose more than half of them. Short lines such as a closing brace match by chance, so they do not
@@ -562,6 +581,18 @@ pub const SHORTENED_WRITE: usize = 1500;
 /// Ends the result of a long write. `shorten_saved_writes` looks for it, so writes made before it existed keep the
 /// older, shorter note and their conversations keep their saved caches.
 pub const SHORTENED_NOTICE: &str = " From here on the conversation shows this call by its first and last lines, to save room. The file holds all of it.";
+
+/// Ends the result of a long write or edit to a note, which `shorten_saved_writes` leaves in full. A model edits a note
+/// right after writing it, from the text it remembers, and a note shown by its first and last lines made those edits
+/// miss. Calls made before this existed have no marker and stay shortened, so their conversations keep their caches.
+pub const KEPT_IN_FULL: &str = " The conversation keeps this note's text in full.";
+
+/// Notes up to this size stay in full in the conversation.
+const NOTE_IN_FULL: usize = 12_000;
+
+fn kept_in_full(limits: &Limits, path: &Path, size: usize) -> bool {
+    size <= NOTE_IN_FULL && limits.notes.as_deref().is_some_and(|notes| path.starts_with(notes))
+}
 
 /// Whether a command writes a file from a heredoc or a PowerShell here-string. Only the line that opens a heredoc
 /// is checked for a redirect, since the text inside it is often code with `>` in it.
@@ -616,7 +647,15 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let new_n = new_text.replace("\r\n", "\n");
     let count = text.matches(&old_n).count();
     if count == 0 {
-        return Err(format!("old_text was not found in {shown}. Read the file again and copy the text exactly, including indentation."));
+        if old_n.contains("Links in this note:") || old_n.contains("Linked from:") || old_n.contains(super::prompt::NOT_IN_FILE) {
+            return Err(format!(
+                "old_text was not found in {shown}, because the line about the note's links is a summary that read adds after the file's text, not part of the file. To add text at the end of the file, use write with append set to true."
+            ));
+        }
+        return Err(match closest_text(&text, &old_n) {
+            Some(near) => format!("old_text was not found in {shown}. The closest text in the file is:\n{near}\nCopy the text exactly from the file, including indentation, or read the file again."),
+            None => format!("old_text was not found in {shown}. Read the file again and copy the text exactly, including indentation."),
+        });
     }
     if count > 1 && !all {
         return Err(format!(
@@ -626,7 +665,11 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let updated = if all { text.replace(&old_n, &new_n) } else { text.replacen(&old_n, &new_n, 1) };
     let written = if crlf { updated.replace('\n', "\r\n") } else { updated.clone() };
     tokio::fs::write(&path, &written).await.map_err(|e| format!("Could not write {shown}: {e}"))?;
-    let output = if count > 1 { format!("Edited {shown} in {count} places.") } else { format!("Edited {shown}.") };
+    let mut output = if count > 1 { format!("Edited {shown} in {count} places.") } else { format!("Edited {shown}.") };
+    let longest = old_text.len().max(new_text.len());
+    if longest > SHORTENED_WRITE && kept_in_full(limits, &path, longest) {
+        output.push_str(KEPT_IN_FULL);
+    }
     Ok(Outcome { output, diff: Some(unified_diff(&text, &updated)), ..Default::default() })
 }
 
@@ -949,6 +992,25 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
         assert!(restore_checkpoint(&dir.join("checkpoints"), &c.id).unwrap().is_ok());
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn failed_edits_point_at_the_real_text() {
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(dir.join("Notes")).unwrap();
+        std::fs::write(dir.join("Notes/Problems.md"), "# Problems\n\n- **Battle constructor mismatch (active, blocks smoke test)**: the constructor takes a config.\n").unwrap();
+        let limits = Limits { notes: Some(dir.join("Notes")), ..Limits::default() };
+        let (shell, cancel) = (Shell::detect(), CancellationToken::new());
+        let remembered = call("edit", json!({"path": "Notes/Problems.md", "old_text": "- **Battle constructor mismatch (blocking the smoke test)**: the constructor takes a config.", "new_text": "x"}));
+        let out = run(&remembered, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(out.is_error && out.output.contains("(active, blocks smoke test)"), "{}", out.output);
+        let footer = call("edit", json!({"path": "Notes/Problems.md", "old_text": "[Links in this note: [[Dialogue]] is Notes/Dialogue.md.]", "new_text": "x"}));
+        let out = run(&footer, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(out.output.contains("append set to true"), "{}", out.output);
+        let long = "- line\n".repeat(400);
+        let write = call("write", json!({"path": "Notes/Long.md", "content": long}));
+        assert!(run(&write, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains(KEPT_IN_FULL.trim()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

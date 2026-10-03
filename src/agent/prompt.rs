@@ -215,13 +215,20 @@ pub fn link_summary(vault: &Vault, rel: &str, folder: &str) -> String {
     let backlinks: Vec<String> = vault.backlinks(rel).into_iter().take(MAX).map(|b| format!("{folder}/{}", b.path)).collect();
     let mut out = Vec::new();
     if !links.is_empty() {
-        out.push(format!("[Links in this note: {}.]", links.join("; ")));
+        out.push(format!("Links in this note: {}.", links.join("; ")));
     }
     if !backlinks.is_empty() {
-        out.push(format!("[Linked from: {}.]", backlinks.join(", ")));
+        out.push(format!("Linked from: {}.", backlinks.join(", ")));
     }
-    out.join("\n")
+    if out.is_empty() {
+        return String::new();
+    }
+    // A model copied this line into an edit as if it were the end of the file, so it says that it is not.
+    format!("[{} {}]", NOT_IN_FILE, out.join(" "))
 }
+
+/// Opens the link summary the read tool adds after a note's text.
+pub const NOT_IN_FILE: &str = "Scoobert's summary of the note's links, not part of the file:";
 
 /// A finished task: the request, the final reply, the files it changed outside the notes folder, and the related notes.
 pub struct FinishedTask {

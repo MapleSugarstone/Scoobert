@@ -2404,11 +2404,14 @@ fn clean_title(answer: &str) -> Option<String> {
 /// for the model to read again, and keeping every written file in the prompt would fill a small context fast.
 fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
     const LONG: usize = tools::SHORTENED_WRITE;
-    // Each saved call, and whether its result promised the first and last lines.
+    // Each saved call, and whether its result promised the first and last lines. Notes whose result says they stay
+    // in full are left out.
     let saved: HashMap<String, bool> = messages
         .iter()
         .filter_map(|m| match m {
-            Message::Tool(t) if !t.is_error => Some((t.call_id.clone(), t.output.contains(tools::SHORTENED_NOTICE.trim()))),
+            Message::Tool(t) if !t.is_error && !t.output.contains(tools::KEPT_IN_FULL.trim()) => {
+                Some((t.call_id.clone(), t.output.contains(tools::SHORTENED_NOTICE.trim())))
+            }
             _ => None,
         })
         .collect();
