@@ -74,7 +74,7 @@ pub enum Msg {
 /// The 9B, plus the best larger model that fits this computer's memory.
 fn default_selection() -> Vec<bool> {
     let usable = crate::sys::total_memory().saturating_sub(HEADROOM);
-    let best = (1..CATALOG.len()).rev().find(|&i| memory_needed(&CATALOG[i]) <= usable);
+    let best = (1..CATALOG.len()).rev().find(|&i| CATALOG[i].pick && memory_needed(&CATALOG[i]) <= usable);
     (0..CATALOG.len()).map(|i| i == 0 || Some(i) == best).collect()
 }
 
@@ -117,7 +117,7 @@ impl Setup {
                     Ok(name) => {
                         // The first model that arrives becomes the default, and a larger catalog model replaces the 9B.
                         let current_missing = host.is_none_or(|h| !h.llama.models().iter().any(|m| m.name == state.settings.model));
-                        let larger = finished.is_some_and(|d| matches!(d.job, Job::Catalog(i) if i > 0));
+                        let larger = finished.is_some_and(|d| matches!(d.job, Job::Catalog(i) if i > 0 && CATALOG[i].pick));
                         if current_missing || larger {
                             state.settings.model = name;
                         }

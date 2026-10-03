@@ -122,6 +122,10 @@ pub struct ModelOption {
     pub variants: usize,
     /// A local model that is not a variant, so it can learn from ratings.
     pub learnable: bool,
+    /// The local model's architecture, since a draft model must share it, and whether its file holds layers that
+    /// predict several words at once.
+    pub arch: String,
+    pub mtp: bool,
 }
 
 struct Live {
@@ -179,6 +183,12 @@ impl Drop for Turn {
         *self.holder.lock().unwrap() = None;
     }
 }
+
+/// The local model held by a benchmark. Dropping it lets waiting tasks run.
+pub struct ModelHold(#[allow(dead_code)] Turn);
+
+/// Stands in `turn_holder` for a benchmark, and cannot be a conversation's id.
+const BENCHMARK_HOLDER: &str = "\u{0}benchmark";
 
 /// Another conversation's task that holds the local model.
 #[derive(Debug, Clone)]
@@ -374,7 +384,10 @@ impl Host {
             .cloned()
             .map(|m| {
                 let ctx = self.llama.context_for(&m);
+                let (arch, mtp) = crate::llama::gguf::kind(&m.path);
                 ModelOption {
+                    arch,
+                    mtp,
                     deletable: m.variant.is_none() && m.path.starts_with(&models_dir),
                     learnable: m.variant.is_none(),
                     variants: if m.variant.is_none() { variants_of(&m) } else { 0 },
@@ -408,6 +421,8 @@ impl Host {
                 deletable: false,
                 variants: 0,
                 learnable: false,
+                arch: String::new(),
+                mtp: false,
             });
         }
         out
@@ -870,6 +885,7 @@ impl Host {
                 // The holder is another conversation's task, or this conversation's steps after its last task.
                 let text = || match self.local_task_elsewhere(id) {
                     Some(other) => trf("Waiting for “{title}” to finish", &[("title", &other.title)]),
+                    None if self.turn_holder.lock().unwrap().as_deref() == Some(BENCHMARK_HOLDER) => tr("Waiting for the benchmark to finish").into(),
                     None => tr("Getting ready...").into(),
                 };
                 self.wait_showing(id, text, self.local_turn.clone().lock_owned(), cancel).await?
@@ -887,6 +903,19 @@ impl Host {
             }
         }
         Ok(())
+    }
+
+    /// Waits until no conversation's task holds the local model, then holds it for a benchmark until the hold drops.
+    pub async fn hold_model(&self) -> ModelHold {
+        let guard = self.local_turn.clone().lock_owned().await;
+        *self.turn_holder.lock().unwrap() = Some(BENCHMARK_HOLDER.to_string());
+        self.stop_baking();
+        for l in self.convs.lock().unwrap().values() {
+            if let Some(t) = l.cache_cancel.lock().unwrap().as_ref() {
+                t.cancel();
+            }
+        }
+        ModelHold(Turn { holder: self.turn_holder.clone(), _guard: guard })
     }
 
     /// Lets the next waiting task use the local model.
@@ -1167,7 +1196,11 @@ impl Host {
             self.emit(Event::Activity { conv: id.into(), text: Some(tr("Reading...").into()) });
             let (system, messages, thinking) = self.request_parts(live);
             let tools = self.tool_specs(live);
-            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(&target) };
+            // The reply stops early enough that the summary after it can still be asked with the whole conversation,
+            // which a local model has cached.
+            let room = self.context_window(target).saturating_sub(self.prompt_tokens(live) + summary_room(ep.local));
+            let max_tokens = self.max_tokens(target).min(room.max(1024) as u32);
+            let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens };
             let mut body = stream::payload(&ep, &req);
             if ep.local {
                 body["return_progress"] = true.into();
@@ -1433,9 +1466,9 @@ impl Host {
     fn too_long(&self, live: &Live, target: &Target) -> bool {
         let ctx = self.context_window(target);
         let thinking = live.conv.lock().unwrap().thinking;
-        // A write the context cuts off keeps its complete lines, so the reserve only covers the thinking and a short
-        // reply, and the summary waits as long as it can.
-        let reserve = (thinking.budget() as u64 + 2048).min(ctx / 3);
+        // A write the context cuts off keeps its complete lines, so the reserve only covers the thinking, a short
+        // reply, and the summary request after them, and the summary waits as long as it can.
+        let reserve = (thinking.budget() as u64 + 2048).min(ctx / 3) + summary_room(matches!(target, Target::Local(_)));
         self.prompt_tokens(live) + reserve > ctx
     }
 
@@ -1466,8 +1499,22 @@ impl Host {
 
     /// Replaces older messages with a summary the model writes, so a long task can continue.
     /// `extend` asks with the whole conversation, which a local model has cached, so only the question is read.
-    /// It is false after the server rejected the conversation as too long, when only the older part fits.
+    /// It is false after the server rejected the conversation as too long, when only the older part fits. A failed
+    /// attempt is tried again with only the older part, so a long task does not stop for the user.
     async fn compact(self: &Arc<Self>, live: &Arc<Live>, id: &str, target: &Target, ep: &Endpoint, extend: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
+        // A tool result can fill the context after the reply, leaving no room for the summary after the whole
+        // conversation.
+        let extend = extend && self.prompt_tokens(live) + summary_room(ep.local) <= self.context_window(target);
+        match self.compact_once(live, id, target, ep, extend, cancel).await {
+            Err(err) if !is_cancelled(&err) => {
+                eprintln!("[summary] {err:#}");
+                self.compact_once(live, id, target, ep, false, cancel).await
+            }
+            done => done,
+        }
+    }
+
+    async fn compact_once(self: &Arc<Self>, live: &Arc<Live>, id: &str, target: &Target, ep: &Endpoint, extend: bool, cancel: &CancellationToken) -> anyhow::Result<()> {
         let conv = live.conv.lock().unwrap().clone();
         let start = conv.compaction.as_ref().map(|c| c.kept_from).unwrap_or(0);
         let keep_chars = (self.context_window(target) as f64 * KEEP_SHARE * CHARS_PER_TOKEN) as usize;
@@ -2481,6 +2528,13 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
 /// tiny budget instead. A hosted model simply does not think.
 fn side_thinking(ep: &Endpoint, live: &Live) -> (Thinking, Option<u32>) {
     if ep.local { (live.conv.lock().unwrap().thinking, Some(SIDE_THINKING_TOKENS)) } else { (Thinking::Off, None) }
+}
+
+/// Tokens a summary request adds after the whole conversation: the question, the thinking, the summary, and the
+/// chat template around them.
+fn summary_room(local: bool) -> u64 {
+    let summary = if local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED };
+    (SUMMARY_PROMPT.len() as f64 / CHARS_PER_TOKEN) as u64 + (summary + SIDE_THINKING_TOKENS) as u64 + 256
 }
 
 /// Where a conversation keeps the previous versions of files the model changed.

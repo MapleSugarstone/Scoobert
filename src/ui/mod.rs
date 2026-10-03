@@ -1,5 +1,6 @@
 //! The Scoobert window: projects and conversations on the left, the conversation in the middle, notes on the right.
 
+pub mod bench;
 pub mod chat;
 pub mod fonts;
 pub mod graph;
@@ -1354,6 +1355,10 @@ impl App {
                 self.toast(trf("The graphics card could not load {model}, so it runs on the processor.", &[("model", model)]));
                 return Task::none();
             }
+            Event::Server(ServerStatus::SpecFailed(model)) => {
+                self.toast(trf("{model} could not load while predicting ahead, so it runs without that until Scoobert restarts.", &[("model", model)]));
+                return Task::none();
+            }
             Event::Server(ServerStatus::CudaFailed(model)) => {
                 self.toast(trf("NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.", &[("model", model)]));
                 return Task::none();
@@ -1939,7 +1944,9 @@ impl App {
         }
         match &self.server {
             ServerStatus::Stopped => (|t| t.muted, tr("Model not loaded").into()),
-            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) | ServerStatus::CudaFailed(m) => (|t| t.warn, trf("Loading {model}", &[("model", m)])),
+            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) | ServerStatus::CudaFailed(m) | ServerStatus::SpecFailed(m) => {
+                (|t| t.warn, trf("Loading {model}", &[("model", m)]))
+            }
             ServerStatus::Ready(m) => (|t| t.ok, trf("{model} loaded", &[("model", m)])),
             ServerStatus::Error(_) => (|t| t.danger, tr("The model stopped").into()),
         }

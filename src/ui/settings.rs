@@ -138,6 +138,9 @@ pub enum Msg {
     PreloadModel(bool),
     UseGpu(bool),
     ModelsFromDisk(bool),
+    CompactContext(bool),
+    /// How a model predicts words ahead for itself to check.
+    Predict(String, PredictChoice),
     ModelsDir(String),
     CommitModelsDir,
     BrowseModelsDir,
@@ -311,6 +314,23 @@ impl Panel {
             Msg::ModelsFromDisk(on) => {
                 s.models_from_disk = on;
                 return (Task::none(), Effect::Saved);
+            }
+            Msg::CompactContext(on) => {
+                s.compact_context = on;
+                // A saved prompt holds the context in the precision it was read with, so none can be restored.
+                crate::llama::forget_all_slots();
+                return (Task::none(), Effect::ModelsChanged);
+            }
+            Msg::Predict(model, choice) => {
+                if choice.value.is_empty() {
+                    s.speculation.remove(&model);
+                } else {
+                    s.speculation.insert(model.clone(), choice.value);
+                }
+                if let Some(host) = ctx.host {
+                    host.llama.forget_spec_failure(&model);
+                }
+                return (Task::none(), Effect::ModelsChanged);
             }
             Msg::CudaDownload => {
                 let Some(Some(gpu)) = cuda::detected() else { return (Task::none(), Effect::None) };
@@ -856,6 +876,7 @@ impl Panel {
                 .style(theme::card),
             );
             if m.learnable {
+                list = list.push(predict_row(m, s, ctx.models));
                 list = list.push(self.learning_row(m, s));
             }
         }
@@ -978,6 +999,12 @@ impl Panel {
                 tr("Lets a model that does not fit in free memory keep part of its weights on the disk and read them as virtual memory while it works. It runs much slower: a mixture-of-experts model manages a few words per second from an SSD, and other models can take several seconds per word."),
                 s.models_from_disk,
                 Msg::ModelsFromDisk
+            ),
+            switch_row(
+                tr("Compact context memory"),
+                tr("Keeps the conversation's context at 8 bits instead of 16, which halves the memory it takes, so more of a model fits on the graphics card or in memory. Replies change very little. Saved conversations are read again once after you change it."),
+                s.compact_context,
+                Msg::CompactContext
             ),
             field(
                 tr("llama-server program"),
@@ -1248,6 +1275,44 @@ impl Panel {
         let dir = settings.models_dir();
         self.learned = h.llama.models().into_iter().filter(|m| m.variant.is_none()).map(|m| (m.name.clone(), crate::llama::learn::summary(&dir, &m.name))).collect();
     }
+}
+
+/// A way for a model to predict words ahead: the setting's stored value, and its label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PredictChoice {
+    value: String,
+    label: String,
+}
+
+impl std::fmt::Display for PredictChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
+}
+
+/// Under a model's card: how it predicts words ahead, with only the ways its file and the other models allow. A draft
+/// model must share the model's architecture, so the two read text the same way, and be much smaller to be quicker.
+fn predict_row<'a>(m: &ModelOption, s: &crate::store::Settings, models: &[ModelOption]) -> Element<'a, Msg> {
+    let choice = |value: &str, label: String| PredictChoice { value: value.into(), label };
+    let mut choices = vec![choice("", tr("Off").into())];
+    if m.mtp {
+        choices.push(choice("mtp", tr("Its own prediction layers").into()));
+    }
+    choices.push(choice("ngram", tr("Text already in the conversation").into()));
+    for d in models.iter().filter(|d| d.learnable && d.name != m.name && !m.arch.is_empty() && d.arch == m.arch && d.size * 3 <= m.size) {
+        choices.push(choice(&format!("draft:{}", d.name), trf("Draft with {model}", &[("model", &d.label)])));
+    }
+    let current = s.speculation.get(&m.name).cloned().unwrap_or_default();
+    let selected = choices.iter().find(|c| c.value == current).cloned().or_else(|| choices.first().cloned());
+    let name = m.name.clone();
+    let line = row![
+        text(tr("Predict ahead")).size(13),
+        pick_list(choices, selected, move |c| Msg::Predict(name.clone(), c)).padding([4, 8]).text_size(12).style(theme::select).menu_style(theme::menu),
+        text(tr("The model checks several predicted words in one step and keeps the ones it agrees with, so it writes faster without changing what it writes.")).size(12).style(theme::muted).width(Fill),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    container(line).padding(iced::Padding { top: 0.0, right: 12.0, bottom: 0.0, left: 24.0 }).into()
 }
 
 /// How strongly a model leans toward what it learned from ratings.

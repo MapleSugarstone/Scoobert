@@ -95,6 +95,21 @@ impl Reader<'_> {
     }
 }
 
+/// The model's architecture name, and whether its file holds the layers that predict several words at once.
+pub fn kind(file: &Path) -> (String, bool) {
+    let Ok(meta) = read_metadata(file) else { return (String::new(), false) };
+    let Some(Value::Str(arch)) = meta.get("general.architecture") else { return (String::new(), false) };
+    let mtp = meta.get(&format!("{arch}.nextn_predict_layers")).and_then(Value::as_u64).unwrap_or(0) > 0;
+    (arch.clone(), mtp)
+}
+
+/// Whether the model routes each token through a few of many experts.
+pub fn mixture_of_experts(file: &Path) -> bool {
+    let Ok(meta) = read_metadata(file) else { return false };
+    let Some(Value::Str(arch)) = meta.get("general.architecture") else { return false };
+    meta.get(&format!("{arch}.expert_count")).and_then(Value::as_u64).unwrap_or(0) > 0
+}
+
 /// The context length the model was trained for, from its file.
 pub fn trained_context(file: &Path) -> Option<u64> {
     let meta = read_metadata(file).ok()?;

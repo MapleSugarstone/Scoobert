@@ -56,10 +56,16 @@ On Windows, Scoobert runs shell commands in Git Bash when [Git for Windows](http
 | Qwen3.8 27B | 14.3 GB | About 15 GB at its default 32K context | Better code on computers with 24 GB of RAM |
 | Qwen3.8 27B, high precision | 22.0 GB | About 21 GB | Near full quality on computers with 32 GB of RAM or more |
 | Qwen3.8 Flash-Next 125B | 82.9 GB | About 75 GB | The best local Qwen model, for workstations with 96 GB of RAM or more (not yet tested with Scoobert) |
+| Qwen3.8 27B, compact | 10.9 GB | About 12 GB | The 27B at 3-bit, which fits entirely on a graphics card with 12 to 16 GB and writes several times faster there |
+| Qwen3.6 35B-A3B | 19.1 GB | About 19 GB | A mixture-of-experts model that uses about 3B parameters per word, so it writes fast even on a CPU, and reads images |
+| Qwen3.6 35B-A3B, compact | 15.0 GB | About 15 GB | The 35B-A3B at 3-bit, for computers with 16 GB of RAM |
+| Qwen3.5 0.8B | 0.5 GB | Under 1 GB | A draft model that speeds up a larger Qwen model through Predict ahead |
 
-The models run on the CPU. On a laptop, the 9B model writes about four words per second and the 27B model about one. Scoobert checks free memory before it loads a model, and when there isn't enough, it asks you to close other apps instead of letting the system swap to disk.
+The models run on the CPU. On a laptop, the 9B model writes about four words per second and the 27B model about one. For long unattended coding, the 35B-A3B with **Predict ahead** set to its own prediction layers passed as many tasks in Scoobert's coding benchmark as the 27B, in a third of the time. Scoobert checks free memory before it loads a model, and when there isn't enough, it asks you to close other apps instead of letting the system swap to disk.
 
 To add a model later, open **Settings**, then **Models on this computer**. You can also download any GGUF model from Hugging Face there: paste the model's web address, or write `owner/repository`, and add a size after a colon to pick one, as in `unsloth/Qwen3.5-9B-GGUF:Q4_K_M`. When the repository has several sizes and you named none, Scoobert shows every size with its download size so you can pick one. Scoobert checks every downloaded file against the SHA-256 checksum Hugging Face publishes for it.
+
+To make a model write faster, pick a way under **Predict ahead** on its card. The model checks several predicted words in one step and keeps the ones it agrees with, so its replies stay the same. **Its own prediction layers** uses layers that the files of the 27B and the 35B-A3B include. On a laptop processor they made the 27B write 1.4 to 2.3 times as fast and the 35B-A3B 1.45 times as fast. **Text already in the conversation** helps only when the model repeats long stretches of text it has seen, and it made a short edit 5% faster. **Draft with** a smaller model of the same family, such as Qwen3.5 0.8B for the 9B, lets the small model draft while the large one checks. If a model cannot load with the choice, Scoobert runs it without and says so. **Compact context memory** keeps the context at 8 bits, which halves its memory so more of a model fits on the graphics card.
 
 A GGUF model you downloaded yourself works too: select **Choose a model file** under **Add a model file**. Scoobert runs it from its folder, reads the context length it was trained for from the file, and lets it read images when an image projector (a file with `mmproj` in its name) sits beside it. **Remove from list** takes it out of Scoobert without deleting the file.
 
@@ -98,6 +104,7 @@ Hosted models run on the provider's servers, so Scoobert sends them your prompts
   - **Layer strength** turns the attention or feed-forward output of chosen layers up or down.
   - **Layer surgery** repeats or removes chosen layers.
   - **Size conversion** writes a copy in a smaller or larger number format.
+- **Benchmark:** the model lab also tests the model. It gives the model a normal set of 10 or a hard set of 8 Python coding tasks with the settings the model has now, such as the graphics card and **Predict ahead**, and runs hidden tests on each answer. With more than one try per task, a model whose code fails sees the test output and writes the code again, which shows how well it fixes its own mistakes. Every model's results stay listed together for comparison. Checking answers needs Python 3, and the tests run the code each model writes on your computer. Conversations wait while a benchmark runs.
 
 ## Use Scoobert
 

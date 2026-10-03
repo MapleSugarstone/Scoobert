@@ -1,5 +1,6 @@
 //! Runs one llama-server process for the selected GGUF model and manages its saved prompt caches.
 
+pub mod bench;
 pub mod catalog;
 pub mod cuda;
 pub mod download;
@@ -97,6 +98,8 @@ pub enum ServerStatus {
     GpuFailed(String),
     /// NVIDIA support could not load the named model, which then loads through the card's default support.
     CudaFailed(String),
+    /// The named model could not load while predicting ahead, so it runs without that until Scoobert restarts.
+    SpecFailed(String),
 }
 
 struct Running {
@@ -107,6 +110,8 @@ struct Running {
     /// Whether it runs on the graphics card, and through NVIDIA support, so a change to either setting restarts it.
     gpu: bool,
     cuda: bool,
+    /// Its arguments for predicting ahead and for the context's precision, which also restart it when they change.
+    extras: Vec<String>,
 }
 
 struct Shared {
@@ -132,6 +137,8 @@ pub struct LlamaServer {
     loading_model: Mutex<Option<(String, Instant)>>,
     /// CUDA failed to load a model in this run, so the card's default support loads them from then on.
     cuda_refused: AtomicBool,
+    /// Models that could not load while predicting ahead in this run.
+    spec_refused: Mutex<std::collections::HashSet<String>>,
     on_status: Box<dyn Fn(ServerStatus) + Send + Sync>,
 }
 
@@ -164,6 +171,7 @@ impl LlamaServer {
             loading: Mutex::new(CancellationToken::new()),
             loading_model: Mutex::new(None),
             cuda_refused: AtomicBool::new(false),
+            spec_refused: Mutex::new(std::collections::HashSet::new()),
             on_status: Box::new(on_status),
         });
         let _ = std::fs::create_dir_all(paths::get().slots());
@@ -271,12 +279,31 @@ impl LlamaServer {
     }
 
     pub fn memory_needed(&self, model: &LocalModel, ctx: u32) -> u64 {
+        let s = self.settings();
         let mmproj = model.mmproj.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
-        catalog::memory_formula(model.size + mmproj, ctx as u64 * gguf::kv_bytes_per_token(&model.path))
+        let mut weights = model.size + mmproj;
+        let mut kv = ctx as u64 * gguf::kv_bytes_per_token(&model.path);
+        // A draft model loads beside the model with a context of its own.
+        if let Some(name) = s.speculation.get(&model.name).and_then(|v| v.strip_prefix("draft:"))
+            && let Some(draft) = self.models().into_iter().find(|m| m.name == name)
+        {
+            weights += draft.size;
+            kv += ctx as u64 * gguf::kv_bytes_per_token(&draft.path);
+        }
+        // 8-bit values take 8.5 bits with their scales, against 16.
+        if s.compact_context {
+            kv = kv * 17 / 32;
+        }
+        catalog::memory_formula(weights, kv)
     }
 
     pub fn loaded_model(&self) -> Option<String> {
         self.shared.lock().unwrap().model.as_ref().map(|(m, _)| m.name.clone())
+    }
+
+    /// How the loaded model runs: on the graphics card, through NVIDIA support, and with which extra arguments.
+    pub async fn running_setup(&self) -> Option<(bool, bool, Vec<String>)> {
+        self.proc.lock().await.as_ref().map(|r| (r.gpu, r.cuda, r.extras.clone()))
     }
 
     pub fn slot_owner(&self) -> Option<String> {
@@ -306,6 +333,45 @@ impl LlamaServer {
         (gpu, cuda)
     }
 
+    /// Arguments for predicting ahead, unless that failed for this model in this run, and for a compact context.
+    fn extra_args(&self, model: &LocalModel, gpu: bool) -> Vec<String> {
+        let s = self.settings();
+        let mut args = Vec::new();
+        if s.compact_context {
+            args.extend(["-ctk", "q8_0", "-ctv", "q8_0"].map(String::from));
+        }
+        if self.spec_refused.lock().unwrap().contains(&model.name) {
+            return args;
+        }
+        match s.speculation.get(&model.name).map(String::as_str) {
+            // On a processor, 8 tokens a step suited the dense 27B, and 3 suited the 35B-A3B, whose own pass is cheap
+            // next to its prediction layer.
+            Some("mtp") => {
+                let step = if gguf::mixture_of_experts(&model.path) { "3" } else { "8" };
+                args.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", step].map(String::from));
+            }
+            // Text the model writes often repeats text already in the conversation, such as code it edits.
+            Some("ngram") => args.extend(["--spec-type", "ngram-simple"].map(String::from)),
+            Some(other) => {
+                if let Some(name) = other.strip_prefix("draft:")
+                    && let Some(draft) = self.models().into_iter().find(|m| m.name == name && m.variant.is_none())
+                {
+                    args.extend(["--spec-type".into(), "draft-simple".into(), "-md".into(), path_arg(&draft.path)]);
+                    if !gpu {
+                        args.extend(["-devd", "none", "-ngld", "0"].map(String::from));
+                    }
+                }
+            }
+            None => {}
+        }
+        args
+    }
+
+    /// Tries predicting ahead for `model` again, after the user changed how it does.
+    pub fn forget_spec_failure(&self, model: &str) {
+        self.spec_refused.lock().unwrap().remove(model);
+    }
+
     /// Starts the server with `model` unless it is already running it.
     pub async fn ensure(self: &Arc<Self>, model: &LocalModel) -> anyhow::Result<()> {
         self.touch();
@@ -315,10 +381,15 @@ impl LlamaServer {
             return Err(Cancelled.into());
         }
         let (gpu, cuda) = self.backend(&model.name);
+        let extras = self.extra_args(model, gpu);
         if let Some(running) = proc.as_mut() {
             let alive = matches!(running.child.try_wait(), Ok(None));
             // A variant can run on another model's file with its own steering, so the arguments count too.
-            let same = running.model.path == model.path && running.model.args == model.args && running.gpu == gpu && running.cuda == cuda.is_some();
+            let same = running.model.path == model.path
+                && running.model.args == model.args
+                && running.gpu == gpu
+                && running.cuda == cuda.is_some()
+                && running.extras == extras;
             if alive && same {
                 if running.ready {
                     return Ok(());
@@ -335,6 +406,17 @@ impl LlamaServer {
         }
         self.stop_locked(&mut proc).await;
         let mut result = self.start_locked(&mut proc, model, gpu, cuda.clone(), &cancel).await;
+        // A way of predicting ahead that the model cannot load with, such as a draft model of another family, is
+        // dropped for the rest of this run before the card or CUDA take the blame.
+        if extras.iter().any(|a| a == "--spec-type")
+            && let Err(err) = &result
+            && err.is::<ExitedWhileLoading>()
+        {
+            eprintln!("[llama] {} could not load while predicting ahead: {err:#}", model.name);
+            self.spec_refused.lock().unwrap().insert(model.name.clone());
+            (self.on_status)(ServerStatus::SpecFailed(model.name.clone()));
+            result = self.start_locked(&mut proc, model, gpu, cuda.clone(), &cancel).await;
+        }
         // CUDA that cannot load the model leaves it to the card's default support, for the rest of this run.
         if cuda.is_some()
             && let Err(err) = &result
@@ -432,6 +514,8 @@ impl LlamaServer {
             args.extend(["--device", "none", "-ngl", "0"].map(String::from));
         }
         args.extend(model.args.iter().cloned());
+        let extras = self.extra_args(model, gpu);
+        args.extend(extras.iter().cloned());
         // For diagnosing the server, such as -v for its detailed log.
         if let Some(extra) = std::env::var_os("SCOOBERT_SERVER_ARGS") {
             args.extend(extra.to_string_lossy().split_whitespace().map(String::from));
@@ -468,7 +552,7 @@ impl LlamaServer {
         if let Some(pid) = child.id() {
             let _ = std::fs::write(paths::get().pid_file(), pid.to_string());
         }
-        *proc = Some(Running { child, model: model.clone(), ready: false, gpu, cuda: cuda_server });
+        *proc = Some(Running { child, model: model.clone(), ready: false, gpu, cuda: cuda_server, extras });
         {
             let mut shared = self.shared.lock().unwrap();
             shared.model = Some((model.clone(), ctx));
@@ -1144,6 +1228,13 @@ pub fn forget_saved(model: &str) {
     let safe: String = model.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
     let _ = std::fs::remove_file(paths::get().cache.join("templates").join(format!("{safe}.jinja")));
     let _ = std::fs::remove_file(loaded_marker(model));
+}
+
+/// Deletes every saved prompt, as when the context's precision changes and none of them can be restored.
+pub fn forget_all_slots() {
+    for slot in std::fs::read_dir(paths::get().slots()).into_iter().flatten().flatten() {
+        let _ = std::fs::remove_file(slot.path());
+    }
 }
 
 /// Deletes a model's saved prompts, which can take gigabytes, as when they no longer match how the model runs.

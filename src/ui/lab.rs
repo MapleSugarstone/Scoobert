@@ -106,6 +106,7 @@ pub enum Msg {
     VariantStrength(usize, f32),
     SaveStrengths,
     Delete,
+    Bench(super::bench::Msg),
 }
 
 struct Running {
@@ -139,12 +140,15 @@ pub struct Lab {
     /// Strengths of the variant's steering vectors, then of its adapters, as the sliders show them.
     strengths: Vec<f32>,
     confirm_delete: bool,
+    bench: super::bench::Bench,
 }
 
 impl Lab {
     /// Opens the lab for `model` and starts reading its file.
     pub fn open(model: LocalModel) -> (Lab, Task<Message>) {
+        let (bench, load_bench) = super::bench::Bench::new();
         let lab = Lab {
+            bench,
             name: trf("{model} edit", &[("model", &model.name)]),
             model: model.clone(),
             details: None,
@@ -172,11 +176,11 @@ impl Lab {
             async move { tokio::task::spawn_blocking(move || lab::details(&model)).await.map_err(|e| e.to_string()).and_then(|r| r.map(Box::new).map_err(|e| format!("{e:#}"))) },
             |r| Message::Settings(SettingsMsg::Lab(Msg::Loaded(r))),
         );
-        (lab, task)
+        (lab, Task::batch([task, load_bench]))
     }
 
     pub fn is_running(&self) -> bool {
-        self.running.is_some()
+        self.running.is_some() || self.bench.is_running()
     }
 
     /// Returns whether the page closed, the task to run, and what the settings panel should do.
@@ -198,8 +202,10 @@ impl Lab {
                 if let Some(r) = &self.running {
                     r.cancel.store(true, Ordering::SeqCst);
                 }
+                self.bench.stop();
                 return (true, Task::none(), Effect::None);
             }
+            Msg::Bench(m) => return (false, self.bench.update(m, host, &self.model), Effect::None),
             Msg::Tab(t) => {
                 self.tab = t;
                 self.error = None;
@@ -411,6 +417,7 @@ impl Lab {
                 if let Some(v) = &d.variant {
                     col = col.push(self.variant_view(v));
                 }
+                col = col.push(self.bench.view().map(Msg::Bench));
                 col = col.push(self.make_view(d));
             }
         }
