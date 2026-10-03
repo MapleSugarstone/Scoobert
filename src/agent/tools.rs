@@ -481,6 +481,16 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if append && content.is_empty() {
         return Err("Nothing was added, because content was empty. Put the text to add in content.".into());
     }
+    // A model writing a long file in parts sometimes leaves out append, and each part then replaces the whole file.
+    let wipes = if append { None } else { old.as_deref().and_then(|existing| drops_most(existing, content)) };
+    if !confirmed_replace(&path, content, wipes.is_some())
+        && let Some((lines, kept)) = wipes
+    {
+        return Err(format!(
+            "Nothing was written. {} has {lines} lines, and this write keeps only {kept} of them, so it would delete the rest. To add this text to the end of the file, call write again with append set to true. To change part of the file, use edit. If you do mean to replace the whole file with this text, send the same write again.",
+            paths::display(&path)
+        ));
+    }
     let new = match (&old, append) {
         (Some(existing), true) if !existing.is_empty() && !existing.ends_with('\n') => format!("{existing}\n{content}"),
         (Some(existing), true) => format!("{existing}{content}"),
@@ -515,6 +525,36 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
 }
 
 const OUTLINE_LINES: usize = 40;
+
+/// The existing file's line count and how many of its lines `new` keeps, when a file of ten or more lines that say
+/// something would lose more than half of them. Short lines such as a closing brace match by chance, so they do not
+/// count.
+fn drops_most(old: &str, new: &str) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = old.lines().map(str::trim).filter(|l| l.len() > 2).collect();
+    if lines.len() < 10 {
+        return None;
+    }
+    let have: std::collections::HashSet<&str> = new.lines().map(str::trim).collect();
+    let kept = lines.iter().filter(|l| have.contains(*l)).count();
+    (kept * 2 < lines.len()).then_some((old.lines().count(), kept))
+}
+
+/// Whether a write that `wipes` most of `path` repeats the one refused just before it, which means the model meant to
+/// replace the file. It remembers this write's refusal, and any other write to the file forgets it.
+fn confirmed_replace(path: &Path, content: &str, wipes: bool) -> bool {
+    use std::hash::{Hash, Hasher};
+    static REFUSED: Mutex<Option<std::collections::HashMap<PathBuf, u64>>> = Mutex::new(None);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    let hash = hasher.finish();
+    let mut refused = REFUSED.lock().unwrap();
+    let refused = refused.get_or_insert_with(std::collections::HashMap::new);
+    let repeat = refused.remove(path) == Some(hash);
+    if wipes && !repeat {
+        refused.insert(path.to_path_buf(), hash);
+    }
+    repeat
+}
 
 /// Writes longer than this show as a short note in later requests.
 pub const SHORTENED_WRITE: usize = 1500;
@@ -909,6 +949,27 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "changed");
         assert!(restore_checkpoint(&dir.join("checkpoints"), &c.id).unwrap().is_ok());
         assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "original");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_write_that_would_wipe_a_file_needs_sending_twice() {
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let original: String = (1..=30).map(|i| format!("let value{i} = {i};\n")).collect();
+        std::fs::write(dir.join("game.js"), &original).unwrap();
+        let (shell, limits, cancel) = (Shell::detect(), Limits::default(), CancellationToken::new());
+        let part = call("write", json!({"path": "game.js", "content": "function startGame() {\n  run();\n}\n"}));
+        let refused = run(&part, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(refused.is_error && refused.output.contains("append set to true"), "{}", refused.output);
+        assert_eq!(std::fs::read_to_string(dir.join("game.js")).unwrap(), original);
+        let edited: String = original.replace("value3 = 3", "value3 = 4");
+        let rewrite = call("write", json!({"path": "game.js", "content": edited}));
+        assert!(!run(&rewrite, &dir, &shell, &limits, &cancel, |_| {}).await.is_error);
+        let again = run(&part, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(again.is_error, "a refusal for other content does not confirm this one");
+        let confirmed = run(&part, &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(!confirmed.is_error, "{}", confirmed.output);
         let _ = std::fs::remove_dir_all(dir);
     }
 

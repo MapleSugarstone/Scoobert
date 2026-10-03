@@ -1,6 +1,6 @@
 [package]
 name = "scoobert"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 description = "Desktop coding assistant that runs local Qwen models or hosted models, with project notes"
 authors = ["Maple Sugarstone"]
