@@ -9,6 +9,41 @@ pub fn total_memory() -> u64 {
     imp::memory().0
 }
 
+/// Free memory on the graphics card with the most of it, from `nvidia-smi` for NVIDIA cards and from the amdgpu
+/// driver on Linux. None when no card reports it, as for Intel cards, AMD cards on Windows, and Macs, whose graphics
+/// share the system's memory.
+pub fn free_vram() -> Option<u64> {
+    let nvidia = crate::llama::cuda::detect().and_then(|_| nvidia_free_vram());
+    let amd = if cfg!(target_os = "linux") { amd_free_vram() } else { None };
+    nvidia.into_iter().chain(amd).max()
+}
+
+fn nvidia_free_vram() -> Option<u64> {
+    let mut cmd = std::process::Command::new("nvidia-smi");
+    cmd.args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse::<u64>().ok()).max().map(|mib| mib * 1024 * 1024)
+}
+
+/// The amdgpu driver's own count of each card's memory, in /sys/class/drm/cardN/device.
+fn amd_free_vram() -> Option<u64> {
+    let read = |path: std::path::PathBuf| std::fs::read_to_string(path).ok()?.trim().parse::<u64>().ok();
+    std::fs::read_dir("/sys/class/drm")
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().strip_prefix("card").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())))
+        .filter_map(|e| {
+            let device = e.path().join("device");
+            Some(read(device.join("mem_info_vram_total"))?.saturating_sub(read(device.join("mem_info_vram_used"))?))
+        })
+        .max()
+}
+
 /// Free space on the drive that holds `path`, measured at the nearest folder that exists, since a models folder is
 /// often created only when the first download starts.
 pub fn free_space(path: &std::path::Path) -> Option<u64> {

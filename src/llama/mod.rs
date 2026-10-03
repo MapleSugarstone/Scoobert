@@ -27,6 +27,10 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(300);
 const SLOT_CACHE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const LARGE_MODEL_BYTES: u64 = 12_000_000_000;
 const DEFAULT_CONTEXT: u32 = 32_768;
+/// Graphics card memory llama.cpp leaves free when it fits layers on the card.
+const VRAM_MARGIN: u64 = 1_000_000_000;
+/// System memory a model needs even when the card holds all its layers, for the token table and working buffers.
+const MIN_SYSTEM_MEMORY: u64 = 1_500_000_000;
 /// The server process ended before the model finished loading.
 #[derive(Debug)]
 struct ExitedWhileLoading(String);
@@ -331,7 +335,12 @@ impl LlamaServer {
             bail!("Another program is using port {}. Restart Scoobert to pick a free port.", self.port);
         }
         let ctx = self.context_for(model);
-        let need = self.memory_needed(model, ctx);
+        let mut need = self.memory_needed(model, ctx);
+        // On the graphics card, llama.cpp puts the layers that fit in the card's own memory, less a margin it keeps
+        // free, so system memory holds only the rest.
+        if gpu && let Some(vram) = crate::sys::free_vram() {
+            need = need.saturating_sub(vram.saturating_sub(VRAM_MARGIN)).max(MIN_SYSTEM_MEMORY);
+        }
         let free = crate::sys::available_memory();
         if free < need {
             // The weights are memory-mapped, so with the setting on, the weights that do not fit stay on disk and the
