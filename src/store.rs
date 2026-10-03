@@ -159,7 +159,8 @@ pub struct Settings {
     /// Models that run with the direction they learned from ratings, with its strength.
     pub learning: BTreeMap<String, f32>,
     /// How each model predicts words ahead for itself to check: "mtp" for its own prediction layers, "ngram" for text
-    /// already in the conversation, or "draft:<model>" for a smaller model that drafts. A model left out does not.
+    /// already in the conversation, "draft:<model>" for a smaller model that drafts, or "off". A model left out uses its
+    /// own prediction layers when its file has them.
     pub speculation: BTreeMap<String, String>,
     /// Keeps the context at 8 bits instead of 16, which halves its memory.
     pub compact_context: bool,

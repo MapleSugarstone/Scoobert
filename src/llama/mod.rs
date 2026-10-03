@@ -343,7 +343,9 @@ impl LlamaServer {
         if self.spec_refused.lock().unwrap().contains(&model.name) {
             return args;
         }
-        match s.speculation.get(&model.name).map(String::as_str) {
+        // A model left out uses its own prediction layers when its file has them, and "off" turns them off.
+        let choice = s.speculation.get(&model.name).cloned().or_else(|| gguf::kind(&model.path).1.then(|| "mtp".to_string()));
+        match choice.as_deref() {
             // On a processor, 8 tokens a step suited the dense 27B, and 3 suited the 35B-A3B, whose own pass is cheap
             // next to its prediction layer.
             Some("mtp") => {

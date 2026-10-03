@@ -322,11 +322,8 @@ impl Panel {
                 return (Task::none(), Effect::ModelsChanged);
             }
             Msg::Predict(model, choice) => {
-                if choice.value.is_empty() {
-                    s.speculation.remove(&model);
-                } else {
-                    s.speculation.insert(model.clone(), choice.value);
-                }
+                // Off is stored too, since a model left out uses its own prediction layers when it has them.
+                s.speculation.insert(model.clone(), choice.value);
                 if let Some(host) = ctx.host {
                     host.llama.forget_spec_failure(&model);
                 }
@@ -1294,7 +1291,7 @@ impl std::fmt::Display for PredictChoice {
 /// model must share the model's architecture, so the two read text the same way, and be much smaller to be quicker.
 fn predict_row<'a>(m: &ModelOption, s: &crate::store::Settings, models: &[ModelOption]) -> Element<'a, Msg> {
     let choice = |value: &str, label: String| PredictChoice { value: value.into(), label };
-    let mut choices = vec![choice("", tr("Off").into())];
+    let mut choices = vec![choice("off", tr("Off").into())];
     if m.mtp {
         choices.push(choice("mtp", tr("Its own prediction layers").into()));
     }
@@ -1302,7 +1299,7 @@ fn predict_row<'a>(m: &ModelOption, s: &crate::store::Settings, models: &[ModelO
     for d in models.iter().filter(|d| d.learnable && d.name != m.name && !m.arch.is_empty() && d.arch == m.arch && d.size * 3 <= m.size) {
         choices.push(choice(&format!("draft:{}", d.name), trf("Draft with {model}", &[("model", &d.label)])));
     }
-    let current = s.speculation.get(&m.name).cloned().unwrap_or_default();
+    let current = s.speculation.get(&m.name).cloned().unwrap_or_else(|| if m.mtp { "mtp".into() } else { "off".into() });
     let selected = choices.iter().find(|c| c.value == current).cloned().or_else(|| choices.first().cloned());
     let name = m.name.clone();
     let line = row![
