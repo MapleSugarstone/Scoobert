@@ -209,11 +209,24 @@ impl LlamaServer {
         self.executable()?.parent().map(Path::to_path_buf)
     }
 
-    /// GGUF models in the models folder. A projector file beside a model in its own folder enables images.
+    /// GGUF models in the models folder, and the model files the user added from other folders. A projector file
+    /// beside a model in its own folder enables images.
     pub fn models(&self) -> Vec<LocalModel> {
         let mut out = Vec::new();
         let dir = self.models_dir();
         scan(&dir, &dir, 0, &mut out);
+        for file in self.settings().model_files {
+            let Some(mut model) = added_model(Path::new(&file)) else { continue };
+            if out.iter().any(|m| m.path == model.path) {
+                continue;
+            }
+            // Names identify models in settings and conversations, so a second file with the same name gets its folder.
+            if out.iter().any(|m| m.name == model.name) {
+                let folder = model.path.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                model.name = format!("{} ({folder})", model.name);
+            }
+            out.push(model);
+        }
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         out
     }
@@ -227,7 +240,9 @@ impl LlamaServer {
         if let Some(listed) = catalog::find(&model.family) {
             return listed.context_size;
         }
-        if model.size > LARGE_MODEL_BYTES { 16_384 } else { DEFAULT_CONTEXT }
+        let default = if model.size > LARGE_MODEL_BYTES { 16_384 } else { DEFAULT_CONTEXT };
+        // A model trained on a shorter context than the default gets its own.
+        gguf::trained_context(&model.path).map_or(default, |trained| default.min(trained.min(u32::MAX as u64) as u32))
     }
 
     pub fn memory_needed(&self, model: &LocalModel, ctx: u32) -> u64 {
@@ -511,6 +526,65 @@ impl LlamaServer {
             bail!("{} could not answer: {status} {}", model.name, response.text().await.unwrap_or_default());
         }
         Ok(response.json().await?)
+    }
+
+    /// Deletes a model downloaded into the models folder with everything Scoobert stored for it: its files, its
+    /// projector unless another model uses it, its folder when that leaves it empty, the model lab variants that run
+    /// on its file, and the saved prompts and template copies of it and those variants. The server stops first when
+    /// it runs any of them.
+    pub async fn delete_model(&self, name: &str) -> anyhow::Result<()> {
+        let models = self.models();
+        let model = models.iter().find(|m| m.name == name && m.variant.is_none()).with_context(|| format!("There is no model named {name}."))?;
+        if !model.path.starts_with(self.models_dir()) {
+            bail!(crate::i18n::tr("Only models in the models folder can be deleted here."));
+        }
+        let variants: Vec<&LocalModel> = models.iter().filter(|v| v.variant.is_some() && v.path == model.path).collect();
+        let loaded = self.loaded_model();
+        if loaded.as_deref() == Some(name) || variants.iter().any(|v| loaded.as_deref() == Some(v.name.as_str())) {
+            if self.in_use() {
+                bail!(crate::i18n::tr("Scoobert is using this model. Delete it after the task finishes."));
+            }
+            self.stop().await;
+        }
+        for v in &variants {
+            if let Some(folder) = &v.variant {
+                std::fs::remove_dir_all(folder).with_context(|| crate::i18n::trf("Could not delete {path}", &[("path", &paths::display(folder))]))?;
+            }
+            forget_saved(&v.name);
+        }
+        let folder = model.path.parent().context("The model has no folder.")?.to_path_buf();
+        let file_name = model.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let stem = model_stem(&file_name);
+        let shard_re = regex::Regex::new(r"(?i)-\d{5}-of-\d{5}\.gguf(\.part)?$").unwrap();
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&folder)?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                n == file_name || n == format!("{file_name}.part") || (n.starts_with(&format!("{stem}-")) && shard_re.is_match(&n))
+            })
+            .collect();
+        if let Some(mmproj) = &model.mmproj
+            && !models.iter().any(|m| m.name != name && m.mmproj.as_ref() == Some(mmproj))
+        {
+            files.push(mmproj.clone());
+        }
+        for file in &files {
+            // A server that just stopped can hold the file open for a moment on Windows.
+            let mut tries = 0;
+            while let Err(err) = std::fs::remove_file(file) {
+                tries += 1;
+                if tries == 10 {
+                    return Err(err).with_context(|| crate::i18n::trf("Could not delete {path}", &[("path", &paths::display(file))]));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+        if folder != self.models_dir() && std::fs::read_dir(&folder).is_ok_and(|mut d| d.next().is_none()) {
+            let _ = std::fs::remove_dir(&folder);
+        }
+        forget_saved(name);
+        Ok(())
     }
 
     /// The model the server is loading now, how long it has taken so far, and whether it never loaded on this
@@ -923,11 +997,12 @@ fn scan(root: &Path, dir: &Path, depth: u32, out: &mut Vec<LocalModel>) {
         .iter()
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false) && name_of(e).to_lowercase().ends_with(".gguf"))
         .collect();
-    let mmproj = if depth > 0 { ggufs.iter().find(|e| name_of(e).to_lowercase().starts_with("mmproj")) } else { None };
+    // Projectors are named mmproj-F16.gguf in some repositories and Model-mmproj-f16.gguf in others.
+    let mmproj = if depth > 0 { ggufs.iter().find(|e| name_of(e).to_lowercase().contains("mmproj")) } else { None };
     let shard_re = regex::Regex::new(r"(?i)-(\d{5})-of-(\d{5})\.gguf$").unwrap();
     for e in &ggufs {
         let file_name = name_of(e);
-        if file_name.to_lowercase().starts_with("mmproj") {
+        if file_name.to_lowercase().contains("mmproj") {
             continue;
         }
         let shard = shard_re.captures(&file_name);
@@ -959,6 +1034,43 @@ fn scan(root: &Path, dir: &Path, depth: u32, out: &mut Vec<LocalModel>) {
         }
     }
 }
+
+/// A model file the user added from another folder. A projector beside it enables images when the folder holds only
+/// this model, or when the projector's name contains the model's, since a downloads folder can hold another model's.
+pub fn added_model(path: &Path) -> Option<LocalModel> {
+    let file_name = path.file_name()?.to_string_lossy().into_owned();
+    let lower = file_name.to_lowercase();
+    if !lower.ends_with(".gguf") || lower.contains("mmproj") || !path.is_file() {
+        return None;
+    }
+    let shard_re = regex::Regex::new(r"(?i)-(\d{5})-of-(\d{5})\.gguf$").unwrap();
+    let name = model_stem(&file_name);
+    let siblings: Vec<PathBuf> = std::fs::read_dir(path.parent()?)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")))
+        .collect();
+    let file_of = |p: &PathBuf| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let size = if shard_re.is_match(&file_name) {
+        siblings.iter().filter(|p| file_of(p).starts_with(&format!("{name}-")) && shard_re.is_match(&file_of(p))).filter_map(|p| p.metadata().ok()).map(|m| m.len()).sum()
+    } else {
+        path.metadata().ok()?.len()
+    };
+    let models: std::collections::HashSet<String> = siblings.iter().map(file_of).filter(|n| !n.to_lowercase().contains("mmproj")).map(|n| model_stem(&n)).collect();
+    let base = QUANT_SUFFIX.replace(&name, "").to_lowercase();
+    let mmproj = siblings
+        .iter()
+        .filter(|p| file_of(p).to_lowercase().contains("mmproj"))
+        .find(|p| models.len() == 1 || (!base.is_empty() && file_of(p).to_lowercase().contains(&base)))
+        .cloned();
+    Some(LocalModel { family: name.clone(), name, path: path.to_path_buf(), mmproj, size, args: Vec::new(), variant: None })
+}
+
+/// The number format at the end of a model's name, such as -Q4_K_M, .Q8_0, or -UD-IQ4_XS.
+pub static QUANT_SUFFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"(?i)[-_.](?:UD-)?(?:IQ\d+_[A-Z0-9]+|Q\d+_K(?:_[A-Z0-9]+)?|Q\d+_\d+|TQ\d_\d|BF16|F16|F32|MXFP4(?:_MOE)?)$").unwrap()
+});
 
 /// A model's name: its file name without the shard suffix and extension.
 pub fn model_stem(file_name: &str) -> String {
@@ -1000,6 +1112,21 @@ fn reasoning_keeping_template(model: &LocalModel) -> Option<PathBuf> {
 }
 
 /// An empty file that marks a model as loaded once on this computer.
+/// Deletes what Scoobert stored for a model besides its files: saved prompts, which can take gigabytes, the copy of
+/// its chat template, and the record that it loaded before.
+pub fn forget_saved(model: &str) {
+    let safe: String = model.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    // Slot files are named model-context-kind-id, and the context keeps one model's prefix from matching another's.
+    let saved = regex::Regex::new(&format!(r"^{}-\d+-", regex::escape(&safe))).unwrap();
+    for slot in std::fs::read_dir(paths::get().slots()).into_iter().flatten().flatten() {
+        if saved.is_match(&slot.file_name().to_string_lossy()) {
+            let _ = std::fs::remove_file(slot.path());
+        }
+    }
+    let _ = std::fs::remove_file(paths::get().cache.join("templates").join(format!("{safe}.jinja")));
+    let _ = std::fs::remove_file(loaded_marker(model));
+}
+
 fn loaded_marker(model: &str) -> PathBuf {
     let safe: String = model.chars().map(|c| if c.is_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
     paths::get().cache.join("loaded").join(safe)
@@ -1099,6 +1226,28 @@ fn prune() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn added_files_pair_with_their_own_projector() {
+        let dir = std::env::temp_dir().join(format!("scoobert-added-{}", random_hex(4)));
+        let own = dir.join("own");
+        let mixed = dir.join("mixed");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&mixed).unwrap();
+        for file in [own.join("Vision-7B.Q4_K_M.gguf"), own.join("mmproj-F16.gguf")] {
+            std::fs::write(file, b"GGUF").unwrap();
+        }
+        for file in ["Alpha-Q4_K_M.gguf", "Beta-Q8_0.gguf", "beta-mmproj-f16.gguf"] {
+            std::fs::write(mixed.join(file), b"GGUF").unwrap();
+        }
+        let model = added_model(&own.join("Vision-7B.Q4_K_M.gguf")).unwrap();
+        assert_eq!(model.name, "Vision-7B.Q4_K_M");
+        assert!(model.mmproj.is_some());
+        assert!(added_model(&mixed.join("Alpha-Q4_K_M.gguf")).unwrap().mmproj.is_none());
+        assert!(added_model(&mixed.join("Beta-Q8_0.gguf")).unwrap().mmproj.is_some());
+        assert!(added_model(&mixed.join("beta-mmproj-f16.gguf")).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn reads_tokens_from_a_slot_file() {

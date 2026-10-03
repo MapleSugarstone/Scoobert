@@ -135,6 +135,8 @@ pub enum Confirm {
     Rewind { index: usize, text: String, files: usize },
     /// Install an update while a task is running.
     InstallUpdate,
+    /// Delete a downloaded model's files. `variants` model lab variants run on its file.
+    DeleteModel { name: String, size: u64, variants: usize },
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +216,8 @@ pub enum Message {
     Approve(u64, Decision),
     /// Stops a command the model left running in the background.
     StopJob(u32),
+    /// A downloaded model was deleted, by name, or could not be.
+    ModelDeleted(Result<String, String>),
     Toggle(String),
     Link(String),
     Copy(String),
@@ -874,7 +878,18 @@ impl App {
                         }
                     }
                     Confirm::InstallUpdate => return self.start_update(),
+                    Confirm::DeleteModel { name, .. } => {
+                        let Some(host) = self.host.clone() else { return Task::none() };
+                        return Task::perform(async move { host.llama.delete_model(&name).await.map(|_| name).map_err(|e| format!("{e:#}")) }, Message::ModelDeleted);
+                    }
                 }
+            }
+            Message::ModelDeleted(result) => {
+                match result {
+                    Ok(name) => self.toast(trf("Deleted {model}.", &[("model", &name)])),
+                    Err(e) => self.toast(e),
+                }
+                self.refresh_models();
             }
 
             Message::Composer(action) => {
@@ -1488,7 +1503,7 @@ impl App {
         }
         if let Some(panel) = &self.settings {
             let isolation = self.host.as_ref().map(|h| h.isolation.describe()).unwrap_or_default();
-            let ctx = settings::ViewCtx { state: &self.state, isolation, models: &self.models, download: &self.setup.download, queue: &self.setup.queue };
+            let ctx = settings::ViewCtx { state: &self.state, isolation, models: &self.models, download: &self.setup.download, queue: &self.setup.queue, choices: &self.setup.choices };
             layers = layers.push(modal(panel.view(ctx).map(Message::Settings), 760.0));
         }
         if let Some(c) = &self.confirm {
@@ -2274,22 +2289,33 @@ fn confirm_dialog<'a>(c: &Confirm, rewind_files: bool) -> Element<'a, Message> {
         );
         return col.into();
     }
-    let (title, body, action) = match c {
+    let (title, body, action): (String, String, &str) = match c {
         Confirm::DeleteConversation(_) => (
-            tr("Delete this conversation?"),
-            tr("The conversation file moves to the trash, so you can restore it from there."),
+            tr("Delete this conversation?").into(),
+            tr("The conversation file moves to the trash, so you can restore it from there.").into(),
             tr("Delete"),
         ),
         Confirm::RemoveProject(_) => (
-            tr("Remove this project from the list?"),
-            tr("Scoobert forgets the folder but keeps its files, notes, and conversations."),
+            tr("Remove this project from the list?").into(),
+            tr("Scoobert forgets the folder but keeps its files, notes, and conversations.").into(),
             tr("Remove"),
         ),
         Confirm::InstallUpdate => (
-            tr("Update while Scoobert is working?"),
-            tr("Scoobert downloads the update, then stops the task and restarts to install it. Select Continue afterward to pick the task up again."),
+            tr("Update while Scoobert is working?").into(),
+            tr("Scoobert downloads the update, then stops the task and restarts to install it. Select Continue afterward to pick the task up again.").into(),
             tr("Update"),
         ),
+        Confirm::DeleteModel { name, size, variants } => {
+            let mut body = trf(
+                "This permanently deletes {size} of model files and the prompts Scoobert saved for the model, which frees the space at once. Download the model again to use it.",
+                &[("size", &crate::util::gb(*size))],
+            );
+            if *variants > 0 {
+                body.push(' ');
+                body.push_str(tr("Any model lab variants made from it are deleted too, since they run on its file."));
+            }
+            (trf("Delete {model}?", &[("model", name)]), body, tr("Delete"))
+        }
         Confirm::Rewind { .. } => unreachable!("handled above"),
     };
     column![

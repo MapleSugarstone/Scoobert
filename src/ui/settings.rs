@@ -84,6 +84,7 @@ pub struct ViewCtx<'a> {
     pub models: &'a [ModelOption],
     pub download: &'a Option<Download>,
     pub queue: &'a [Job],
+    pub choices: &'a Option<crate::llama::download::ChooseSize>,
 }
 
 pub struct Panel {
@@ -144,6 +145,14 @@ pub enum Msg {
     Download(usize),
     CustomSpec(String),
     DownloadCustom,
+    /// Downloads one of the sizes a repository offered.
+    DownloadSize(String),
+    AddModelFile,
+    ModelFilePicked(Option<std::path::PathBuf>),
+    /// Leaves an added model file out of the list, without deleting it.
+    ForgetModelFile(String),
+    /// Asks before deleting a downloaded model's files.
+    DeleteModel { name: String, size: u64, variants: usize },
     CancelDownload,
     RevealModels,
     Provider(ProviderChoice),
@@ -392,6 +401,42 @@ impl Panel {
                 }
                 self.custom_spec.clear();
                 return (Task::done(Message::Setup(setup::Msg::StartCustom(spec))), Effect::None);
+            }
+            Msg::DownloadSize(spec) => return (Task::done(Message::Setup(setup::Msg::StartCustom(spec))), Effect::None),
+            Msg::AddModelFile => {
+                return (
+                    Task::perform(
+                        async { rfd::AsyncFileDialog::new().set_title(tr("Choose a model file")).add_filter("GGUF", &["gguf"]).pick_file().await.map(|h| h.path().to_path_buf()) },
+                        |p| Message::Settings(Msg::ModelFilePicked(p)),
+                    ),
+                    Effect::None,
+                );
+            }
+            Msg::ModelFilePicked(Some(path)) => {
+                // Any part of a split model stands for its first part, which is the one llama.cpp opens.
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let first = regex::Regex::new(r"(?i)-\d{5}(-of-\d{5}\.gguf)$").unwrap().replace(&name, "-00001$1").into_owned();
+                let path = path.with_file_name(first);
+                if crate::llama::added_model(&path).is_none() {
+                    return (Task::none(), Effect::Toast(tr("That file is not a model Scoobert can run. Choose a GGUF model file, not its image projector.").into()));
+                }
+                let entry = path.to_string_lossy().into_owned();
+                if !s.model_files.contains(&entry) {
+                    s.model_files.push(entry);
+                }
+                return (Task::none(), Effect::ModelsChanged);
+            }
+            Msg::ModelFilePicked(None) => {}
+            Msg::DeleteModel { name, size, variants } => {
+                return (Task::done(Message::AskConfirm(super::Confirm::DeleteModel { name, size, variants })), Effect::None);
+            }
+            Msg::ForgetModelFile(entry) => {
+                // The file stays, and the prompts Scoobert saved for it go.
+                if let Some(m) = ctx.host.map(|h| h.models()).unwrap_or_default().into_iter().find(|m| m.added.as_ref() == Some(&entry)) {
+                    crate::llama::forget_saved(&m.name);
+                }
+                s.model_files.retain(|f| *f != entry);
+                return (Task::none(), Effect::ModelsChanged);
             }
             Msg::CancelDownload => return (Task::done(Message::Setup(setup::Msg::Cancel)), Effect::None),
             Msg::RevealModels => {
@@ -686,6 +731,15 @@ impl Panel {
                 text(trf("Needs about {memory} of free memory.", &[("memory", &gb(m.memory_needed))])).size(12).style(theme::muted)
             };
             let name = m.name.clone();
+            let forget: Element<'a, Msg> = match &m.added {
+                Some(entry) => button(text(tr("Remove from list")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::ForgetModelFile(entry.clone())).into(),
+                None if m.deletable => button(icon(Icon::Trash, 14.0))
+                    .padding([4, 6])
+                    .style(theme::ghost)
+                    .on_press(Msg::DeleteModel { name: m.name.clone(), size: m.size, variants: m.variants })
+                    .into(),
+                None => space().width(0).into(),
+            };
             list = list.push(
                 container(
                     row![
@@ -704,6 +758,7 @@ impl Panel {
                             .menu_style(theme::menu),
                         button(text(tr("System prompt")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::OpenPrompt(m.name.clone(), m.label.clone())),
                         button(text(tr("Model lab")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::OpenLab(m.name.clone())),
+                        forget,
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center),
@@ -773,9 +828,9 @@ impl Panel {
             subheading(tr("Download")),
             catalog,
             subheading(tr("Download another model")),
-            text(tr("Any GGUF model on Hugging Face, as owner/repository:quantization.")).size(12).style(theme::muted),
+            text(tr("Paste the address of any GGUF model on Hugging Face, or write owner/repository. Add a size after a colon to choose one, as in :Q4_K_M.")).size(12).style(theme::muted),
             row![
-                text_input("unsloth/Qwen3.5-9B-GGUF:Q4_K_M", &self.custom_spec)
+                text_input("https://huggingface.co/unsloth/Qwen3.5-9B-GGUF", &self.custom_spec)
                     .on_input(Msg::CustomSpec)
                     .on_submit(Msg::DownloadCustom)
                     .size(13)
@@ -786,6 +841,10 @@ impl Panel {
             .spacing(8)
             .align_y(Alignment::Center),
             custom_progress(ctx.download),
+            size_choices(ctx.choices),
+            subheading(tr("Add a model file")),
+            text(tr("Use a GGUF model you downloaded yourself. Scoobert runs it from its folder, and an image projector beside it lets it read images.")).size(12).style(theme::muted),
+            button(text(tr("Choose a model file")).size(13)).padding([6, 12]).style(theme::secondary).on_press(Msg::AddModelFile),
             subheading(tr("Where models are stored")),
             row![
                 text_input(&crate::paths::display(&crate::paths::get().default_models_dir()), &self.models_dir)
@@ -1043,6 +1102,18 @@ impl Panel {
         .spacing(8)
         .into()
     }
+}
+
+/// The sizes a repository offered when the download did not name one it has.
+fn size_choices<'a>(choices: &'a Option<crate::llama::download::ChooseSize>) -> Element<'a, Msg> {
+    let Some(c) = choices else { return space().into() };
+    let mut sizes = row![].spacing(8);
+    for size in &c.sizes {
+        sizes = sizes.push(
+            button(text(format!("{} · {}", size.label, gb(size.bytes))).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::DownloadSize(size.spec.clone())),
+        );
+    }
+    column![text(c.message.clone()).size(12).style(theme::warn_text), sizes.wrap()].spacing(6).into()
 }
 
 fn custom_progress<'a>(download: &'a Option<Download>) -> Element<'a, Msg> {

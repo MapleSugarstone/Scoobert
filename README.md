@@ -53,13 +53,17 @@ On Windows, Scoobert runs shell commands in Git Bash when [Git for Windows](http
 | Model | Download | Free memory needed | Best for |
 |---|---|---|---|
 | Qwen3.5 9B | 6.6 GB | About 7 GB | Quick answers and screenshots on any recent laptop |
-| Qwen3.8 27B | 14.3 GB | About 14 GB | Better code on computers with 24 GB of RAM |
+| Qwen3.8 27B | 14.3 GB | About 15 GB at its default 32K context | Better code on computers with 24 GB of RAM |
 | Qwen3.8 27B, high precision | 22.0 GB | About 21 GB | Near full quality on computers with 32 GB of RAM or more |
 | Qwen3.8 Flash-Next 125B | 82.9 GB | About 75 GB | The best local Qwen model, for workstations with 96 GB of RAM or more (not yet tested with Scoobert) |
 
 The models run on the CPU. On a laptop, the 9B model writes about four words per second and the 27B model about one. Scoobert checks free memory before it loads a model, and when there isn't enough, it asks you to close other apps instead of letting the system swap to disk.
 
-To add a model later, open **Settings**, then **Models on this computer**. You can also download any GGUF model from Hugging Face there by repository and quantization, such as `unsloth/Qwen3.5-9B-GGUF:Q4_K_M`. Scoobert checks every downloaded file against the SHA-256 checksum Hugging Face publishes for it.
+To add a model later, open **Settings**, then **Models on this computer**. You can also download any GGUF model from Hugging Face there: paste the model's web address, or write `owner/repository`, and add a size after a colon to pick one, as in `unsloth/Qwen3.5-9B-GGUF:Q4_K_M`. When the repository has several sizes and you named none, Scoobert shows every size with its download size so you can pick one. Scoobert checks every downloaded file against the SHA-256 checksum Hugging Face publishes for it.
+
+A GGUF model you downloaded yourself works too: select **Choose a model file** under **Add a model file**. Scoobert runs it from its folder, reads the context length it was trained for from the file, and lets it read images when an image projector (a file with `mmproj` in its name) sits beside it. **Remove from list** takes it out of Scoobert without deleting the file.
+
+The trash button on a downloaded model deletes it after asking. That deletes its files, its image projector, the model lab variants made from it, and the prompts Scoobert saved for them, so the disk space comes back at once. Deleting a variant in the model lab works the same way.
 
 ### Hosted models
 

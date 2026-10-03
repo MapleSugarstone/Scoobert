@@ -113,6 +113,13 @@ pub struct ModelOption {
     pub reasoning: bool,
     pub size: u64,
     pub memory_needed: u64,
+    /// The entry in `Settings::model_files` for a model file the user added from another folder, which leaving out
+    /// of the list does not delete.
+    pub added: Option<String>,
+    /// A model downloaded into the models folder, which Settings can delete. Variants are deleted in the model lab.
+    pub deletable: bool,
+    /// Model lab variants that run on this model's file and stop working without it.
+    pub variants: usize,
 }
 
 struct Live {
@@ -355,13 +362,17 @@ impl Host {
 
     pub fn models(&self) -> Vec<ModelOption> {
         let s = self.settings();
-        let mut out: Vec<ModelOption> = self
-            .llama
-            .models()
-            .into_iter()
+        let local = self.llama.models();
+        let models_dir = self.llama.models_dir();
+        let variants_of = |m: &LocalModel| local.iter().filter(|v| v.variant.is_some() && v.path == m.path).count();
+        let mut out: Vec<ModelOption> = local
+            .iter()
+            .cloned()
             .map(|m| {
                 let ctx = self.llama.context_for(&m);
                 ModelOption {
+                    deletable: m.variant.is_none() && m.path.starts_with(&models_dir),
+                    variants: if m.variant.is_none() { variants_of(&m) } else { 0 },
                     label: m.name.clone(),
                     provider: String::new(),
                     usable: true,
@@ -371,6 +382,7 @@ impl Host {
                     reasoning: REASONING_LOCAL.is_match(&m.name) || REASONING_LOCAL.is_match(&m.family),
                     size: m.size,
                     memory_needed: self.llama.memory_needed(&m, ctx),
+                    added: s.model_files.iter().find(|f| std::path::Path::new(f) == m.path).cloned(),
                     name: m.name,
                 }
             })
@@ -387,6 +399,9 @@ impl Host {
                 reasoning: h.reasoning,
                 size: 0,
                 memory_needed: 0,
+                added: None,
+                deletable: false,
+                variants: 0,
             });
         }
         out

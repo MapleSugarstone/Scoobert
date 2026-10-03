@@ -16,7 +16,7 @@ use super::theme;
 use crate::agent::Host;
 use crate::i18n::{tr, trf};
 use crate::llama::catalog::{CATALOG, memory_needed};
-use crate::llama::download::Progress;
+use crate::llama::download::{ChooseSize, Progress};
 use crate::store::State;
 use crate::util::gb;
 
@@ -41,6 +41,8 @@ pub enum DownloadEvent {
     Progress(Progress),
     /// The downloaded model's name.
     Done(Result<String, String>),
+    /// The repository has several sizes and the download did not name one it has.
+    Choose(ChooseSize),
 }
 
 pub struct Setup {
@@ -48,6 +50,8 @@ pub struct Setup {
     pub queue: Vec<Job>,
     pub download: Option<Download>,
     pub error: Option<String>,
+    /// The sizes of the last custom download, for the user to pick one.
+    pub choices: Option<ChooseSize>,
     /// Free space on the drive of the models folder, measured when the folder changes and after each download.
     free_space: Option<u64>,
 }
@@ -80,7 +84,7 @@ pub fn fits(i: usize) -> bool {
 
 impl Setup {
     pub fn new(models_dir: &std::path::Path) -> Self {
-        Setup { selected: default_selection(), queue: Vec::new(), download: None, error: None, free_space: crate::sys::free_space(models_dir) }
+        Setup { selected: default_selection(), queue: Vec::new(), download: None, error: None, choices: None, free_space: crate::sys::free_space(models_dir) }
     }
 
     pub fn update(&mut self, msg: Msg, state: &mut State, host: Option<&Arc<Host>>) -> (Task<Message>, Effect) {
@@ -100,6 +104,11 @@ impl Setup {
                 if let Some(d) = &mut self.download {
                     d.progress = Some(p);
                 }
+            }
+            Msg::Event(DownloadEvent::Choose(choices)) => {
+                self.download = None;
+                self.choices = Some(choices);
+                return (self.next(host), Effect::None);
             }
             Msg::Event(DownloadEvent::Done(result)) => {
                 let finished = self.download.take();
@@ -181,6 +190,7 @@ impl Setup {
         let cancel = CancellationToken::new();
         self.download = Some(Download { job: job.clone(), progress: None, cancel: cancel.clone() });
         self.error = None;
+        self.choices = None;
         let (spec, projector, revision) = match &job {
             Job::Catalog(i) => (CATALOG[*i].spec.to_string(), CATALOG[*i].projector, CATALOG[*i].revision),
             Job::Custom(spec) => (spec.clone(), true, "main"),
@@ -202,12 +212,15 @@ impl Setup {
                     r = &mut job => break r,
                 }
             };
-            let result = match result {
-                Ok(Ok(folder)) => Ok(folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
-                Ok(Err(e)) => Err(format!("{e:#}")),
-                Err(e) => Err(e.to_string()),
+            let event = match result {
+                Ok(Ok(folder)) => DownloadEvent::Done(Ok(folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+                Ok(Err(e)) => match e.downcast_ref::<ChooseSize>() {
+                    Some(choices) => DownloadEvent::Choose(choices.clone()),
+                    None => DownloadEvent::Done(Err(format!("{e:#}"))),
+                },
+                Err(e) => DownloadEvent::Done(Err(e.to_string())),
             };
-            let _ = out.send(DownloadEvent::Done(result)).await;
+            let _ = out.send(event).await;
         });
         Task::run(stream, |e| Message::Setup(Msg::Event(e)))
     }

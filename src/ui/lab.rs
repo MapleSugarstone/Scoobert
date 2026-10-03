@@ -289,7 +289,9 @@ impl Lab {
                 }
                 let llama = host.map(|h| h.llama.clone());
                 let loaded = llama.as_ref().is_some_and(|l| l.loaded_model().as_deref() == Some(self.model.name.as_str()));
-                // The server keeps the model file open, so it stops first, and the folder goes to the trash.
+                let name = self.model.name.clone();
+                // The server keeps the model file open, so it stops first. The folder is deleted rather than moved to the
+                // trash, which would keep a converted model's gigabytes until the trash is emptied.
                 return (
                     true,
                     Task::perform(
@@ -297,7 +299,8 @@ impl Lab {
                             if loaded && let Some(l) = llama {
                                 l.stop().await;
                             }
-                            trash::delete(&folder).map_err(|e| e.to_string())
+                            crate::llama::forget_saved(&name);
+                            std::fs::remove_dir_all(&folder).map_err(|e| e.to_string())
                         },
                         |r| match r {
                             Ok(()) => Message::Settings(SettingsMsg::LabDeleted),
@@ -488,7 +491,7 @@ impl Lab {
         if i > 0 {
             actions = actions.push(button(text(tr("Save strengths")).size(12)).padding([4, 10]).style(theme::secondary).on_press(Msg::SaveStrengths));
         }
-        let delete = if self.confirm_delete { tr("Click again to move this variant to the trash") } else { tr("Delete this variant") };
+        let delete = if self.confirm_delete { tr("Click again to delete this variant for good") } else { tr("Delete this variant") };
         actions = actions.push(button(text(delete).size(12)).padding([4, 10]).style(theme::danger).on_press(Msg::Delete));
         col = col.push(actions);
         container(col).padding(12).width(Fill).style(theme::card).into()

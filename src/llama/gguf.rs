@@ -95,6 +95,13 @@ impl Reader<'_> {
     }
 }
 
+/// The context length the model was trained for, from its file.
+pub fn trained_context(file: &Path) -> Option<u64> {
+    let meta = read_metadata(file).ok()?;
+    let Some(Value::Str(arch)) = meta.get("general.architecture") else { return None };
+    meta.get(&format!("{arch}.context_length"))?.as_u64()
+}
+
 pub fn read_metadata(file: &Path) -> anyhow::Result<HashMap<String, Value>> {
     let mut buf = Vec::with_capacity(HEADER_BYTES);
     std::fs::File::open(file)?.take(HEADER_BYTES as u64).read_to_end(&mut buf)?;

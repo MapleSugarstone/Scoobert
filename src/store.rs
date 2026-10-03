@@ -154,6 +154,8 @@ pub struct Settings {
     pub plan_first: PlanFirst,
     /// System prompts the user wrote, by model name. A model without one uses Scoobert's own.
     pub model_prompts: BTreeMap<String, String>,
+    /// Model files the user added from other folders, which Scoobert runs where they are.
+    pub model_files: Vec<String>,
 }
 
 /// Whether a new conversation's first task plans the project in its notes before it writes code.
@@ -207,6 +209,7 @@ impl Default for Settings {
             models_from_disk: false,
             plan_first: PlanFirst::Off,
             model_prompts: BTreeMap::new(),
+            model_files: Vec::new(),
         }
     }
 }
