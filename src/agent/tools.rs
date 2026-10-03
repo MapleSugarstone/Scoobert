@@ -110,7 +110,7 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool, browser: bool) -> Vec<V
     let mut all = vec![
         tool(
             "read",
-            "Read a text file. Returns up to 2000 lines. Use offset and limit for longer files. Read a note by its name in double brackets, such as [[Auth design]]; the result also lists the note's links and the notes that link to it.",
+            "Read a text file. Returns up to 2000 lines. Use offset and limit for longer files. Read a note by its name in double brackets, such as [[Auth design]]. For a note, the result starts with one line in brackets that lists its links and the notes that link to it, which is not part of the file, and the file's text follows exactly as it is on disk.",
             json!({
                 "path": path,
                 "offset": { "type": "integer", "description": "First line to read, starting at 1." },
@@ -448,7 +448,7 @@ async fn read(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
         let folder = notes.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let links = super::prompt::link_summary(&crate::notes::Vault::new(notes), &rel, &folder);
         if !links.is_empty() {
-            out.push_str(&format!("\n{links}"));
+            out = format!("{links}\n{out}");
         }
     }
     Ok(Outcome::ok(out))
