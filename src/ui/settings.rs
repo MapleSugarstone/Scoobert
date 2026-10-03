@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::widget::scrollable::RelativeOffset;
-use iced::widget::{Column, button, checkbox, column, container, operation, pick_list, progress_bar, row, rule, scrollable, space, text, text_editor, text_input, toggler};
+use iced::widget::{Column, button, checkbox, column, container, operation, pick_list, progress_bar, row, rule, scrollable, space, text, text_editor, text_input};
 use iced::{Alignment, Element, Fill, Length, Task};
 
 use super::Message;
@@ -1133,5 +1133,5 @@ fn field<'a>(label: &'static str, help: Option<&'static str>, control: Element<'
 }
 
 fn switch_row<'a>(label: &'static str, help: &'static str, on: bool, msg: fn(bool) -> Msg) -> Element<'a, Msg> {
-    field(label, Some(help), toggler(on).on_toggle(msg).size(20).style(theme::switch).into())
+    field(label, Some(help), super::switch::switch(on, msg).into())
 }

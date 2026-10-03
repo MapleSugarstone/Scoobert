@@ -1,7 +1,9 @@
 //! Runs conversations: sends them to a local or hosted model, runs the tools it calls, and keeps the local
 //! model's prompt cache and the project notes up to date.
 
+pub mod browser;
 pub mod conversation;
+pub mod jobs;
 pub mod memory;
 pub mod prompt;
 pub mod providers;
@@ -27,7 +29,7 @@ use tools::Shell;
 
 use crate::i18n::{tr, trf};
 use crate::llama::{LlamaServer, LocalModel, ServerStatus, SharedSettings};
-use crate::store::{Approvals, HostedModel, Settings, Thinking};
+use crate::store::{Approvals, HostedModel, PlanFirst, Settings, Thinking};
 use crate::util::{is_cancelled, now_millis, thousands};
 
 const MAX_OUTPUT_TOKENS: u32 = 16_384;
@@ -39,6 +41,8 @@ pub enum Decision {
     Allow,
     Always,
     Deny,
+    /// The answer to the question a new project asks instead of an approval.
+    Plan(PlanFirst),
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +76,8 @@ pub enum Event {
     Preparing(Option<(String, u64)>),
     /// A task finished with the local model, so a task in another conversation can use it.
     ModelFree,
+    /// The commands the model left running in the background, by job number.
+    Jobs { conv: ConvId, jobs: Vec<(u32, String)> },
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +96,8 @@ pub struct Snapshot {
     pub compacted_at: Option<usize>,
     /// The last task stopped before it finished, after a crash, a close, or Stop.
     pub interrupted: bool,
+    /// Commands the model left running in the background.
+    pub jobs: Vec<(u32, String)>,
 }
 
 /// An entry in the model menu.
@@ -132,6 +140,10 @@ struct Live {
     last_thought: Mutex<Option<std::time::Instant>>,
     /// The request in flight was stopped because a file write grew past `stream::WRITE_PART_CHARS`.
     split: AtomicBool,
+    /// Commands the model started in the background, which end when the conversation closes.
+    jobs: Arc<jobs::Jobs>,
+    /// The browser the model tests pages in, which closes when the task ends.
+    browser: tools::BrowserSlot,
 }
 
 /// Why a file write was cut off partway, which decides what is saved and what the model is told.
@@ -203,6 +215,12 @@ enum Verdict {
 const SUMMARY_PROMPT: &str = "Scoobert context step. The conversation is too long for the model's context, so older messages will be replaced by your summary and only the most recent ones stay. Start with one line that begins with Title: and names the whole task in three to six words. Then write what you need to continue the work without the older ones, as short bullet points under these headings, in this order: ## Goal, ## Next, ## Open problems, ## Decisions (with reasons), ## Done (files changed and why, with exact paths). Keep the whole summary under 400 words. Reply in plain text without tools.";
 /// Facts from the note step are three labeled lines of up to 160 characters.
 const REMEMBER_MAX_TOKENS: u32 = 160;
+const IMAGE_HELPER: &str = "You describe images for another AI model that cannot see them. Report only what the image shows.";
+const HELPER_TOKENS: u32 = 800;
+/// Room for one screenshot, the request, and the description.
+const HELPER_CONTEXT: u32 = 8192;
+/// Free memory left over when the image helper runs beside the conversation's model.
+const HELPER_MARGIN: u64 = 1_000_000_000;
 const TITLE_PROMPT: &str = "Scoobert title step. Reply with a short title for this conversation: 3 to 6 words that name the task, with no quotes and no period. Reply in plain text without tools.";
 const TITLE_MAX_TOKENS: u32 = 24;
 /// Summary length caps. A laptop CPU writes one to four tokens per second, so local summaries stay short.
@@ -234,6 +252,12 @@ const NOTES_UPDATE: &str = "<notes_update>Update the project notes from this who
 const PLAN: &str = "Before you write any code, plan this project in its notes. Think through the features the request needs, including the ones it implies but does not name. Write {notes}/Features.md with a # Features heading, an empty ## Done section, and a ## To do section with one line per feature, written as - **Short name**: one sentence about what it does, linked to its page as [[Short name]]. For each feature that needs more than a few lines of code, write {notes}/Short name.md with what it does, the files it will add or change, how it connects to other features through [[links]], and how to check that it works. Put decisions that affect the whole project in {notes}/Decisions.md, with the reason for each. Keep each page short, since you will read them again later instead of the whole conversation.";
 const PLAN_DISCUSS: &str = "Then stop without writing code, and reply with a short summary of the plan and the questions the user should answer before you build.";
 const PLAN_BUILD: &str = "Then build the project from the plan, one feature at a time, in an order where each step can be checked. After each feature works, move its line from To do to Done in Features.md, and correct its page where the build differs from the plan.";
+
+/// Instructions to plan the project in its notes first, then stop for the user or build from the plan.
+fn plan_instructions(folder: &str, then_build: bool) -> String {
+    let next = if then_build { PLAN_BUILD } else { PLAN_DISCUSS };
+    format!("<plan_first>{PLAN} {next}</plan_first>").replace("{notes}", folder)
+}
 /// Lines from the end of a file that a cut-off write's result shows.
 const FILE_END_LINES: usize = 6;
 
@@ -453,6 +477,7 @@ impl Host {
             notice,
             compacted_at: c.compaction.as_ref().map(|comp| comp.kept_from),
             interrupted: !live.running.load(Ordering::SeqCst) && needs_continue(&c.messages),
+            jobs: live.jobs.running(),
         }
     }
 
@@ -487,7 +512,13 @@ impl Host {
             let _ = conv.set_model(&fallback);
         }
         let id = conv.id.clone();
+        let (events, conv_id) = (self.events.clone(), id.clone());
+        let notify: jobs::Notify = Arc::new(move |jobs| {
+            let _ = events.send(Event::Jobs { conv: conv_id.clone(), jobs });
+        });
         let live = Arc::new(Live {
+            jobs: Arc::new(jobs::Jobs::new(notify)),
+            browser: tools::BrowserSlot::default(),
             conv: Mutex::new(conv),
             running: AtomicBool::new(false),
             run_cancel: Mutex::new(None),
@@ -698,8 +729,16 @@ impl Host {
             return Ok(());
         }
         let text = queued.iter().map(|(t, _)| t.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n\n");
-        let images = queued.into_iter().flat_map(|(_, i)| i).collect();
-        let user = Message::User(UserMessage { text, context: QUEUED.into(), images, time: now_millis(), ..Default::default() });
+        let images: Vec<conversation::Image> = queued.into_iter().flat_map(|(_, i)| i).collect();
+        // Describing images would stop the task's model, so a model that cannot see them hears that they came.
+        let model = live.conv.lock().unwrap().model.clone();
+        let described = !images.is_empty() && !self.sees_images(&model);
+        let context = if described {
+            format!("{QUEUED}\n\nThe user also attached {} images, which you cannot see. Ask the user to send them again after this task, when another model can describe them.", images.len())
+        } else {
+            QUEUED.into()
+        };
+        let user = Message::User(UserMessage { text, context, images, described, time: now_millis(), ..Default::default() });
         live.conv.lock().unwrap().push(user.clone())?;
         self.emit(Event::Message { conv: id.to_string(), message: user });
         Ok(())
@@ -712,9 +751,7 @@ impl Host {
     /// Sends the first message of a conversation with instructions to plan the project in its notes first, and then
     /// either stop for the user or build from the plan.
     pub fn plan(self: &Arc<Self>, id: &str, text: String, images: Vec<conversation::Image>, then_build: bool) -> anyhow::Result<()> {
-        let folder = self.settings().notes_folder;
-        let next = if then_build { PLAN_BUILD } else { PLAN_DISCUSS };
-        let instructions = format!("<plan_first>{PLAN} {next}</plan_first>").replace("{notes}", &folder);
+        let instructions = plan_instructions(&self.settings().notes_folder, then_build);
         // A plan that stops for the user wrote the notes already, so the note step after it has nothing to add.
         self.start(id, text, images, false, Some(instructions), !then_build)
     }
@@ -840,6 +877,8 @@ impl Host {
         live.notes_update.store(notes_written, Ordering::SeqCst);
         self.rt.spawn(async move {
             let result = host.run(&live, &conv_id, text, images, resume, instructions, &cancel).await;
+            // The browser holds hundreds of megabytes, so it closes with the task, and the next task opens a new one.
+            drop(live.browser.lock().await.take());
             if let Err(err) = &result
                 && !is_cancelled(err)
             {
@@ -887,8 +926,29 @@ impl Host {
         // A local model can start its reply with given text, so Continue picks up a stopped reply where it stopped.
         let try_continue = resume && !summarized && matches!(target, Target::Local(_)) && matches!(&last, Some(Message::Assistant(a)) if continuable(a));
         let mut message = (!unanswered).then_some((text, images, instructions));
+        // A model that cannot see images gets the user's images described by one that can, before it loads.
+        let mut described = false;
+        if let Some((_, images, instructions)) = message.as_mut()
+            && !images.is_empty()
+            && !self.sees_images(&model_name)
+        {
+            if matches!(target, Target::Local(_)) {
+                self.take_turn(live, id, cancel).await?;
+            }
+            let mut notes = Vec::new();
+            for (i, image) in images.iter().enumerate() {
+                let (helper, text) = self.describe_image(live, id, image, "image", "", cancel).await?;
+                notes.push(format!("<image_description>Image {} that the user attached, described by {helper}, because you cannot see images:\n{text}</image_description>", i + 1));
+            }
+            let notes = notes.join("\n\n");
+            *instructions = Some(match instructions.take() {
+                Some(i) => format!("{i}\n\n{notes}"),
+                None => notes,
+            });
+            described = true;
+        }
         if !try_continue && let Some((text, images, instructions)) = message.take() {
-            self.add_message(live, id, text, images, resume, instructions, last.as_ref(), cancel).await?;
+            self.add_message(live, id, text, images, described, resume, instructions, last.as_ref(), cancel).await?;
         }
         if matches!(target, Target::Local(_)) {
             self.take_turn(live, id, cancel).await?;
@@ -925,7 +985,7 @@ impl Host {
             }
             continuing = try_continue && self.can_continue(live, id, &target).await;
             if !continuing && let Some((text, images, instructions)) = message.take() {
-                self.add_message(live, id, text, images, resume, instructions, last.as_ref(), cancel).await?;
+                self.add_message(live, id, text, images, described, resume, instructions, last.as_ref(), cancel).await?;
             }
             let cache = CancellationToken::new();
             *live.cache_cancel.lock().unwrap() = Some(cache.clone());
@@ -947,6 +1007,7 @@ impl Host {
         id: &str,
         text: String,
         images: Vec<conversation::Image>,
+        described: bool,
         resume: bool,
         instructions: Option<String>,
         last: Option<&Message>,
@@ -992,7 +1053,7 @@ impl Host {
             }
         }
         // Surrounding whitespace would change how the start of the text tokenizes and miss the saved cache.
-        let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, time: now_millis() });
+        let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, described, time: now_millis() });
         live.conv.lock().unwrap().push(user.clone())?;
         self.emit(Event::Message { conv: id.to_string(), message: user });
         Ok(())
@@ -1137,7 +1198,7 @@ impl Host {
                 // A new project moves the conversation, so each call reads the current folder.
                 let cwd = live.conv.lock().unwrap().cwd.clone();
                 let result = if cancel.is_cancelled() {
-                    ToolResult { call_id: call.id.clone(), name: call.name.clone(), output: "The user stopped Scoobert before this ran.".into(), is_error: true, diff: None, time: now_millis() }
+                    ToolResult { call_id: call.id.clone(), name: call.name.clone(), output: "The user stopped Scoobert before this ran.".into(), is_error: true, diff: None, time: now_millis(), ..Default::default() }
                 } else {
                     self.run_tool(live, id, &cwd, &call, cancel).await
                 };
@@ -1197,7 +1258,7 @@ impl Host {
                 _ => None,
             };
             let result = match refused {
-                Some(output) => ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error: true, diff: None, time: now_millis() },
+                Some(output) => ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error: true, diff: None, time: now_millis(), ..Default::default() },
                 None => {
                     let mut r = self.run_tool(live, id, &cwd, &call, cancel).await;
                     if !r.is_error {
@@ -1479,8 +1540,7 @@ impl Host {
                     text: format!("<summary>\n{}\n</summary>", comp.summary.trim()),
                     environment: comp.environment.clone(),
                     context: comp.context.clone(),
-                    images: Vec::new(),
-                    time: 0,
+                    ..Default::default()
                 })];
                 out.extend(c.messages[comp.kept_from..].iter().cloned());
                 out
@@ -1498,9 +1558,10 @@ impl Host {
             is_error,
             diff,
             time: now_millis(),
+            ..Default::default()
         };
         if call.name == "new_project" {
-            return self.start_project(live, id, call);
+            return self.start_project(live, id, call, cancel).await;
         }
         match self.approve(live, id, cwd, call, cancel).await {
             Verdict::Deny(reason) => return make(reason, true, None),
@@ -1519,6 +1580,8 @@ impl Host {
             notes: Some(cwd.join(&self.settings().notes_folder)),
             web: self.settings().web_access,
             checkpoints: Some(checkpoint_dir(id)),
+            jobs: Some(live.jobs.clone()),
+            browser: Some(live.browser.clone()),
         };
         let outcome = tools::run(call, cwd, &self.shell, &limits, cancel, move |tail| {
             let _ = events.send(Event::ToolOutput { conv: conv.clone(), call_id: call_id.clone(), tail });
@@ -1527,7 +1590,132 @@ impl Host {
         if tools::changes_files(&call.name) && self.inside_notes(cwd, call) {
             self.emit(Event::NotesChanged { cwd: cwd.to_path_buf() });
         }
-        make(outcome.output, outcome.is_error, outcome.diff)
+        let mut result = make(outcome.output, outcome.is_error, outcome.diff);
+        if let Some(image) = outcome.image {
+            self.add_screenshot(live, id, call, &mut result, image, cancel).await;
+        }
+        result
+    }
+
+    /// Gives a screenshot to a model that can see images, and has another model describe it for one that cannot.
+    async fn add_screenshot(&self, live: &Live, id: &str, call: &ToolCall, result: &mut ToolResult, image: conversation::Image, cancel: &CancellationToken) {
+        let model = live.conv.lock().unwrap().model.clone();
+        result.images = vec![image.clone()];
+        if self.sees_images(&model) {
+            result.output.push_str(" The screenshot follows.");
+            return;
+        }
+        result.described = true;
+        match self.describe_image(live, id, &image, "screenshot of a web page", call.arg("question"), cancel).await {
+            Ok((helper, text)) => result.output.push_str(&format!("\n\nYou cannot see images, so {helper} looked at the screenshot and described it:\n{text}")),
+            Err(err) if is_cancelled(&err) => result.output.push_str("\n\nThe user stopped Scoobert before the screenshot was described."),
+            Err(err) => result.output.push_str(&format!("\n\nThe screenshot could not be described: {err:#} Check the page with browser_read and browser_script instead.")),
+        }
+    }
+
+    fn sees_images(&self, model: &str) -> bool {
+        match self.target(model) {
+            Ok(Target::Local(m)) => m.mmproj.is_some(),
+            Ok(Target::Hosted(h, ..)) => h.vision,
+            Err(_) => false,
+        }
+    }
+
+    /// The model that describes images for models that cannot see them: the smallest local model with an image
+    /// projector, or else a hosted model that sees images.
+    fn image_helper(&self) -> Option<Target> {
+        let local = self.llama.models().into_iter().filter(|m| m.mmproj.is_some()).min_by_key(|m| m.size);
+        if let Some(m) = local {
+            return Some(Target::Local(m));
+        }
+        let hosted = self.models().into_iter().find(|m| m.usable && m.vision && !m.provider.is_empty())?;
+        self.target(&hosted.name).ok()
+    }
+
+    /// Has a model that sees images describe one for a model that cannot, and returns the helper's name with the
+    /// description. A local helper runs in a server of its own beside the conversation's model when memory allows.
+    /// Otherwise the conversation's model saves what it has read, makes room, and loads again afterward.
+    async fn describe_image(
+        &self,
+        live: &Live,
+        id: &str,
+        image: &conversation::Image,
+        what: &str,
+        question: &str,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<(String, String)> {
+        let helper = self.image_helper().context("No model that can see images is set up. Download Qwen3.5 9B in Settings so Scoobert can describe images.")?;
+        let mut prompt = format!(
+            "Describe this {what} for a programmer who cannot see it. Give the text it shows word for word, then the layout, colors, and sizes of what is on it. Point out anything that looks wrong, such as overlapping or cut-off parts, blank areas, missing images, or error messages. Be specific and brief."
+        );
+        if !question.trim().is_empty() {
+            prompt.push_str(&format!(" Also answer this question about it: {}", question.trim()));
+        }
+        let message = Message::User(UserMessage { text: prompt, images: vec![image.clone()], time: now_millis(), ..Default::default() });
+        let model = match helper {
+            Target::Hosted(h, ..) => {
+                self.emit(Event::Activity { conv: id.into(), text: Some(trf("{model} is looking at the image", &[("model", &h.name)])) });
+                let target = self.target(&h.reference())?;
+                let ep = self.endpoint(&target);
+                let req = ChatRequest {
+                    system: IMAGE_HELPER,
+                    messages: std::slice::from_ref(&message),
+                    tools: &[],
+                    thinking: Thinking::Off,
+                    thinking_budget: None,
+                    max_tokens: HELPER_TOKENS,
+                };
+                let reply = stream::send(&self.http, &ep, &stream::payload(&ep, &req), cancel, |_| {}).await?;
+                if reply.stop == StopReason::Aborted {
+                    return Err(crate::util::Cancelled.into());
+                }
+                return Ok((h.name.clone(), reply.text.trim().to_string()));
+            }
+            Target::Local(m) => m,
+        };
+        let need = self.llama.memory_needed(&model, HELPER_CONTEXT);
+        let conv_model = match self.target(&live.conv.lock().unwrap().model.clone()) {
+            Ok(Target::Local(m)) => Some(m),
+            _ => None,
+        };
+        let swap = crate::sys::available_memory() < need + HELPER_MARGIN;
+        if swap {
+            if conv_model.is_none() && self.turn_holder.lock().unwrap().as_deref().is_some_and(|holder| holder != id) {
+                bail!("{} needs about {} of free memory to look at the image, and a task in another conversation is using the local model.", model.name, crate::util::gb(need));
+            }
+            self.stop_baking();
+            if self.llama.slot_owner().as_deref() == Some(id)
+                && let Err(err) = self.persist(live, false, false, cancel).await
+            {
+                if is_cancelled(&err) {
+                    return Err(err);
+                }
+                eprintln!("[cache] {err:#}");
+            }
+            self.llama.stop().await;
+            self.llama.set_slot_owner(None);
+        }
+        self.emit(Event::Activity { conv: id.into(), text: Some(trf("{model} is looking at the image", &[("model", &model.name)])) });
+        let body = stream::payload(
+            &self.endpoint(&Target::Local(model.clone())),
+            &ChatRequest { system: IMAGE_HELPER, messages: std::slice::from_ref(&message), tools: &[], thinking: Thinking::Off, thinking_budget: None, max_tokens: HELPER_TOKENS },
+        );
+        let reply = self.llama.run_side(&model, HELPER_CONTEXT, &body, cancel).await;
+        if swap && let Some(main) = &conv_model {
+            self.emit(Event::Activity { conv: id.into(), text: Some(trf("Loading {model} again", &[("model", &main.name)])) });
+            self.llama.ensure(main).await?;
+            if let Err(err) = self.persist(live, false, false, cancel).await {
+                if is_cancelled(&err) {
+                    return Err(err);
+                }
+                eprintln!("[cache] {err:#}");
+            }
+        }
+        let text = reply?["choices"][0]["message"]["content"].as_str().unwrap_or_default().trim().to_string();
+        if text.is_empty() {
+            bail!("{} returned no description.", model.name);
+        }
+        Ok((model.name.clone(), text))
     }
 
     async fn approve(&self, live: &Live, id: &str, cwd: &Path, call: &ToolCall, cancel: &CancellationToken) -> Verdict {
@@ -1561,7 +1749,7 @@ impl Host {
         match decision {
             Decision::Allow => Verdict::Allow,
             Decision::Always => Verdict::Always,
-            Decision::Deny => Verdict::Deny("The user declined this tool call. Ask them how to proceed.".into()),
+            Decision::Deny | Decision::Plan(_) => Verdict::Deny("The user declined this tool call. Ask them how to proceed.".into()),
         }
     }
 
@@ -1586,7 +1774,7 @@ impl Host {
             return (p.system.clone(), p.tools.clone());
         }
         let system = self.system_prompt(&s, &c.model);
-        let tools = tools::specs(&self.shell, general, s.web_access);
+        let tools = tools::specs(&self.shell, general, s.web_access, web::has_browser());
         // Only a running task pins them, so opening a conversation to read it does not write to its file.
         if live.running.load(Ordering::SeqCst) {
             let pin = conversation::PinnedPrompt { system: system.clone(), tools: tools.clone(), notes_folder: s.notes_folder.clone(), web: s.web_access, general, custom };
@@ -1602,13 +1790,17 @@ impl Host {
         prompt::system_prompt(s.model_prompt(model).unwrap_or(prompt::DEFAULT_PROMPT), &s.notes_folder, self.shell.tool_name())
     }
 
-    /// Creates a project folder for a conversation that has none and moves the conversation into it.
-    fn start_project(&self, live: &Live, id: &str, call: &ToolCall) -> ToolResult {
-        let make = |output: String, is_error: bool| ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error, diff: None, time: now_millis() };
+    /// Creates a project folder for a conversation that has none and moves the conversation into it, after the user
+    /// chooses whether Scoobert plans the project first.
+    async fn start_project(&self, live: &Live, id: &str, call: &ToolCall, cancel: &CancellationToken) -> ToolResult {
+        let make = |output: String, is_error: bool| ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error, diff: None, time: now_millis(), ..Default::default() };
         let current = live.conv.lock().unwrap().cwd.clone();
         if !is_general(&current) {
             return make("A project is already open, so keep working in it.".into(), true);
         }
+        let Some(plan) = self.choose_plan(id, call, cancel).await else {
+            return make("The user stopped before the project started.".into(), true);
+        };
         let name = crate::notes::sanitize_name(call.arg("name"));
         let root = crate::paths::projects_root();
         let mut path = root.join(&name);
@@ -1627,7 +1819,40 @@ impl Host {
         }
         let file = live.conv.lock().unwrap().file.clone();
         self.emit(Event::ProjectStarted { conv: id.to_string(), path: path.clone(), file });
-        make(format!("Started the project folder {}. Relative paths now resolve inside it.", crate::paths::display(&path)), false)
+        let folder_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let shown = crate::paths::display(&path);
+        // Models tend to keep the folder name in the paths they planned before the folder existed.
+        let mut output = format!(
+            "Started the project folder {shown}, and commands now run in it. Give paths relative to it, such as main.py for {shown}/main.py. Do not start a path with {folder_name}/, which would make a second {folder_name} folder inside it."
+        );
+        if plan != PlanFirst::Off {
+            output.push_str(&format!(" The user chose to plan first. {}", plan_instructions(&self.settings().notes_folder, plan == PlanFirst::Build)));
+        }
+        if plan == PlanFirst::Discuss {
+            live.notes_update.store(true, Ordering::SeqCst);
+        }
+        make(output, false)
+    }
+
+    /// Asks the user whether to plan a new project first. Unattended work uses the last choice, since nobody is there
+    /// to pick. None when the user stopped the task instead.
+    async fn choose_plan(&self, id: &str, call: &ToolCall, cancel: &CancellationToken) -> Option<PlanFirst> {
+        let s = self.settings();
+        if s.approvals == Approvals::Project {
+            return Some(s.plan_first);
+        }
+        let approval = self.next_approval.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.approvals.lock().unwrap().insert(approval, (id.to_string(), tx));
+        self.emit(Event::Approval { conv: id.to_string(), id: approval, call: call.clone() });
+        let decision = tokio::select! {
+            d = rx => d.unwrap_or(Decision::Deny),
+            _ = cancel.cancelled() => Decision::Deny,
+        };
+        match decision {
+            Decision::Plan(plan) => Some(plan),
+            _ => None,
+        }
     }
 
     /// Tool output that fits in about a quarter of the model's context.
@@ -1750,7 +1975,7 @@ impl Host {
         if exclude_last {
             messages.pop();
         }
-        if messages.iter().any(|m| matches!(m, Message::User(u) if !u.images.is_empty())) {
+        if messages.iter().any(Message::sends_images) {
             return Ok(None);
         }
         let tools = self.tool_specs(live);
@@ -1774,7 +1999,7 @@ impl Host {
             Target::Hosted(h, ..) => h.reference(),
         };
         let system = self.system_prompt(&s, &model);
-        let tools = tools::specs(&self.shell, is_general(cwd), s.web_access);
+        let tools = tools::specs(&self.shell, is_general(cwd), s.web_access, web::has_browser());
         let req = ChatRequest { system: &system, messages: &[], tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(target) };
         self.llama.shared_prefix(&stream::payload(&self.endpoint(target), &req), &format!("{environment}\n\n")).await
     }
@@ -2002,7 +2227,19 @@ impl Host {
         Ok(reply.text)
     }
 
+    /// Stops a background command the user chose to stop.
+    pub fn stop_job(&self, conv: &str, job: u32) {
+        if let Ok(live) = self.live(conv) {
+            live.jobs.stop_quietly(job);
+        }
+    }
+
     pub async fn shutdown(&self) {
+        let lives: Vec<Arc<Live>> = self.convs.lock().unwrap().values().cloned().collect();
+        for live in lives {
+            live.jobs.stop_all();
+            drop(live.browser.lock().await.take());
+        }
         let tokens: Vec<CancellationToken> = self
             .convs
             .lock()
@@ -2224,8 +2461,8 @@ fn answer_dangling_calls(conv: &mut Conversation) -> anyhow::Result<()> {
             name: c.name,
             output: "Scoobert closed before this ran.".into(),
             is_error: true,
-            diff: None,
             time: now_millis(),
+            ..Default::default()
         }))?;
     }
     Ok(())
@@ -2270,7 +2507,7 @@ mod resume_note_tests {
     fn the_note_names_only_what_the_stop_left() {
         assert!(resume_note(Some(&stopped("half a thought", 0))).contains(RESUME_CUT));
         assert!(resume_note(Some(&stopped("", 1))).contains(RESUME_WRITE));
-        let plain = resume_note(Some(&Message::Tool(ToolResult { call_id: "1".into(), name: "bash".into(), output: String::new(), is_error: false, diff: None, time: 0 })));
+        let plain = resume_note(Some(&Message::Tool(ToolResult { call_id: "1".into(), name: "bash".into(), output: String::new(), is_error: false, diff: None, time: 0, ..Default::default() })));
         assert!(!plain.contains(RESUME_CUT) && !plain.contains(RESUME_WRITE));
         assert!(!continuable(match &stopped("", 0) {
             Message::Assistant(a) => a,
@@ -2309,9 +2546,9 @@ fn messages_chars(messages: &[Message]) -> usize {
     messages
         .iter()
         .map(|m| match m {
-            Message::User(u) => u.text.len() + u.context.len() + u.images.len() * 3000,
+            Message::User(u) => u.text.len() + u.context.len() + u.sent_images().len() * 3000,
             Message::Assistant(a) => a.thinking.len() + a.text.len() + a.tool_calls.iter().map(|c| c.arguments.to_string().len() + 40).sum::<usize>(),
-            Message::Tool(t) => t.output.len() + 40,
+            Message::Tool(t) => t.output.len() + 40 + t.sent_images().len() * 3000,
         })
         .sum()
 }
@@ -2380,8 +2617,8 @@ mod tests {
         let write = |id: &str| ToolCall { id: id.into(), name: "write".into(), arguments: serde_json::json!({ "path": "a.ts", "content": big }) };
         let messages = vec![
             Message::Assistant(AssistantMessage { tool_calls: vec![write("ok"), write("failed")], ..Default::default() }),
-            Message::Tool(ToolResult { call_id: "ok".into(), name: "write".into(), output: "Created".into(), is_error: false, diff: None, time: 0 }),
-            Message::Tool(ToolResult { call_id: "failed".into(), name: "write".into(), output: "Could not write".into(), is_error: true, diff: None, time: 0 }),
+            Message::Tool(ToolResult { call_id: "ok".into(), name: "write".into(), output: "Created".into(), is_error: false, diff: None, time: 0, ..Default::default() }),
+            Message::Tool(ToolResult { call_id: "failed".into(), name: "write".into(), output: "Could not write".into(), is_error: true, diff: None, time: 0, ..Default::default() }),
         ];
         let out = super::shorten_saved_writes(messages);
         let Message::Assistant(a) = &out[0] else { panic!() };
@@ -2397,7 +2634,7 @@ mod tests {
         let output = format!("Created a.ts (now 9 bytes).{}", super::tools::SHORTENED_NOTICE);
         let messages = vec![
             Message::Assistant(AssistantMessage { tool_calls: vec![call], ..Default::default() }),
-            Message::Tool(ToolResult { call_id: "w".into(), name: "write".into(), output, is_error: false, diff: None, time: 0 }),
+            Message::Tool(ToolResult { call_id: "w".into(), name: "write".into(), output, is_error: false, diff: None, time: 0, ..Default::default() }),
         ];
         let out = super::shorten_saved_writes(messages);
         let Message::Assistant(a) = &out[0] else { panic!() };
@@ -2437,7 +2674,7 @@ mod tests {
         Message::Assistant(AssistantMessage { tool_calls: vec![call], ..Default::default() })
     }
     fn result(n: usize) -> Message {
-        Message::Tool(ToolResult { call_id: "c".into(), name: "read".into(), output: "o".repeat(n), is_error: false, diff: None, time: 0 })
+        Message::Tool(ToolResult { call_id: "c".into(), name: "read".into(), output: "o".repeat(n), is_error: false, diff: None, time: 0, ..Default::default() })
     }
 
     #[test]

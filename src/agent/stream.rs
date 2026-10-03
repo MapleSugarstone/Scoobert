@@ -61,9 +61,20 @@ pub fn payload(ep: &Endpoint, req: &ChatRequest) -> Value {
 
 fn openai_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
     let mut messages = vec![json!({ "role": "system", "content": req.system })];
+    // A tool message holds only text, so screenshots follow the tool results as a user message.
+    let mut shots: Vec<Image> = Vec::new();
+    let flush = |messages: &mut Vec<Value>, shots: &mut Vec<Image>| {
+        if !shots.is_empty() {
+            messages.push(json!({ "role": "user", "content": openai_user_content("The screenshots from the tool results above.", shots) }));
+            shots.clear();
+        }
+    };
     for m in req.messages {
+        if !matches!(m, Message::Tool(_)) {
+            flush(&mut messages, &mut shots);
+        }
         match m {
-            Message::User(u) => messages.push(json!({ "role": "user", "content": openai_user_content(&u.full_text(), &u.images) })),
+            Message::User(u) => messages.push(json!({ "role": "user", "content": openai_user_content(&u.full_text(), u.sent_images()) })),
             Message::Assistant(a) => {
                 let mut msg = Map::new();
                 msg.insert("role".into(), "assistant".into());
@@ -90,9 +101,13 @@ fn openai_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
                 }
                 messages.push(Value::Object(msg));
             }
-            Message::Tool(t) => messages.push(json!({ "role": "tool", "tool_call_id": t.call_id, "content": t.output })),
+            Message::Tool(t) => {
+                messages.push(json!({ "role": "tool", "tool_call_id": t.call_id, "content": t.output }));
+                shots.extend(t.sent_images().iter().cloned());
+            }
         }
     }
+    flush(&mut messages, &mut shots);
     let mut body = Map::new();
     body.insert("model".into(), ep.model.clone().into());
     body.insert("messages".into(), messages.into());
@@ -297,7 +312,7 @@ fn anthropic_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
         match m {
             Message::User(u) => {
                 let mut blocks = vec![json!({ "type": "text", "text": u.full_text() })];
-                for img in &u.images {
+                for img in u.sent_images() {
                     blocks.push(json!({ "type": "image", "source": { "type": "base64", "media_type": img.mime, "data": img.data } }));
                 }
                 push("user", blocks);
@@ -322,10 +337,18 @@ fn anthropic_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
                     push("assistant", blocks);
                 }
             }
-            Message::Tool(t) => push(
-                "user",
-                vec![json!({ "type": "tool_result", "tool_use_id": t.call_id, "content": t.output, "is_error": t.is_error })],
-            ),
+            Message::Tool(t) => {
+                let content = if t.sent_images().is_empty() {
+                    Value::from(t.output.clone())
+                } else {
+                    let mut parts = vec![json!({ "type": "text", "text": t.output })];
+                    for img in t.sent_images() {
+                        parts.push(json!({ "type": "image", "source": { "type": "base64", "media_type": img.mime, "data": img.data } }));
+                    }
+                    parts.into()
+                };
+                push("user", vec![json!({ "type": "tool_result", "tool_use_id": t.call_id, "content": content, "is_error": t.is_error })]);
+            }
         }
     }
     // Caching the conversation up to the newest message makes the next request read it at a tenth of the price.

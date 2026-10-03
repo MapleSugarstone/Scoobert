@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use iced::widget::{Column, button, column, container, markdown, progress_bar, rich_text, row, rule, scrollable, space, text};
+use iced::widget::{Column, button, column, container, image, markdown, progress_bar, rich_text, row, rule, scrollable, space, text};
 use iced::{Alignment, Element, Fill, Length, Padding, Theme};
 
 use super::Message;
@@ -14,7 +14,7 @@ use crate::agent::conversation::{AssistantMessage, Message as AgentMessage, Stop
 use crate::agent::stream::Delta;
 use crate::agent::{ConvId, Decision, Snapshot};
 use crate::i18n::{key, tr, trf};
-use crate::store::Thinking;
+use crate::store::{PlanFirst, Thinking};
 use crate::util::{about_duration, clip, thousands};
 
 pub const TRANSCRIPT_ID: &str = "transcript";
@@ -71,6 +71,10 @@ pub struct Chat {
     pub queued: Vec<String>,
     /// The last task stopped before it finished, so the transcript offers Continue.
     pub interrupted: bool,
+    /// Commands the model left running in the background, by job number.
+    pub jobs: Vec<(u32, String)>,
+    /// Screenshots from browser calls, by call id, decoded once.
+    shots: HashMap<String, image::Handle>,
     counter: usize,
     /// Messages added so far, so each user message knows its position.
     seen: usize,
@@ -100,6 +104,8 @@ impl Chat {
             pending: None,
             queued: Vec::new(),
             interrupted: s.interrupted,
+            jobs: s.jobs,
+            shots: HashMap::new(),
             counter: 0,
             seen: 0,
         };
@@ -138,6 +144,12 @@ impl Chat {
                         && let Some(card) = tools.iter_mut().find(|c| c.call.id == t.call_id)
                     {
                         self.live_output.remove(&t.call_id);
+                        if let Some(shot) = t.images.first() {
+                            use base64::Engine;
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&shot.data) {
+                                self.shots.insert(t.call_id.clone(), image::Handle::from_bytes(bytes));
+                            }
+                        }
                         card.result = Some(t);
                         return;
                     }
@@ -244,6 +256,7 @@ impl Chat {
                 self.live_output.insert(call_id, tail);
             }
             E::Approval { id, call, .. } => self.approvals.push((id, call)),
+            E::Jobs { jobs, .. } => self.jobs = jobs,
             E::Settled { context, interrupted, .. } => {
                 self.running = false;
                 self.interrupted = interrupted;
@@ -506,6 +519,10 @@ impl Chat {
         {
             col = col.push(container(text(clip(first, 200)).size(12).style(theme::danger_text)).padding(Padding { left: 18.0, ..Padding::ZERO }));
         }
+        if let Some(shot) = self.shots.get(&card.call.id) {
+            let picture = container(image(shot.clone()).width(Length::Fixed(480.0))).style(theme::code_block).padding(4);
+            col = col.push(container(picture).padding(Padding { left: 18.0, ..Padding::ZERO }));
+        }
         let live = self.live_output.get(&card.call.id).filter(|o| !o.is_empty());
         if open || running && live.is_some() {
             let body: Element<'a, Message> = match (&card.result, live) {
@@ -569,10 +586,14 @@ fn reply_actions<'a>(raw: &str) -> Element<'a, Message> {
 }
 
 fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {
+    if call.name == "new_project" {
+        return plan_choice(id, call);
+    }
     let what = match call.name.as_str() {
         "edit" => trf("Scoobert wants to edit {path}", &[("path", &call.arg("path"))]),
         "write" => trf("Scoobert wants to write {path}", &[("path", &call.arg("path"))]),
         "bash" | "powershell" => tr("Scoobert wants to run a command").to_string(),
+        "browser_script" => tr("Scoobert wants to run a script in the browser").to_string(),
         other => trf("Scoobert wants to use {tool}", &[("tool", &other)]),
     };
     let preview: Element<'a, Message> = match call.name.as_str() {
@@ -582,6 +603,7 @@ fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {
         )),
         "write" => output_view(&clip(call.arg("content"), 3000)),
         "bash" | "powershell" => output_view(call.arg("command")),
+        "browser_script" => output_view(call.arg("code")),
         _ => output_view(&serde_json::to_string_pretty(&call.arguments).unwrap_or_default()),
     };
     let buttons = row![
@@ -602,6 +624,22 @@ fn approval<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {
         .into()
 }
 
+/// The question a new project asks: plan it in the notes first, or build right away.
+fn plan_choice<'a>(id: u64, call: &'a ToolCall) -> Element<'a, Message> {
+    let name = crate::notes::sanitize_name(call.arg("name"));
+    let what = trf("Scoobert is starting the project {name}. Should it plan first?", &[("name", &name)]);
+    let mut buttons = row![].spacing(8).align_y(Alignment::Center);
+    for plan in [PlanFirst::Discuss, PlanFirst::Build, PlanFirst::Off] {
+        buttons = buttons.push(button(text(plan.to_string()).size(13)).padding([6, 14]).style(theme::secondary).on_press(Message::Approve(id, Decision::Plan(plan))));
+    }
+    let about = tr("With a plan, Scoobert first writes the features it will build into the project's notes, so later steps and conversations can follow it.");
+    container(column![text(what).size(14).font(fonts::ui_semibold()), text(about).size(13).style(theme::muted), buttons].spacing(10))
+        .padding(14)
+        .width(Fill)
+        .style(theme::selected_card)
+        .into()
+}
+
 fn working_dot<'a>() -> Element<'a, Message> {
     container(space()).width(8).height(8).style(theme::dot(|t| t.accent)).into()
 }
@@ -615,6 +653,15 @@ pub fn verb(tool: &str) -> String {
         "web_search" => tr("Search"),
         "web_read" => tr("Read page"),
         "new_project" => tr("Start project"),
+        "job_output" => tr("Check"),
+        "job_stop" => tr("Stop"),
+        "browser_open" => tr("Open page"),
+        "browser_read" => tr("Look at page"),
+        "browser_click" => tr("Click"),
+        "browser_type" => tr("Type"),
+        "browser_key" => tr("Press"),
+        "browser_script" => tr("Run script"),
+        "browser_screenshot" => tr("Screenshot"),
         other => other,
     }
     .to_string()
@@ -630,13 +677,29 @@ fn preparing(tool: &str) -> String {
         "web_search" => tr("Writing a search").to_string(),
         "web_read" => tr("Choosing a page to read").to_string(),
         "new_project" => tr("Setting up a project").to_string(),
+        name if name.starts_with("browser_") => tr("Choosing what to do in the browser").to_string(),
         other => trf("Preparing {tool}", &[("tool", &other)]),
     }
 }
 
 fn target(call: &ToolCall) -> String {
+    let number = |key: &str| call.arguments.get(key).map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
     match call.name.as_str() {
+        "bash" | "powershell" if call.arguments.get("background").is_some_and(|v| v.as_bool() == Some(true)) => {
+            trf("{command} (in the background)", &[("command", &call.arg("command").lines().next().unwrap_or_default())])
+        }
         "bash" | "powershell" => call.arg("command").lines().next().unwrap_or_default().to_string(),
+        "job_output" | "job_stop" => number("id").map(|id| trf("job {id}", &[("id", &id)])).unwrap_or_default(),
+        "browser_open" => call.arg("url").to_string(),
+        "browser_click" => match number("element") {
+            Some(n) => format!("[{n}]"),
+            None => format!("x={} y={}", number("x").unwrap_or_default(), number("y").unwrap_or_default()),
+        },
+        "browser_type" => call.arg("text").to_string(),
+        "browser_key" => call.arg("key").to_string(),
+        "browser_script" => call.arg("code").lines().next().unwrap_or_default().to_string(),
+        "browser_screenshot" => call.arg("question").to_string(),
+        "browser_read" => String::new(),
         "web_search" => call.arg("query").to_string(),
         "web_read" => match call.arguments.get("find").and_then(|v| v.as_str()) {
             Some(find) => trf("{url} (looking for {find})", &[("url", &call.arg("url")), ("find", &find)]),
@@ -658,9 +721,11 @@ const MAX_SHOWN_LINES: usize = 400;
 fn output_view<'a>(output: &str) -> Element<'a, Message> {
     let lines: Vec<&str> = output.lines().collect();
     let shown = if lines.len() > MAX_SHOWN_LINES { lines[lines.len() - MAX_SHOWN_LINES..].join("\n") } else { lines.join("\n") };
-    // The scrollbars get their own space beside the text instead of covering its last line and column.
-    let bar = || scrollable::Scrollbar::new().spacing(4);
-    let body = scrollable(text(shown).size(12.5).font(fonts::mono())).direction(scrollable::Direction::Both { vertical: bar(), horizontal: bar() }).style(theme::scrollbar);
+    // A scrollable in both directions ignores scrollbar spacing, so the text keeps a margin for the scrollbars to
+    // cover instead of its last line and column.
+    let bar = || scrollable::Scrollbar::new().width(6).scroller_width(6);
+    let content = container(text(shown).size(12.5).font(fonts::mono())).padding(Padding { right: 10.0, bottom: 10.0, ..Padding::ZERO });
+    let body = scrollable(content).direction(scrollable::Direction::Both { vertical: bar(), horizontal: bar() }).style(theme::scrollbar);
     container(body).padding(10).width(Fill).max_height(320).style(theme::code_block).into()
 }
 

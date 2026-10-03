@@ -45,7 +45,7 @@ pub const CATALOG: &[CatalogModel] = &[
         weight_bytes: 14_250_000_000,
         projector_bytes: 0,
         kv_bytes_per_token: 69_632,
-        context_size: 16_384,
+        context_size: 32_768,
         summary: key("The newest Qwen model at 4-bit precision. A much better coder than the 9B, at about one word per second on a laptop CPU."),
     },
     CatalogModel {

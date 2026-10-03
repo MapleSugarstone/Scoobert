@@ -382,7 +382,7 @@ pub fn link(theme: &Theme, status: button::Status) -> button::Style {
 /// name runs out under them instead of showing through them.
 pub fn row_actions(theme: &Theme) -> container::Style {
     let t = tokens(theme);
-    fade_into(mix(t.surface, t.surface2, 0.5), 0.3)
+    fade_into(mix(t.surface, t.surface2, 0.5), 0.18)
 }
 
 /// The same fade for a conversation row, in the color of the selected row or of a hovered one. `ramp` is the
@@ -391,6 +391,14 @@ pub fn conversation_actions(selected: bool, ramp: f32) -> impl Fn(&Theme) -> con
     move |theme| {
         let t = tokens(theme);
         fade_into(if selected { t.surface2 } else { mix(t.surface, t.surface2, 0.6) }, ramp)
+    }
+}
+
+/// The fade behind a conversation row's time, in the color of the row when it is not hovered.
+pub fn time_fade(selected: bool, ramp: f32) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let t = tokens(theme);
+        fade_into(if selected { t.surface2 } else { t.surface }, ramp)
     }
 }
 

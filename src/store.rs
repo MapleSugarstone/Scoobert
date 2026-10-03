@@ -175,7 +175,7 @@ impl PlanFirst {
 impl std::fmt::Display for PlanFirst {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(crate::i18n::tr(match self {
-            PlanFirst::Off => "No plan",
+            PlanFirst::Off => "Build right away",
             PlanFirst::Discuss => "Plan, then discuss",
             PlanFirst::Build => "Plan, then build",
         }))

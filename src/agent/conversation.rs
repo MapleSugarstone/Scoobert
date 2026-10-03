@@ -33,12 +33,21 @@ pub struct UserMessage {
     pub context: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<Image>,
+    /// Another model described the images in `context` for a model that cannot see them, so requests leave the
+    /// images out and they stay only for the window.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub described: bool,
     pub time: i64,
 }
 
 impl UserMessage {
     pub fn full_text(&self) -> String {
         [self.environment.as_str(), self.text.as_str(), self.context.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("\n\n")
+    }
+
+    /// The images the request carries.
+    pub fn sent_images(&self) -> &[Image] {
+        if self.described { &[] } else { &self.images }
     }
 }
 
@@ -99,7 +108,7 @@ pub struct AssistantMessage {
     pub resend_thinking: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ToolResult {
     pub call_id: String,
     pub name: String,
@@ -109,7 +118,31 @@ pub struct ToolResult {
     /// A unified diff of the change, for edits and writes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
+    /// A screenshot the call took.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
+    /// Another model described the images in `output`, as for a user message's images.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub described: bool,
     pub time: i64,
+}
+
+impl ToolResult {
+    /// The images the request carries.
+    pub fn sent_images(&self) -> &[Image] {
+        if self.described { &[] } else { &self.images }
+    }
+}
+
+impl Message {
+    /// Whether the request carries images for this message, which the saved prompts cannot hold.
+    pub fn sends_images(&self) -> bool {
+        match self {
+            Message::User(u) => !u.sent_images().is_empty(),
+            Message::Tool(t) => !t.sent_images().is_empty(),
+            Message::Assistant(_) => false,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

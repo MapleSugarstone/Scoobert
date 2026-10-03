@@ -195,7 +195,7 @@ pub async fn fetch(address: &str) -> anyhow::Result<Page> {
 
 /// A Chromium-based browser installed on this computer: Edge on Windows, Chrome or Chromium on Linux, Chrome, Edge,
 /// or Chromium on macOS.
-fn find_browser() -> Option<std::path::PathBuf> {
+pub(super) fn find_browser() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     if cfg!(windows) {
         let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
@@ -218,6 +218,12 @@ fn find_browser() -> Option<std::path::PathBuf> {
         .iter()
         .flat_map(|name| std::env::split_paths(&path).map(move |d| d.join(name)))
         .find(|p| p.is_file())
+}
+
+/// Whether the browser tools can run, checked once, so every request in a session offers the same tools.
+pub fn has_browser() -> bool {
+    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| find_browser().is_some())
 }
 
 /// The page's HTML after its scripts ran, from a headless browser with a throwaway profile.

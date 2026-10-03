@@ -8,6 +8,7 @@ pub mod lab;
 pub mod notes;
 pub mod settings;
 pub mod setup;
+pub mod switch;
 pub mod theme;
 
 use std::hash::{Hash, Hasher};
@@ -211,6 +212,8 @@ pub enum Message {
     SetApprovals(Approvals),
     SetPlanFirst(PlanFirst),
     Approve(u64, Decision),
+    /// Stops a command the model left running in the background.
+    StopJob(u32),
     Toggle(String),
     Link(String),
     Copy(String),
@@ -496,23 +499,31 @@ impl App {
         self.models = host.models();
         // A fresh install names a model it may not have downloaded, so the largest downloaded model that fits the
         // computer's memory becomes the default, or the smallest when none fits.
-        if self.models.iter().any(|m| m.usable && m.name == self.state.settings.model) {
-            return;
+        if !self.models.iter().any(|m| m.usable && m.name == self.state.settings.model) {
+            let total = crate::sys::total_memory();
+            let local = || self.models.iter().filter(|m| m.usable && m.provider.is_empty());
+            let pick = local()
+                .filter(|m| m.memory_needed <= total)
+                .max_by_key(|m| m.memory_needed)
+                .or_else(|| local().min_by_key(|m| m.memory_needed))
+                .or_else(|| self.models.iter().find(|m| m.usable));
+            let Some(name) = pick.map(|m| m.name.clone()) else { return };
+            self.state.settings.model = name;
+            self.save();
         }
-        let total = crate::sys::total_memory();
-        let local = || self.models.iter().filter(|m| m.usable && m.provider.is_empty());
-        let pick = local()
-            .filter(|m| m.memory_needed <= total)
-            .max_by_key(|m| m.memory_needed)
-            .or_else(|| local().min_by_key(|m| m.memory_needed))
-            .or_else(|| self.models.iter().find(|m| m.usable));
-        let Some(name) = pick.map(|m| m.name.clone()) else { return };
-        self.state.settings.model = name.clone();
-        self.save();
-        // A conversation with no messages yet takes the new default too.
-        if let Some(chat) = self.chat.as_mut()
-            && chat.is_empty()
-            && !self.models.iter().any(|m| m.usable && m.name == chat.model)
+        self.adopt_default_model();
+    }
+
+    /// Gives a conversation with no messages yet the default model when its own model is not downloaded, such as the
+    /// first conversation, which opens while setup is still downloading.
+    fn adopt_default_model(&mut self) {
+        let Some(host) = self.host.clone() else { return };
+        let usable = |name: &str| self.models.iter().any(|m| m.usable && m.name == name);
+        let name = self.state.settings.model.clone();
+        let stale = self.chat.as_ref().is_some_and(|c| c.is_empty() && !usable(&c.model));
+        if stale
+            && usable(&name)
+            && let Some(chat) = self.chat.as_mut()
             && host.set_model(&chat.id, &name).is_ok()
         {
             chat.model = name;
@@ -576,6 +587,11 @@ impl App {
                 label: if m.provider.is_empty() { m.label.clone() } else { format!("{} ({})", m.label, m.provider) },
             })
             .collect()
+    }
+
+    /// Whether images can go with a message: the model sees them, or another model can describe them for it.
+    fn can_attach_images(&self) -> bool {
+        self.models.iter().any(|m| m.usable && m.vision)
     }
 
     fn current_model(&self) -> Option<&ModelOption> {
@@ -779,6 +795,7 @@ impl App {
                     self.remember_last(&project, file);
                 }
                 self.chat = Some(Chat::from_snapshot(*snap));
+                self.adopt_default_model();
                 return Task::batch([operation::focus(COMPOSER_ID), operation::snap_to(chat::TRANSCRIPT_ID, RelativeOffset::START)]);
             }
             Message::Opened(Err(err)) => self.toast(err),
@@ -952,7 +969,7 @@ impl App {
                     "webp" => Some("image/webp"),
                     _ => None,
                 };
-                let vision = self.current_model().is_some_and(|m| m.vision);
+                let vision = self.can_attach_images();
                 match (mime, std::fs::read(&path)) {
                     (Some(mime), Ok(bytes)) if vision => {
                         use base64::Engine;
@@ -1021,9 +1038,18 @@ impl App {
                 }
             }
             Message::CloseDrawer => self.sidebar_drawer = false,
+            Message::StopJob(job) => {
+                if let (Some(host), Some(chat)) = (&self.host, &self.chat) {
+                    host.stop_job(&chat.id, job);
+                }
+            }
             Message::Approve(id, decision) => {
                 if let Some(host) = &self.host {
                     host.answer(id, decision);
+                }
+                if let Decision::Plan(plan) = decision {
+                    self.state.settings.plan_first = plan;
+                    self.save();
                 }
                 if let Some(chat) = &mut self.chat {
                     chat.approvals.retain(|(a, _)| *a != id);
@@ -1338,6 +1364,7 @@ impl App {
             | Event::ToolStarted { conv, .. }
             | Event::ToolOutput { conv, .. }
             | Event::Approval { conv, .. }
+            | Event::Jobs { conv, .. }
             | Event::Compacted { conv, .. }
             | Event::Titled { conv, .. }
             | Event::Settled { conv, .. } => conv.clone(),
@@ -1820,20 +1847,25 @@ impl App {
                 .style(theme::input)
                 .into();
         }
-        // The title gets the space the time leaves and is cut there, so the two never overlap.
+        // The title runs under the time, which sits on a fade in the row's color, so a long title fades out under the
+        // time the same way it does under the buttons a hovered row shows.
+        const FADE: f32 = 12.0;
         let when = ago(s.modified);
-        let label = row![
-            container(text(clip(&s.title, 30)).size(13).font(fonts::for_text(&s.title)).wrapping(text::Wrapping::None)).width(Fill).clip(true),
-            text(when.clone()).size(12).style(theme::muted).wrapping(text::Wrapping::None),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let time_width = estimated_width(&when, 12.0);
+        let title = container(text(clip(&s.title, 80)).size(13).font(fonts::for_text(&s.title)).wrapping(text::Wrapping::None)).width(Fill).clip(true);
+        let time = container(text(when).size(12).style(theme::muted).wrapping(text::Wrapping::None))
+            .width(FADE + time_width)
+            .height(Fill)
+            .align_x(Alignment::End)
+            .align_y(Alignment::Center)
+            .padding(iced::Padding { left: FADE, ..iced::Padding::ZERO })
+            .style(theme::time_fade(selected, FADE / (FADE + time_width)));
+        let label = stack![title, container(time).width(Fill).height(Fill).align_x(Alignment::End)];
         let item = button(label).width(Fill).padding([6, 10]).style(theme::list_item(selected)).on_press(Message::OpenConversation(s.file.clone()));
         let base = container(item).height(32);
-        // The buttons hide the whole time and fade over the end of the title, as on a project row, instead of
-        // leaving half of the time showing through the fade.
-        const FADE: f32 = 20.0;
-        let solid = (estimated_width(&when, 12.0) + 10.0 + 8.0).max(46.0);
+        // The buttons cover the time and its fade completely, since the time's fade is in the color of a row that is
+        // not hovered.
+        let solid = (time_width + 10.0 + FADE).max(46.0);
         let actions = container(
             row![
                 button(icon(Icon::Pencil, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::StartRename(s.file.clone(), s.title.clone())),
@@ -1960,7 +1992,7 @@ impl App {
                 .style(theme::chip),
             );
         }
-        let vision = self.current_model().is_some_and(|m| m.vision);
+        let vision = self.can_attach_images();
         let action: Element<'_, Message> = if running {
             let stop = button(row![icons::tinted(Icon::Stop, 15.0, |_| iced::Color::WHITE), text(tr("Stop")).size(14).font(fonts::ui_semibold())].spacing(6).align_y(Alignment::Center))
                 .padding([7, 18])
@@ -2090,6 +2122,17 @@ impl App {
         if !self.images.is_empty() {
             col = col.push(attachments);
         }
+        for (job, command) in self.chat.iter().flat_map(|c| &c.jobs) {
+            let line = row![
+                container(space()).width(8).height(8).style(theme::dot(|t| t.ok)),
+                text(trf("Running in the background: {command}", &[("command", &clip(command, 70))])).size(12),
+                space::horizontal(),
+                button(text(tr("Stop")).size(12)).padding([3, 10]).style(theme::secondary).on_press(Message::StopJob(*job)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center);
+            col = col.push(container(line).padding([6, 10]).width(Fill).style(theme::banner));
+        }
         col = col.push(input);
         if !running && self.chat.as_ref().is_some_and(plans_first) {
             let mut choices = row![text(tr("Before it builds:")).size(12).style(theme::muted)].spacing(4).align_y(Alignment::Center);
@@ -2162,7 +2205,7 @@ fn row_actions<'a>(buttons: iced::widget::Row<'a, Message>) -> Element<'a, Messa
     container(buttons.align_y(Alignment::Center))
         .height(Fill)
         .align_y(Alignment::Center)
-        .padding(iced::Padding { left: 20.0, right: 2.0, ..iced::Padding::ZERO })
+        .padding(iced::Padding { left: 12.0, right: 2.0, ..iced::Padding::ZERO })
         .style(theme::row_actions)
         .into()
 }

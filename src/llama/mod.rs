@@ -99,6 +99,9 @@ struct Running {
     model: LocalModel,
     /// False until the model finishes loading. A caller that stopped waiting partway leaves it false.
     ready: bool,
+    /// Whether it runs on the graphics card, and through NVIDIA support, so a change to either setting restarts it.
+    gpu: bool,
+    cuda: bool,
 }
 
 struct Shared {
@@ -250,6 +253,15 @@ impl LlamaServer {
         BusyGuard(self.clone())
     }
 
+    /// Whether `model` runs on the graphics card, and the CUDA server when NVIDIA support takes over the card. NVIDIA
+    /// support replaces the bundled server unless the user named a server of their own.
+    fn backend(&self, model: &str) -> (bool, Option<PathBuf>) {
+        let s = self.settings();
+        let gpu = s.use_gpu && !s.gpu_failed.iter().any(|m| m == model) && !self.gpu_refused.lock().unwrap().contains(model);
+        let cuda = if gpu && s.llama_server_path.trim().is_empty() && !self.cuda_refused.load(Ordering::SeqCst) { cuda::server() } else { None };
+        (gpu, cuda)
+    }
+
     /// Starts the server with `model` unless it is already running it.
     pub async fn ensure(self: &Arc<Self>, model: &LocalModel) -> anyhow::Result<()> {
         self.touch();
@@ -258,10 +270,12 @@ impl LlamaServer {
         if cancel.is_cancelled() {
             return Err(Cancelled.into());
         }
+        let (gpu, cuda) = self.backend(&model.name);
         if let Some(running) = proc.as_mut() {
             let alive = matches!(running.child.try_wait(), Ok(None));
             // A variant can run on another model's file with its own steering, so the arguments count too.
-            if alive && running.model.path == model.path && running.model.args == model.args {
+            let same = running.model.path == model.path && running.model.args == model.args && running.gpu == gpu && running.cuda == cuda.is_some();
+            if alive && same {
                 if running.ready {
                     return Ok(());
                 }
@@ -276,10 +290,6 @@ impl LlamaServer {
             }
         }
         self.stop_locked(&mut proc).await;
-        let s = self.settings();
-        let gpu = s.use_gpu && !s.gpu_failed.contains(&model.name) && !self.gpu_refused.lock().unwrap().contains(&model.name);
-        // NVIDIA support replaces the bundled server on the card, unless the user named a server of their own.
-        let cuda = if gpu && s.llama_server_path.trim().is_empty() && !self.cuda_refused.load(Ordering::SeqCst) { cuda::server() } else { None };
         let mut result = self.start_locked(&mut proc, model, gpu, cuda.clone(), &cancel).await;
         // CUDA that cannot load the model leaves it to the card's default support, for the rest of this run.
         if cuda.is_some()
@@ -312,6 +322,7 @@ impl LlamaServer {
 
     /// Starts a server for `model`: `server` when given, such as the CUDA build, otherwise the configured or bundled one.
     async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, gpu: bool, server: Option<PathBuf>, cancel: &CancellationToken) -> anyhow::Result<()> {
+        let cuda_server = server.is_some();
         let Some(exe) = server.or_else(|| self.executable()) else {
             bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
         };
@@ -408,7 +419,7 @@ impl LlamaServer {
         if let Some(pid) = child.id() {
             let _ = std::fs::write(paths::get().pid_file(), pid.to_string());
         }
-        *proc = Some(Running { child, model: model.clone(), ready: false });
+        *proc = Some(Running { child, model: model.clone(), ready: false, gpu, cuda: cuda_server });
         {
             let mut shared = self.shared.lock().unwrap();
             shared.model = Some((model.clone(), ctx));
@@ -426,6 +437,71 @@ impl LlamaServer {
             let _ = std::fs::write(marker, "");
         }
         ready
+    }
+
+    /// Runs `model` in a server of its own for one chat request, beside the main server, and stops it after. It runs
+    /// on the processor, so the main model keeps the graphics card's memory.
+    pub async fn run_side(&self, model: &LocalModel, ctx: u32, body: &Value, cancel: &CancellationToken) -> anyhow::Result<Value> {
+        let Some(exe) = self.executable() else {
+            bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
+        };
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let key = random_hex(16);
+        let mut args: Vec<String> = vec!["-m".into(), path_arg(&model.path)];
+        if let Some(mmproj) = &model.mmproj {
+            args.extend(["--mmproj".into(), path_arg(mmproj)]);
+        }
+        #[rustfmt::skip]
+        args.extend([
+            "-c", &ctx.to_string(), "--jinja", "-np", "1", "--cache-ram", "0", "--device", "none", "-ngl", "0", "--no-mmproj-offload",
+            "--host", "127.0.0.1", "--port", &port.to_string(), "--no-webui",
+        ].map(String::from));
+        let mut cmd = tokio::process::Command::new(&exe);
+        cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).env("LLAMA_API_KEY", &key).kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        #[cfg(not(windows))]
+        if let Some(dir) = exe.parent() {
+            let mut lib = std::ffi::OsString::from(dir);
+            if let Some(old) = std::env::var_os("LD_LIBRARY_PATH") {
+                lib.push(":");
+                lib.push(old);
+            }
+            cmd.env("LD_LIBRARY_PATH", lib);
+        }
+        let mut child = cmd.spawn().with_context(|| format!("Could not start {}", exe.display()))?;
+        let base = format!("http://127.0.0.1:{port}");
+        let start = Instant::now();
+        loop {
+            if cancel.is_cancelled() {
+                return Err(Cancelled.into());
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                bail!("{} stopped while it loaded ({status}).", model.name);
+            }
+            if self.http.get(format!("{base}/health")).timeout(Duration::from_secs(2)).send().await.is_ok_and(|r| r.status().is_success()) {
+                break;
+            }
+            if start.elapsed() > HEALTH_TIMEOUT {
+                bail!("{} did not load within {} seconds.", model.name, HEALTH_TIMEOUT.as_secs());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let mut body = body.clone();
+        body["stream"] = false.into();
+        if let Some(fields) = body.as_object_mut() {
+            fields.remove("stream_options");
+        }
+        let request = self.http.post(format!("{base}/v1/chat/completions")).bearer_auth(&key).timeout(Duration::from_secs(1800)).json(&body).send();
+        let response = tokio::select! {
+            r = request => r?,
+            _ = cancel.cancelled() => return Err(Cancelled.into()),
+        };
+        let status = response.status();
+        if !status.is_success() {
+            bail!("{} could not answer: {status} {}", model.name, response.text().await.unwrap_or_default());
+        }
+        Ok(response.json().await?)
     }
 
     /// The model the server is loading now, how long it has taken so far, and whether it never loaded on this

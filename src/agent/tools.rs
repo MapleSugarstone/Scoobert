@@ -73,8 +73,9 @@ fn find_git_bash() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Tool definitions in the OpenAI function format. A conversation without a project also gets new_project.
-pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
+/// Tool definitions in the OpenAI function format. A conversation without a project also gets new_project, and a
+/// computer with a Chromium-based browser gets the browser tools.
+pub fn specs(shell: &Shell, no_project: bool, web: bool, browser: bool) -> Vec<Value> {
     let path = json!({ "type": "string", "description": "File path, relative to the project folder or absolute." });
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
         json!({ "type": "function", "function": {
@@ -83,17 +84,26 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
             "parameters": { "type": "object", "properties": properties, "required": required },
         }})
     };
+    let port = if *shell == Shell::PowerShell { "$env:PORT" } else { "$PORT" };
+    let shell_params = json!({
+        "command": { "type": "string" },
+        "timeout": { "type": "integer", "description": "Seconds." },
+        "background": {
+            "type": "boolean",
+            "description": format!("Set to true for a server or another command that keeps running, such as npm run dev. Scoobert sets PORT to a free port for it, so start a server on {port} and 127.0.0.1, as in python -m http.server {port} --bind 127.0.0.1."),
+        },
+    });
     let shell_tool = match shell {
         Shell::PowerShell => tool(
             "powershell",
-            "Run a PowerShell command in the project folder and return its output. Commands stop after 10 minutes unless you set timeout.",
-            json!({ "command": { "type": "string" }, "timeout": { "type": "integer", "description": "Seconds." } }),
+            "Run a PowerShell command in the project folder and return its output. Commands stop after 10 minutes unless you set timeout. Set background to true to start a server or watcher without waiting for it to end.",
+            shell_params,
             &["command"],
         ),
         _ => tool(
             "bash",
-            "Run a bash command in the project folder and return its output. Commands stop after 10 minutes unless you set timeout.",
-            json!({ "command": { "type": "string" }, "timeout": { "type": "integer", "description": "Seconds." } }),
+            "Run a bash command in the project folder and return its output. Commands stop after 10 minutes unless you set timeout. Set background to true to start a server or watcher without waiting for it to end.",
+            shell_params,
             &["command"],
         ),
     };
@@ -121,7 +131,59 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
             &["path", "content"],
         ),
         shell_tool,
+        tool(
+            "job_output",
+            "Read the new output of a command started with background set to true, and whether it still runs. Set wait to wait up to that many seconds for output to arrive.",
+            json!({ "id": { "type": "integer" }, "wait": { "type": "integer", "description": "Seconds, up to 60." } }),
+            &["id"],
+        ),
+        tool("job_stop", "Stop a command started with background set to true.", json!({ "id": { "type": "integer" } }), &["id"]),
     ];
+    if browser {
+        let element = json!({ "type": "integer", "description": "The number of a control, from the list browser_open and browser_read return." });
+        all.push(tool(
+            "browser_open",
+            "Open a page in a browser to test it, such as http://localhost:3000 or an HTML file in the project. Returns the page's text, its controls numbered for browser_click and browser_type, and console errors. Start a server first with the shell tool and background set to true.",
+            json!({ "url": { "type": "string" } }),
+            &["url"],
+        ));
+        all.push(tool(
+            "browser_read",
+            "Read the open page again: its text, its numbered controls, and new console messages. Give offset to read on in a long page.",
+            json!({ "offset": { "type": "integer", "description": "Character position to read from." } }),
+            &[],
+        ));
+        all.push(tool(
+            "browser_click",
+            "Click a control on the open page by its number, or a point by x and y in pixels from the page's top left, such as a spot on a game's canvas.",
+            json!({ "element": element, "x": { "type": "number" }, "y": { "type": "number" } }),
+            &[],
+        ));
+        all.push(tool(
+            "browser_type",
+            "Type text on the open page, into the numbered control or wherever the focus is. Set submit to true to press Enter after it.",
+            json!({ "text": { "type": "string" }, "element": element, "submit": { "type": "boolean" } }),
+            &["text"],
+        ));
+        all.push(tool(
+            "browser_key",
+            "Press a key on the open page, such as Enter, Escape, Space, ArrowLeft, or a letter, with modifiers as in Control+a. For a game, set hold_ms to hold the key down and times to press it more than once.",
+            json!({ "key": { "type": "string" }, "hold_ms": { "type": "integer" }, "times": { "type": "integer" } }),
+            &["key"],
+        ));
+        all.push(tool(
+            "browser_script",
+            "Run JavaScript in the open page and return its value, for example to read a game's state. The code can use await.",
+            json!({ "code": { "type": "string" } }),
+            &["code"],
+        ));
+        all.push(tool(
+            "browser_screenshot",
+            "Take a screenshot of the open page to check how it looks. Give question to say what to look for.",
+            json!({ "question": { "type": "string" } }),
+            &[],
+        ));
+    }
     if web {
         all.push(tool(
             "web_search",
@@ -151,9 +213,13 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool) -> Vec<Value> {
     all
 }
 
-/// Tools that only read, so they never need approval.
+/// Tools that need no approval: they only read, or act only inside the throwaway browser, or on the model's own
+/// background commands. browser_script needs approval, since a script can do anything the page can.
 pub fn is_read_only(name: &str) -> bool {
-    matches!(name, "read" | "web_search" | "web_read")
+    matches!(
+        name,
+        "read" | "web_search" | "web_read" | "job_output" | "job_stop" | "browser_open" | "browser_read" | "browser_click" | "browser_type" | "browser_key" | "browser_screenshot"
+    )
 }
 
 pub fn changes_files(name: &str) -> bool {
@@ -165,6 +231,8 @@ pub struct Outcome {
     pub output: String,
     pub is_error: bool,
     pub diff: Option<String>,
+    /// A screenshot, which a model that can see images gets with the output and another model describes otherwise.
+    pub image: Option<super::conversation::Image>,
 }
 
 impl Outcome {
@@ -173,7 +241,7 @@ impl Outcome {
     }
 
     fn err(output: impl Into<String>) -> Self {
-        Outcome { output: output.into(), is_error: true, diff: None }
+        Outcome { output: output.into(), is_error: true, ..Default::default() }
     }
 }
 
@@ -184,7 +252,16 @@ fn arg<'a>(call: &'a ToolCall, names: &[&str]) -> Option<&'a str> {
 
 fn arg_u64(call: &ToolCall, name: &str) -> Option<u64> {
     let v = call.arguments.get(name)?;
-    v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    v.as_u64().or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)).or_else(|| v.as_str().and_then(|s| s.trim().trim_matches(['[', ']']).parse().ok()))
+}
+
+fn arg_f64(call: &ToolCall, name: &str) -> Option<f64> {
+    let v = call.arguments.get(name)?;
+    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+fn arg_bool(call: &ToolCall, name: &str) -> bool {
+    call.arguments.get(name).is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
 }
 
 pub fn resolve(cwd: &Path, p: &str) -> PathBuf {
@@ -215,8 +292,11 @@ fn note_link(raw: &str) -> Option<String> {
     (!target.is_empty()).then_some(target)
 }
 
+/// The conversation's browser, which starts with the first browser_open and closes when the task ends.
+pub type BrowserSlot = Arc<tokio::sync::Mutex<Option<super::browser::Browser>>>;
+
 /// Restrictions on commands for the current approval mode.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Limits {
     pub unattended: bool,
     pub isolation: Isolation,
@@ -228,11 +308,13 @@ pub struct Limits {
     pub web: bool,
     /// Where each file's previous version is kept before a change, so a rewind can undo it.
     pub checkpoints: Option<PathBuf>,
+    pub jobs: Option<Arc<super::jobs::Jobs>>,
+    pub browser: Option<BrowserSlot>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { unattended: false, isolation: Isolation::Refuse, max_output: MAX_BYTES, notes: None, web: false, checkpoints: None }
+        Limits { unattended: false, isolation: Isolation::Refuse, max_output: MAX_BYTES, notes: None, web: false, checkpoints: None, jobs: None, browser: None }
     }
 }
 
@@ -264,9 +346,65 @@ pub async fn run(
             Err(e) => Err(format!("{e:#}")),
         },
         "web_search" | "web_read" => Err("Web search is turned off. Tell the user they can turn it on under Settings, then continue without it.".into()),
+        "job_output" | "job_stop" => job_tool(call, limits).await,
+        name if name.starts_with("browser_") => browser_tool(call, cwd, limits).await,
         other => Err(format!("There is no tool named {other}. Use read, edit, write, or {}.", shell.tool_name())),
     };
     result.unwrap_or_else(Outcome::err)
+}
+
+async fn job_tool(call: &ToolCall, limits: &Limits) -> Result<Outcome, String> {
+    let jobs = limits.jobs.as_ref().ok_or("Background commands are not available here.")?;
+    let Some(id) = arg_u64(call, "id").or_else(|| arg_u64(call, "job")) else {
+        return Err(format!("{} needs id, the number of a background job.\n{}", call.name, jobs.describe()));
+    };
+    let id = id as u32;
+    if call.name == "job_stop" {
+        return jobs.stop(id, limits.max_output).map(Outcome::ok);
+    }
+    let wait = Duration::from_secs(arg_u64(call, "wait").unwrap_or(0).min(60));
+    jobs.output(id, wait, limits.max_output).await.map(Outcome::ok)
+}
+
+async fn browser_tool(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
+    use super::browser::{Browser, resolve_address};
+    let slot = limits.browser.as_ref().ok_or("The browser tools are not available here.")?;
+    // The address is checked before a browser starts for it.
+    let address = if call.name == "browser_open" {
+        Some(resolve_address(arg(call, &["url", "address", "path"]).unwrap_or_default(), cwd, limits.web).map_err(|e| format!("{e:#}"))?)
+    } else {
+        None
+    };
+    let mut guard = slot.lock().await;
+    if guard.is_none() {
+        if address.is_none() {
+            return Err("No page is open. Open one with browser_open first.".into());
+        }
+        *guard = Some(Browser::launch(limits.web).await.map_err(|e| format!("{e:#}"))?);
+    }
+    let Some(browser) = guard.as_mut() else { return Err("The browser did not start.".into()) };
+    let element = arg_u64(call, "element").or_else(|| arg_u64(call, "ref"));
+    let result = match call.name.as_str() {
+        "browser_open" => browser.open(address.as_deref().unwrap_or("about:blank")).await.map(Outcome::ok),
+        "browser_read" => browser.read(arg_u64(call, "offset").unwrap_or(0) as usize).await.map(Outcome::ok),
+        "browser_click" => {
+            let point = arg_f64(call, "x").zip(arg_f64(call, "y"));
+            browser.click(element, point).await.map(Outcome::ok)
+        }
+        "browser_type" => browser.type_text(arg(call, &["text"]).unwrap_or_default(), element, arg_bool(call, "submit")).await.map(Outcome::ok),
+        "browser_key" => {
+            let times = arg_u64(call, "times").unwrap_or(1).min(50) as u32;
+            browser.keys(arg(call, &["key", "keys"]).unwrap_or_default(), arg_u64(call, "hold_ms").unwrap_or(0), times).await.map(Outcome::ok)
+        }
+        "browser_script" => browser.script(arg(call, &["code", "script", "expression"]).unwrap_or_default()).await.map(Outcome::ok),
+        "browser_screenshot" => browser.screenshot().await.map(|(image, line)| Outcome { output: line, image: Some(image), ..Default::default() }),
+        other => return Err(format!("There is no tool named {other}.")),
+    };
+    // A browser that closed or stopped answering starts again with the next browser_open.
+    if result.as_ref().is_err_and(|e| e.to_string().starts_with("The browser closed")) {
+        *guard = None;
+    }
+    result.map_err(|e| format!("{e:#}"))
 }
 
 async fn read(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
@@ -373,7 +511,7 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
             }
         }
     }
-    Ok(Outcome { output, is_error: false, diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)) })
+    Ok(Outcome { output, diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)), ..Default::default() })
 }
 
 const OUTLINE_LINES: usize = 40;
@@ -449,7 +587,7 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let written = if crlf { updated.replace('\n', "\r\n") } else { updated.clone() };
     tokio::fs::write(&path, &written).await.map_err(|e| format!("Could not write {shown}: {e}"))?;
     let output = if count > 1 { format!("Edited {shown} in {count} places.") } else { format!("Edited {shown}.") };
-    Ok(Outcome { output, is_error: false, diff: Some(unified_diff(&text, &updated)) })
+    Ok(Outcome { output, diff: Some(unified_diff(&text, &updated)), ..Default::default() })
 }
 
 /// A file's state before a tool call changed it: its bytes, or that it did not exist.
@@ -511,6 +649,28 @@ async fn command(
 ) -> Result<Outcome, String> {
     let cmd_text = arg(call, &["command", "cmd", "script"]).ok_or("The shell tool needs a command.")?;
     let timeout = Duration::from_secs(arg_u64(call, "timeout").unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 24 * 3600));
+    let (mut cmd, cap) = shell_process(cmd_text, cwd, shell, limits)?;
+    if arg_bool(call, "background") {
+        let jobs = limits.jobs.as_ref().ok_or("Background commands are not available here.")?;
+        return match jobs.start(cmd, cmd_text, cap, limits.max_output).await {
+            Ok(output) => Ok(Outcome::ok(output)),
+            Err(output) => Ok(Outcome::err(output)),
+        };
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    let child = cmd.spawn().map_err(|e| format!("Could not start the shell: {e}"))?;
+    let pid = child.id();
+    // The job caps memory for the command and everything it starts, and ends them all when it is dropped.
+    #[cfg(windows)]
+    let _job = sandbox::Job::new(cap).filter(|job| pid.is_some_and(|p| job.assign(p)));
+    #[cfg(unix)]
+    let _ = cap;
+    run_to_end(child, pid, timeout, limits, cancel, on_output).await
+}
+
+/// The process for a shell command, inside the sandbox when working unattended, and on Linux in a scope that caps
+/// its memory. The memory cap goes with it for a Windows job.
+fn shell_process(cmd_text: &str, cwd: &Path, shell: &Shell, limits: &Limits) -> Result<(tokio::process::Command, u64), String> {
     if writes_heredoc(cmd_text) {
         return Err("Nothing ran. This command writes a file from a heredoc, which can change quotes, backslashes, and dollar signs without an error. Use write to create or replace the file, or edit to change part of it. The file keeps everything you write, even though the conversation later shows a long write as a short note.".into());
     }
@@ -559,26 +719,24 @@ async fn command(
     };
     let mut cmd = tokio::process::Command::new(&program);
     cmd.args(&args);
-    cmd.current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("GIT_PAGER", "cat")
-        .env("PAGER", "cat")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .kill_on_drop(true);
+    // Python holds back output sent to a pipe, which hides a background server's address until it exits.
+    cmd.current_dir(cwd).env("GIT_PAGER", "cat").env("PAGER", "cat").env("GIT_TERMINAL_PROMPT", "0").env("PYTHONUNBUFFERED", "1");
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
     #[cfg(unix)]
     cmd.process_group(0);
-    let mut child = cmd.spawn().map_err(|e| format!("Could not start the shell: {e}"))?;
-    let pid = child.id();
-    // The job caps memory for the command and everything it starts, and ends them all when it is dropped.
-    #[cfg(windows)]
-    let _job = sandbox::Job::new(cap).filter(|job| pid.is_some_and(|p| job.assign(p)));
-    #[cfg(unix)]
-    let _ = cap;
+    Ok((cmd, cap))
+}
 
+/// Waits for a command to end, the timeout, or Stop, and returns the end of its output.
+async fn run_to_end(
+    mut child: tokio::process::Child,
+    pid: Option<u32>,
+    timeout: Duration,
+    limits: &Limits,
+    cancel: &CancellationToken,
+    on_output: impl Fn(String) + Send + Sync + 'static,
+) -> Result<Outcome, String> {
     let output = Arc::new(Mutex::new(String::new()));
     let on_output = Arc::new(on_output);
     let pump = |mut stream: Box<dyn tokio::io::AsyncRead + Unpin + Send>| {
@@ -635,7 +793,7 @@ async fn command(
     if text.trim().is_empty() {
         text = "(No output.)".into();
     }
-    Ok(Outcome { output: text, is_error: note.is_some() || code.is_some_and(|c| c != 0), diff: None })
+    Ok(Outcome { output: text, is_error: note.is_some() || code.is_some_and(|c| c != 0), ..Default::default() })
 }
 
 async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
