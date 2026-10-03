@@ -10,6 +10,7 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use super::conversation::ToolCall;
+use super::prompt::system_note;
 use super::sandbox::{self, Isolation};
 use crate::paths;
 
@@ -435,10 +436,10 @@ async fn read(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
         end += 1;
     }
     if end < lines.len() {
-        out.push_str(&format!("\n[Showing lines {}-{end} of {}. Use offset={} to read more.]", start + 1, lines.len(), end + 1));
+        out.push_str(&format!("\n{}", system_note(&format!("Showing lines {}-{end} of {}. Use offset={} to read more.", start + 1, lines.len(), end + 1))));
     }
     if out.is_empty() {
-        out = "(The file is empty.)".into();
+        out = system_note("The file is empty.");
     }
     if let Some(notes) = limits.notes.as_deref()
         && let Ok(rel) = path.strip_prefix(notes)
@@ -508,7 +509,7 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if content.len() > SHORTENED_WRITE && kept_in_full(limits, &path, content.len()) {
         output.push_str(KEPT_IN_FULL);
     } else if content.len() > SHORTENED_WRITE {
-        output.push_str(SHORTENED_NOTICE);
+        output.push_str(SHORTENED_SYSTEM);
     }
     // After a part is added, the file's top-level lines show what earlier parts already declared.
     if append {
@@ -578,9 +579,12 @@ fn confirmed_replace(path: &Path, content: &str, wipes: bool) -> bool {
 /// Writes longer than this show as a short note in later requests.
 pub const SHORTENED_WRITE: usize = 1500;
 
-/// Ends the result of a long write. `shorten_saved_writes` looks for it, so writes made before it existed keep the
-/// older, shorter note and their conversations keep their saved caches.
+/// Ended the result of a long write before 0.4.7. `shorten_saved_writes` still looks for it, so each write keeps the
+/// note its conversation was cached with.
 pub const SHORTENED_NOTICE: &str = " From here on the conversation shows this call by its first and last lines, to save room. The file holds all of it.";
+
+/// Ends the result of a long write, framed as Scoobert's text.
+pub const SHORTENED_SYSTEM: &str = " ⟦System: from here on the conversation shows this write by its first and last lines, to save room. The file holds all of it.⟧";
 
 /// Ends the result of a long write or edit to a note, which `shorten_saved_writes` leaves in full. A model edits a note
 /// right after writing it, from the text it remembers, and a note shown by its first and last lines made those edits
@@ -610,7 +614,7 @@ fn writes_heredoc(command: &str) -> bool {
 /// The notes `shorten_saved_writes` put in place of an earlier write's content before 0.2.6, and the
 /// `content_saved` texts it has used since, any of which a model may copy into content.
 static SAVED_WRITE_NOTE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-    regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$|^\d+ characters, saved in full in \S+$|^\d+ lines saved in full in .+, shown here by")
+    regex::Regex::new(r"^\[\d+ characters(?: written to .+\. Read the file to see them\.|, now in .+\.)\]$|^\d+ characters, saved in full in \S+$|^(?:⟦System: )?\d+ lines saved in full in .+, shown here by")
         .unwrap()
 });
 
@@ -647,9 +651,9 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let new_n = new_text.replace("\r\n", "\n");
     let count = text.matches(&old_n).count();
     if count == 0 {
-        if old_n.contains("Links in this note:") || old_n.contains("Linked from:") || old_n.contains(super::prompt::NOT_IN_FILE) {
+        if old_n.contains("⟦System") || old_n.contains("Links in this note:") || old_n.contains("Linked from:") {
             return Err(format!(
-                "old_text was not found in {shown}, because the line about the note's links is a summary that read adds after the file's text, not part of the file. To add text at the end of the file, use write with append set to true."
+                "old_text was not found in {shown}, because ⟦System: …⟧ lines and the summary of a note's links are notes the tools add to their results, not part of the file. To add text at the end of the file, use write with append set to true."
             ));
         }
         return Err(match closest_text(&text, &old_n) {
@@ -869,12 +873,12 @@ async fn run_to_end(
     let mut text = tail_lines(&full, limits.max_output);
     let code = status.and_then(|s| s.code());
     if let Some(note) = &note {
-        text.push_str(&format!("\n[{note}]"));
+        text.push_str(&format!("\n{}", system_note(note)));
     } else if let Some(code) = code.filter(|&c| c != 0) {
-        text.push_str(&format!("\n[Exit code {code}]"));
+        text.push_str(&format!("\n{}", system_note(&format!("Exit code {code}"))));
     }
     if text.trim().is_empty() {
-        text = "(No output.)".into();
+        text = system_note("No output.");
     }
     Ok(Outcome { output: text, is_error: note.is_some() || code.is_some_and(|c| c != 0), ..Default::default() })
 }
@@ -913,7 +917,7 @@ fn tail_lines(text: &str, max_bytes: usize) -> String {
         start += 1;
     }
     let body = lines[start..].join("\n");
-    if start > 0 { format!("[Showing the last {} of {} lines.]\n{body}", lines.len() - start, lines.len()) } else { body }
+    if start > 0 { format!("{}\n{body}", system_note(&format!("Showing the last {} of {} lines.", lines.len() - start, lines.len()))) } else { body }
 }
 
 #[cfg(test)]

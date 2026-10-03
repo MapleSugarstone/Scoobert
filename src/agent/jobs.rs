@@ -7,6 +7,8 @@ use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 
+use super::prompt::system_note;
+
 /// Output kept per command, from its end.
 const KEEP_BYTES: usize = 200 * 1024;
 /// How long a new command runs before its first output is reported.
@@ -138,10 +140,10 @@ impl Jobs {
         match exit {
             Some(code) => {
                 self.remove(id);
-                let mut text = if text.trim().is_empty() { "(No output.)".to_string() } else { text };
+                let mut text = if text.trim().is_empty() { system_note("No output.") } else { text };
                 text.push_str(busy.as_deref().unwrap_or_default());
                 if let Some(code) = code.filter(|&c| c != 0) {
-                    text.push_str(&format!("\n[Exit code {code}]"));
+                    text.push_str(&format!("\n{}", system_note(&format!("Exit code {code}"))));
                     return Err(text);
                 }
                 Ok(text)
@@ -153,7 +155,7 @@ impl Jobs {
                 }
                 out.push_str(&format!(
                     " Read its new output with job_output, and stop it with job_stop when you no longer need it. It keeps running after your reply while this conversation stays open, so the user can use it.\n\nOutput so far:\n{}",
-                    if text.trim().is_empty() { "(None yet.)" } else { &text }
+                    if text.trim().is_empty() { system_note("None yet.") } else { text.clone() }
                 ));
                 out.push_str(busy.as_deref().unwrap_or_default());
                 Ok(out)
@@ -176,17 +178,18 @@ impl Jobs {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
         let (text, exit) = self.take_new(id, max_output);
-        let mut out = if text.trim().is_empty() { "(No new output.)".to_string() } else { text };
-        match exit {
+        let mut out = if text.trim().is_empty() { system_note("No new output.") } else { text };
+        let status = match exit {
             Some(code) => {
                 self.remove(id);
-                out.push_str(&match code {
-                    Some(code) => format!("\n[Job {id} ended with exit code {code}.]"),
-                    None => format!("\n[Job {id} ended.]"),
-                });
+                match code {
+                    Some(code) => format!("Job {id} ended with exit code {code}."),
+                    None => format!("Job {id} ended."),
+                }
             }
-            None => out.push_str(&format!("\n[Job {id} is still running.]")),
-        }
+            None => format!("Job {id} is still running."),
+        };
+        out.push_str(&format!("\n{}", system_note(&status)));
         Ok(out)
     }
 
@@ -240,7 +243,7 @@ impl Jobs {
         o.read = o.dropped + o.text.len();
         if text.len() > max_output {
             let cut = floor_char(&text, text.len() - max_output);
-            text = format!("[Showing the last {} bytes.]\n{}", text.len() - cut, &text[cut..]);
+            text = format!("{}\n{}", system_note(&format!("Showing the last {} bytes.", text.len() - cut)), &text[cut..]);
         }
         (text, o.exit)
     }

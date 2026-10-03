@@ -17,6 +17,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::oneshot;
 
 use super::conversation::Image;
+use super::prompt::system_note;
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -218,13 +219,13 @@ impl Browser {
         let section: String = text.chars().skip(start).take(PAGE_CHARS).collect();
         let end = start + section.chars().count();
         if section.trim().is_empty() {
-            out.push_str("(The page shows no text.)\n");
+            out.push_str(&format!("{}\n", system_note("The page shows no text.")));
         } else {
             out.push_str(section.trim_end());
             out.push('\n');
         }
         if end < total {
-            out.push_str(&format!("[Showing characters {start} to {end} of {total}. Use browser_read with offset={end} to read on.]\n"));
+            out.push_str(&format!("{}\n", system_note(&format!("Showing characters {start} to {end} of {total}. Use browser_read with offset={end} to read on."))));
         }
         let controls: Vec<&str> = page["controls"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         if !controls.is_empty() {
@@ -234,7 +235,7 @@ impl Browser {
                 out.push('\n');
             }
             if let Some(n) = page["hidden"].as_u64().filter(|&n| n > 0) {
-                out.push_str(&format!("[{n} more controls are not numbered.]\n"));
+                out.push_str(&format!("{}\n", system_note(&format!("{n} more controls are not numbered."))));
             }
         }
         out.push_str(&self.console_news());
@@ -401,7 +402,7 @@ impl Browser {
         }
         let mut out = String::from("\n\nConsole messages and errors since the last look:\n");
         if skipped > 0 {
-            out.push_str(&format!("[{skipped} earlier messages are gone.]\n"));
+            out.push_str(&format!("{}\n", system_note(&format!("{skipped} earlier messages are gone."))));
         }
         for line in new {
             out.push_str(line);

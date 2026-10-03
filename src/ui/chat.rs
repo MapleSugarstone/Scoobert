@@ -239,7 +239,7 @@ impl Chat {
                     self.pending = None;
                     self.error = None;
                     // The task reads every waiting message at once.
-                    if u.context.starts_with("<queued>") {
+                    if u.context.contains("<queued>") {
                         self.queued.clear();
                     }
                 }

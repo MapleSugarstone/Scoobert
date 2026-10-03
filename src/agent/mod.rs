@@ -760,6 +760,7 @@ impl Host {
         } else {
             QUEUED.into()
         };
+        let context = prompt::system_block(&context);
         let user = Message::User(UserMessage { text, context, images, described, time: now_millis(), ..Default::default() });
         live.conv.lock().unwrap().push(user.clone())?;
         self.emit(Event::Message { conv: id.to_string(), message: user });
@@ -1112,6 +1113,9 @@ impl Host {
                 context = if context.is_empty() { note } else { format!("{note}\n\n{context}") };
             }
         }
+        // Everything Scoobert adds after the user's words is framed as its own, so the model does not answer it as the
+        // user's request.
+        let context = if context.trim().is_empty() { context } else { prompt::system_block(&context) };
         // Surrounding whitespace would change how the start of the text tokenizes and miss the saved cache.
         let user = Message::User(UserMessage { text: text.trim().to_string(), environment, context, images, described, time: now_millis() });
         live.conv.lock().unwrap().push(user.clone())?;
@@ -1475,7 +1479,7 @@ impl Host {
         let offset = if conv.compaction.is_some() { 1 } else { 0 };
         let mut messages: Vec<Message> = if extend { view } else { view[..offset + (kept_from - start)].to_vec() };
         let question = in_language(SUMMARY_PROMPT, "Write the summary in {language}, and keep the Title: label in English.", &self.settings());
-        messages.push(Message::User(UserMessage { text: question, ..Default::default() }));
+        messages.push(Message::User(UserMessage { text: prompt::system_block(&question), ..Default::default() }));
         let tools = self.tool_specs(live);
         let (thinking, thinking_budget) = side_thinking(ep, live);
         let max_tokens = if ep.local { SUMMARY_MAX_TOKENS_LOCAL } else { SUMMARY_MAX_TOKENS_HOSTED };
@@ -1548,7 +1552,7 @@ impl Host {
             Err(err) => eprintln!("[notes] {err:#}"),
         }
         let environment = prompt::environment_block(&conv.cwd, &folder, &self.shell);
-        let session = prompt::session_block(&conv.cwd, &folder, self.settings().language());
+        let session = prompt::system_block(&prompt::session_block(&conv.cwd, &folder, self.settings().language()));
         live.conv.lock().unwrap().set_compaction(summary, kept_from, environment, session)?;
         // Notes attached to the summarized messages are gone from the request, so they can be attached again.
         live.read_notes.lock().unwrap().clear();
@@ -1592,7 +1596,7 @@ impl Host {
             && comp.environment.is_empty()
         {
             comp.environment = prompt::environment_block(&cwd, &s.notes_folder, &self.shell);
-            comp.context = prompt::session_block(&cwd, &s.notes_folder, s.language());
+            comp.context = prompt::system_block(&prompt::session_block(&cwd, &s.notes_folder, s.language()));
         }
         let messages = match &c.compaction {
             Some(comp) if comp.kept_from <= c.messages.len() => {
@@ -1667,7 +1671,9 @@ impl Host {
         }
         result.described = true;
         match self.describe_image(live, id, &image, "screenshot of a web page", call.arg("question"), cancel).await {
-            Ok((helper, text)) => result.output.push_str(&format!("\n\nYou cannot see images, so {helper} looked at the screenshot and described it:\n{text}")),
+            Ok((helper, text)) => {
+                result.output.push_str(&format!("\n\n{}", prompt::system_block(&format!("You cannot see images, so {helper} looked at the screenshot and described it:\n{text}"))));
+            }
             Err(err) if is_cancelled(&err) => result.output.push_str("\n\nThe user stopped Scoobert before the screenshot was described."),
             Err(err) => result.output.push_str(&format!("\n\nThe screenshot could not be described: {err:#} Check the page with browser_read and browser_script instead.")),
         }
@@ -1886,7 +1892,10 @@ impl Host {
             "Started the project folder {shown}, and commands now run in it. Give paths relative to it, such as main.py for {shown}/main.py. Do not start a path with {folder_name}/, which would make a second {folder_name} folder inside it."
         );
         if plan != PlanFirst::Off {
-            output.push_str(&format!(" The user chose to plan first. {}", plan_instructions(&self.settings().notes_folder, plan == PlanFirst::Build)));
+            output.push_str(&format!(
+                "\n\n{}",
+                prompt::system_block(&format!("The user chose to plan first. {}", plan_instructions(&self.settings().notes_folder, plan == PlanFirst::Build)))
+            ));
         }
         if plan == PlanFirst::Discuss {
             live.notes_update.store(true, Ordering::SeqCst);
@@ -2274,7 +2283,7 @@ impl Host {
         let target = self.target(&conv.model)?;
         let ep = self.endpoint(&target);
         let (system, mut messages, _) = self.request_parts(live);
-        messages.push(Message::User(UserMessage { text: question.into(), ..Default::default() }));
+        messages.push(Message::User(UserMessage { text: prompt::system_block(question), ..Default::default() }));
         let tools = self.tool_specs(live);
         let (thinking, thinking_budget) = side_thinking(&ep, live);
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens };
@@ -2404,13 +2413,21 @@ fn clean_title(answer: &str) -> Option<String> {
 /// for the model to read again, and keeping every written file in the prompt would fill a small context fast.
 fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
     const LONG: usize = tools::SHORTENED_WRITE;
-    // Each saved call, and whether its result promised the first and last lines. Notes whose result says they stay
-    // in full are left out.
-    let saved: HashMap<String, bool> = messages
+    // Each saved call, and which note its result promised: 2 for the first and last lines framed as Scoobert's text,
+    // 1 for them unframed, as before 0.4.7, and 0 for a count, as before 0.2.6. Notes whose result says they stay in
+    // full are left out.
+    let saved: HashMap<String, u8> = messages
         .iter()
         .filter_map(|m| match m {
             Message::Tool(t) if !t.is_error && !t.output.contains(tools::KEPT_IN_FULL.trim()) => {
-                Some((t.call_id.clone(), t.output.contains(tools::SHORTENED_NOTICE.trim())))
+                let style = if t.output.contains(tools::SHORTENED_SYSTEM.trim()) {
+                    2
+                } else if t.output.contains(tools::SHORTENED_NOTICE.trim()) {
+                    1
+                } else {
+                    0
+                };
+                Some((t.call_id.clone(), style))
             }
             _ => None,
         })
@@ -2418,7 +2435,7 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
     for m in &mut messages {
         let Message::Assistant(a) = m else { continue };
         for call in &mut a.tool_calls {
-            let Some(&ends) = saved.get(&call.id) else { continue };
+            let Some(&style) = saved.get(&call.id) else { continue };
             let path = call.arg("path").to_string();
             let Some(args) = call.arguments.as_object_mut() else { continue };
             // The text moves to a field of another name, so the history never shows a note where file content goes,
@@ -2427,16 +2444,19 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
                 let Some(text) = args.get(key).and_then(Value::as_str).filter(|s| s.chars().count() > LONG).map(String::from) else { continue };
                 // A note alone read to a model as if it had sent the note instead of code, so it wrote the file again.
                 // Its own first and last lines show that the code went out.
-                let note = if ends {
-                    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-                    format!(
-                        "{} lines saved in full in {path}, shown here by their first and last line to save room.\nFirst line: {}\nLast line: {}",
-                        text.lines().count(),
-                        crate::util::clip(lines.first().copied().unwrap_or_default(), 120),
-                        crate::util::clip(lines.last().copied().unwrap_or_default(), 120),
-                    )
-                } else {
-                    format!("{} characters, saved in full in {path}", text.chars().count())
+                let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+                let first = crate::util::clip(lines.first().copied().unwrap_or_default(), 120);
+                let last = crate::util::clip(lines.last().copied().unwrap_or_default(), 120);
+                let note = match style {
+                    2 => format!(
+                        "{}\nFirst line: {first}\nLast line: {last}",
+                        prompt::system_note(&format!(
+                            "{} lines saved in full in {path}, shown here by their first and last line to save room. Read the file for its exact text.",
+                            text.lines().count()
+                        ))
+                    ),
+                    1 => format!("{} lines saved in full in {path}, shown here by their first and last line to save room.\nFirst line: {first}\nLast line: {last}", text.lines().count()),
+                    _ => format!("{} characters, saved in full in {path}", text.chars().count()),
                 };
                 args.remove(key);
                 args.insert(format!("{key}_saved"), note.into());
