@@ -568,5 +568,10 @@
   "Save a review package": "검토 패키지 저장",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "검토 패키지 저장: 이 대화, 해당 프로젝트, 모델 로그를 ZIP 파일 하나로 묶습니다",
   "Saved a review package of {count} files, {size}.": "검토 패키지를 저장했습니다. 파일 {count}개, {size}.",
-  "The review package could not be saved: {error}": "검토 패키지를 저장할 수 없습니다: {error}"
+  "The review package could not be saved: {error}": "검토 패키지를 저장할 수 없습니다: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "{model} 실행이 예기치 않게 중지되어 Scoobert가 다시 실행했습니다.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} 실행이 다시 예기치 않게 중지되어 Scoobert를 다시 시작할 때까지 미리 예측 없이 실행합니다.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} 실행이 계속 예기치 않게 중지되어 Scoobert를 다시 시작할 때까지 {size}K 컨텍스트로 실행합니다.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "그래픽 카드의 {card} 외에 여유 메모리가 약 {memory} 필요합니다. 현재 여유 메모리는 {free}입니다.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "그래픽 카드의 {card} 외에 여유 메모리가 약 {memory} 필요합니다."
 }

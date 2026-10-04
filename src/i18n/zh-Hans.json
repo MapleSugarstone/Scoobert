@@ -568,5 +568,10 @@
   "Save a review package": "保存审阅包",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "保存审阅包：此对话、其项目和模型日志，打包为一个 ZIP 文件",
   "Saved a review package of {count} files, {size}.": "已保存审阅包，共 {count} 个文件，{size}。",
-  "The review package could not be saved: {error}": "无法保存审阅包：{error}"
+  "The review package could not be saved: {error}": "无法保存审阅包：{error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "{model} 意外停止，因此 Scoobert 已重新启动它。",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} 再次意外停止，因此在 Scoobert 重启之前，现在不使用提前预测运行。",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} 多次意外停止，因此在 Scoobert 重启之前，现在以 {size}K 上下文运行。",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存，当前可用 {free}。",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存。"
 }

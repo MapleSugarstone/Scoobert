@@ -112,7 +112,9 @@ pub struct ModelOption {
     pub vision: bool,
     pub reasoning: bool,
     pub size: u64,
+    /// System memory the model needs besides `card_memory`, the graphics card memory it fills when it runs there.
     pub memory_needed: u64,
+    pub card_memory: u64,
     /// The entry in `Settings::model_files` for a model file the user added from another folder, which leaving out
     /// of the list does not delete.
     pub added: Option<String>,
@@ -385,6 +387,7 @@ impl Host {
             .map(|m| {
                 let ctx = self.llama.context_for(&m);
                 let (arch, mtp) = crate::llama::gguf::kind(&m.path);
+                let split = self.llama.memory_split(&m, ctx);
                 ModelOption {
                     arch,
                     mtp,
@@ -399,7 +402,8 @@ impl Host {
                     // A variant made in the model lab carries the name it was given, and its family says what it is.
                     reasoning: REASONING_LOCAL.is_match(&m.name) || REASONING_LOCAL.is_match(&m.family),
                     size: m.size,
-                    memory_needed: self.llama.memory_needed(&m, ctx),
+                    memory_needed: split.0,
+                    card_memory: split.1,
                     added: s.model_files.iter().find(|f| std::path::Path::new(f) == m.path).cloned(),
                     name: m.name,
                 }
@@ -417,6 +421,7 @@ impl Host {
                 reasoning: h.reasoning,
                 size: 0,
                 memory_needed: 0,
+                card_memory: 0,
                 added: None,
                 deletable: false,
                 variants: 0,
@@ -1184,6 +1189,7 @@ impl Host {
         let mut compacted_for_error = false;
         // One summary per state of the conversation; summarizing again without new messages cannot help.
         let mut compacted_at = None;
+        let mut crash_resumes = 0;
         loop {
             self.deliver_queued(live, id)?;
             // A message the user sent meanwhile follows the stopped reply, so the model reads that reply as it is.
@@ -1226,6 +1232,35 @@ impl Host {
             let result = self.send_with_retries(id, &target, &ep, &body, &step).await;
             *live.step_cancel.lock().unwrap() = None;
             *live.last_thought.lock().unwrap() = None;
+            // The local server stopped by itself partway through the reply. The next request starts it again, and the
+            // model continues what it wrote so far.
+            if ep.local
+                && crash_resumes < MAX_RETRIES
+                && !step.is_cancelled()
+                && result.as_ref().map_or_else(|err| !is_cancelled(err), |r| r.stop == StopReason::Error)
+                && self.llama.stopped_by_itself().await
+            {
+                crash_resumes += 1;
+                match result {
+                    Ok(mut cut) if !(cut.thinking.is_empty() && cut.text.is_empty()) => {
+                        cut.stop = StopReason::Aborted;
+                        cut.error = None;
+                        cut.tool_calls.clear();
+                        cut.resend_thinking = true;
+                        self.add_reply(live, id, cut, continued)?;
+                        continuing = true;
+                    }
+                    _ if continued => {
+                        let stopped = live.conv.lock().unwrap().messages.last().cloned();
+                        if let Some(message) = stopped {
+                            self.emit(Event::Message { conv: id.to_string(), message });
+                        }
+                        continuing = true;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             // A continued reply starts with everything the stopped one held, so it takes that reply's place. Without
             // anything new, the stopped reply stays and the window shows it again.
             let replaces = continued && result.as_ref().is_ok_and(|r| r.stop != StopReason::Error && !(r.thinking.is_empty() && r.text.is_empty() && r.tool_calls.is_empty()));
@@ -1451,8 +1486,9 @@ impl Host {
             ticker.cancel();
             let retry = match &result {
                 Err(err) => !is_cancelled(err) && transient(&format!("{err:#}")),
-                // A connection that dropped before anything arrived is worth another try.
-                Ok(r) => r.stop == StopReason::Error && r.text.is_empty() && r.tool_calls.is_empty(),
+                // A connection that dropped before anything arrived is worth another try. A local model's reasoning is
+                // kept instead, since `steps` continues it when the server crashed.
+                Ok(r) => r.stop == StopReason::Error && r.text.is_empty() && r.tool_calls.is_empty() && (r.thinking.is_empty() || !ep.local),
             };
             if !retry || attempt >= MAX_RETRIES {
                 return result;
@@ -2017,7 +2053,15 @@ impl Host {
         // covers what came before it.
         let history = conv.messages.len() > 1;
         let cancel = live.cache_cancel.lock().unwrap().clone().unwrap_or_default();
-        self.persist(live, !history, true, &cancel).await
+        // The request reads whatever the saved prompt lacks, so a read that fails here, as when the server stops
+        // partway, only costs time.
+        match self.persist(live, !history, true, &cancel).await {
+            Err(err) if !is_cancelled(&err) => {
+                eprintln!("[cache] {err:#}");
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     /// Loads the model and the cached prompt when a conversation opens, so the first message starts sooner.
@@ -2160,7 +2204,7 @@ impl Host {
             return false;
         }
         let loaded = self.llama.loaded_model().as_deref() == Some(&m.name);
-        if !loaded && self.llama.memory_needed(&m, self.llama.context_for(&m)) > crate::sys::available_memory() {
+        if !loaded && self.llama.memory_split(&m, self.llama.context_for(&m)).0 > crate::sys::available_memory() {
             return false;
         }
         let (host, cancel) = (self.clone(), self.bake_token());

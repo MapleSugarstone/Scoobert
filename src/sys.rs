@@ -13,14 +13,24 @@ pub fn total_memory() -> u64 {
 /// driver on Linux. None when no card reports it, as for Intel cards, AMD cards on Windows, and Macs, whose graphics
 /// share the system's memory.
 pub fn free_vram() -> Option<u64> {
-    let nvidia = crate::llama::cuda::detect().and_then(|_| nvidia_free_vram());
-    let amd = if cfg!(target_os = "linux") { amd_free_vram() } else { None };
+    let nvidia = crate::llama::cuda::detect().and_then(|_| nvidia_vram("memory.free"));
+    let amd = if cfg!(target_os = "linux") { amd_vram(true) } else { None };
     nvidia.into_iter().chain(amd).max()
 }
 
-fn nvidia_free_vram() -> Option<u64> {
+/// Memory on the graphics card with the most of it, used or not, from the same sources as `free_vram`.
+pub fn total_vram() -> Option<u64> {
+    static TOTAL: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *TOTAL.get_or_init(|| {
+        let nvidia = crate::llama::cuda::detect().and_then(|_| nvidia_vram("memory.total"));
+        let amd = if cfg!(target_os = "linux") { amd_vram(false) } else { None };
+        nvidia.into_iter().chain(amd).max()
+    })
+}
+
+fn nvidia_vram(field: &str) -> Option<u64> {
     let mut cmd = std::process::Command::new("nvidia-smi");
-    cmd.args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"]).stdin(std::process::Stdio::null());
+    cmd.args([&format!("--query-gpu={field}"), "--format=csv,noheader,nounits"]).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -31,7 +41,7 @@ fn nvidia_free_vram() -> Option<u64> {
 }
 
 /// The amdgpu driver's own count of each card's memory, in /sys/class/drm/cardN/device.
-fn amd_free_vram() -> Option<u64> {
+fn amd_vram(free: bool) -> Option<u64> {
     let read = |path: std::path::PathBuf| std::fs::read_to_string(path).ok()?.trim().parse::<u64>().ok();
     std::fs::read_dir("/sys/class/drm")
         .ok()?
@@ -39,7 +49,8 @@ fn amd_free_vram() -> Option<u64> {
         .filter(|e| e.file_name().to_string_lossy().strip_prefix("card").is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())))
         .filter_map(|e| {
             let device = e.path().join("device");
-            Some(read(device.join("mem_info_vram_total"))?.saturating_sub(read(device.join("mem_info_vram_used"))?))
+            let total = read(device.join("mem_info_vram_total"))?;
+            if free { Some(total.saturating_sub(read(device.join("mem_info_vram_used"))?)) } else { Some(total) }
         })
         .max()
 }

@@ -568,5 +568,10 @@
   "Save a review package": "حفظ حزمة مراجعة",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "حفظ حزمة مراجعة: هذه المحادثة ومشروعها وسجلات النموذج، في ملف ZIP واحد",
   "Saved a review package of {count} files, {size}.": "تم حفظ حزمة مراجعة تضم {count} من الملفات، حجمها {size}.",
-  "The review package could not be saved: {error}": "تعذّر حفظ حزمة المراجعة: {error}"
+  "The review package could not be saved: {error}": "تعذّر حفظ حزمة المراجعة: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "توقف {model} بشكل غير متوقع، لذا أعاد Scoobert تشغيله.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "توقف {model} مرة أخرى بشكل غير متوقع، لذا يعمل الآن بدون التنبؤ المسبق حتى يُعاد تشغيل Scoobert.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "استمر {model} في التوقف بشكل غير متوقع، لذا يعمل الآن بسياق {size}K حتى يُعاد تشغيل Scoobert.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "يحتاج إلى نحو {memory} من الذاكرة المتاحة إضافةً إلى {card} على بطاقة الرسوميات. المتاح الآن {free}.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "يحتاج إلى نحو {memory} من الذاكرة المتاحة إضافةً إلى {card} على بطاقة الرسوميات."
 }

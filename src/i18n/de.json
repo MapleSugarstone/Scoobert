@@ -568,5 +568,10 @@
   "Save a review package": "Prüfpaket speichern",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "Prüfpaket speichern: diese Unterhaltung, ihr Projekt und die Modellprotokolle in einer ZIP-Datei",
   "Saved a review package of {count} files, {size}.": "Prüfpaket gespeichert: {count} Dateien, {size}.",
-  "The review package could not be saved: {error}": "Das Prüfpaket konnte nicht gespeichert werden: {error}"
+  "The review package could not be saved: {error}": "Das Prüfpaket konnte nicht gespeichert werden: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "{model} wurde unerwartet beendet, daher hat Scoobert es neu gestartet.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} wurde erneut unerwartet beendet, daher läuft es jetzt ohne Voraussagen, bis Scoobert neu startet.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} wurde wiederholt unerwartet beendet, daher läuft es jetzt mit einem Kontext von {size}K, bis Scoobert neu startet.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Benötigt etwa {memory} freien Speicher zusätzlich zu {card} auf der Grafikkarte. Aktuell sind {free} frei.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Benötigt etwa {memory} freien Speicher zusätzlich zu {card} auf der Grafikkarte."
 }

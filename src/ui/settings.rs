@@ -831,10 +831,12 @@ impl Panel {
                 sizes.push(ContextChoice(m.context));
             }
             let free = crate::sys::available_memory();
-            let warn = if m.memory_needed > free {
-                text(trf("Needs about {memory} of free memory; {free} is free now.", &[("memory", &gb(m.memory_needed)), ("free", &gb(free))])).size(12).style(theme::warn_text)
-            } else {
-                text(trf("Needs about {memory} of free memory.", &[("memory", &gb(m.memory_needed))])).size(12).style(theme::muted)
+            let args: &[(&str, &dyn std::fmt::Display)] = &[("memory", &gb(m.memory_needed)), ("card", &gb(m.card_memory)), ("free", &gb(free))];
+            let warn = match (m.memory_needed > free, m.card_memory > 0) {
+                (true, true) => text(trf("Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.", args)).size(12).style(theme::warn_text),
+                (true, false) => text(trf("Needs about {memory} of free memory; {free} is free now.", args)).size(12).style(theme::warn_text),
+                (false, true) => text(trf("Needs about {memory} of free memory besides {card} on the graphics card.", args)).size(12).style(theme::muted),
+                (false, false) => text(trf("Needs about {memory} of free memory.", args)).size(12).style(theme::muted),
             };
             let name = m.name.clone();
             let forget: Element<'a, Msg> = match &m.added {

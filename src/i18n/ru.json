@@ -568,5 +568,10 @@
  "Save a review package": "Сохранить пакет для проверки",
  "Save a review package: this conversation, its project, and the model logs, in one zip": "Сохранить пакет для проверки: эта беседа, её проект и журналы модели в одном ZIP-файле",
  "Saved a review package of {count} files, {size}.": "Пакет для проверки сохранён (файлов: {count}, размер: {size}).",
- "The review package could not be saved: {error}": "Не удалось сохранить пакет для проверки: {error}"
+ "The review package could not be saved: {error}": "Не удалось сохранить пакет для проверки: {error}",
+ "{model} stopped unexpectedly, so Scoobert started it again.": "Модель {model} неожиданно остановилась, поэтому Scoobert запустил её снова.",
+ "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "Модель {model} снова неожиданно остановилась, поэтому теперь она работает без упреждающего предсказания до перезапуска Scoobert.",
+ "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "Модель {model} неоднократно неожиданно останавливалась, поэтому теперь она работает с контекстом {size}K до перезапуска Scoobert.",
+ "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Требуется около {memory} свободной памяти помимо {card} на видеокарте. Сейчас свободно {free}.",
+ "Needs about {memory} of free memory besides {card} on the graphics card.": "Требуется около {memory} свободной памяти помимо {card} на видеокарте."
 }

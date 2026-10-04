@@ -568,5 +568,10 @@
   "Save a review package": "پاشەکەوتکردنی پاکێجی پێداچوونەوە",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "پاشەکەوتکردنی پاکێجی پێداچوونەوە: ئەم گفتوگۆیە، پڕۆژەکەی و تۆمارەکانی مۆدێل، لە یەک فایلی ZIP دا",
   "Saved a review package of {count} files, {size}.": "پاکێجی پێداچوونەوە پاشەکەوت کرا: {count} فایل، {size}.",
-  "The review package could not be saved: {error}": "نەتوانرا پاکێجی پێداچوونەوەکە پاشەکەوت بکرێت: {error}"
+  "The review package could not be saved: {error}": "نەتوانرا پاکێجی پێداچوونەوەکە پاشەکەوت بکرێت: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "{model} بە شێوەیەکی چاوەڕواننەکراو وەستا، بۆیە Scoobert دووبارە دەستی پێکردەوە.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} دووبارە بە شێوەیەکی چاوەڕواننەکراو وەستا، بۆیە ئێستا بەبێ پێشبینیی پێشوەخت کار دەکات تا Scoobert دووبارە دەست پێبکاتەوە.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} بەردەوام بە شێوەیەکی چاوەڕواننەکراو دەوەستا، بۆیە ئێستا لەگەڵ کۆنتێکستی {size}K کار دەکات تا Scoobert دووبارە دەست پێبکاتەوە.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک. ئێستا {free} بەتاڵە.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک."
 }

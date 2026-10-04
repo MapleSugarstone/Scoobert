@@ -568,5 +568,10 @@
   "Save a review package": "Pakêta vekolînê tomar bike",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "Pakêta vekolînê tomar bike: ev gotûbêj, projeya wê û tomarên modelê, di yek pela ZIP de",
   "Saved a review package of {count} files, {size}.": "Pakêta vekolînê hat tomarkirin: {count} pel, {size}.",
-  "The review package could not be saved: {error}": "Pakêta vekolînê nehat tomarkirin: {error}"
+  "The review package could not be saved: {error}": "Pakêta vekolînê nehat tomarkirin: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "{model} ji nişkê ve rawestiya, ji ber vê yekê Scoobert ew ji nû ve xebitand.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} dîsa ji nişkê ve rawestiya, ji ber vê yekê niha bêyî pêşbînîkirina pêşwext dixebite heta ku Scoobert ji nû ve dest pê bike.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} dîsa û dîsa ji nişkê ve rawestiya, ji ber vê yekê niha bi çarçoveya {size}K dixebite heta ku Scoobert ji nû ve dest pê bike.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê. Niha {free} vala ye.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê."
 }

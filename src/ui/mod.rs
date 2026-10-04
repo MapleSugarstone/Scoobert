@@ -30,7 +30,7 @@ use iced::{Alignment, Element, Fill, Length, Size, Subscription, Task, Theme, sy
 use crate::agent::conversation::{Conversation, Image, Summary};
 use crate::agent::{Decision, Event, Host, ModelOption, Snapshot};
 use crate::i18n::{tr, trf};
-use crate::llama::{ServerStatus, SharedSettings};
+use crate::llama::{CrashStep, ServerStatus, SharedSettings};
 use crate::store::{Approvals, PlanFirst, State, ThemeChoice, Thinking};
 use crate::update::Release;
 use crate::util::{ago, clip, gb, short_count};
@@ -1426,6 +1426,14 @@ impl App {
                 self.toast(trf("{model} could not load while predicting ahead, so it runs without that until Scoobert restarts.", &[("model", model)]));
                 return Task::none();
             }
+            Event::Server(ServerStatus::Restarted(model, step)) => {
+                self.toast(match step {
+                    None => trf("{model} stopped unexpectedly, so Scoobert started it again.", &[("model", model)]),
+                    Some(CrashStep::NoPrediction) => trf("{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.", &[("model", model)]),
+                    Some(CrashStep::SmallerContext(ctx)) => trf("{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.", &[("model", model), ("size", &(ctx / 1024))]),
+                });
+                return Task::none();
+            }
             Event::Server(ServerStatus::CudaFailed(model)) => {
                 self.toast(trf("NVIDIA support could not load {model}, so Scoobert uses the card's default support until it restarts.", &[("model", model)]));
                 return Task::none();
@@ -2017,7 +2025,7 @@ impl App {
         }
         match &self.server {
             ServerStatus::Stopped => (|t| t.muted, tr("Model not loaded").into()),
-            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) | ServerStatus::CudaFailed(m) | ServerStatus::SpecFailed(m) => {
+            ServerStatus::Loading(m) | ServerStatus::GpuFailed(m) | ServerStatus::CudaFailed(m) | ServerStatus::SpecFailed(m) | ServerStatus::Restarted(m, _) => {
                 (|t| t.warn, trf("Loading {model}", &[("model", m)]))
             }
             ServerStatus::Ready(m) => (|t| t.ok, trf("{model} loaded", &[("model", m)])),

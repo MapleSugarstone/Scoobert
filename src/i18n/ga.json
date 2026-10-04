@@ -568,5 +568,10 @@
   "Save a review package": "Sábháil pacáiste athbhreithnithe",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "Sábháil pacáiste athbhreithnithe: an comhrá seo, a thionscadal agus logaí na samhla in aon chomhad ZIP amháin",
   "Saved a review package of {count} files, {size}.": "Sábháladh pacáiste athbhreithnithe: {count} comhad, {size}.",
-  "The review package could not be saved: {error}": "Níorbh fhéidir an pacáiste athbhreithnithe a shábháil: {error}"
+  "The review package could not be saved: {error}": "Níorbh fhéidir an pacáiste athbhreithnithe a shábháil: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "Stad {model} gan choinne, mar sin d'atosaigh Scoobert arís é.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "Stad {model} gan choinne arís, mar sin ritheann sé anois gan tuar roimh ré go dtí go n-atosófar Scoobert.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "Stad {model} gan choinne arís agus arís eile, mar sin ritheann sé anois le comhthéacs {size}K go dtí go n-atosófar Scoobert.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí. Tá {free} saor anois.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí."
 }

@@ -100,6 +100,18 @@ pub enum ServerStatus {
     CudaFailed(String),
     /// The named model could not load while predicting ahead, so it runs without that until Scoobert restarts.
     SpecFailed(String),
+    /// The server stopped by itself while running the named model and was started again, with what changed so it
+    /// would not stop again, if anything.
+    Restarted(String, Option<CrashStep>),
+}
+
+/// What Scoobert changes after a model's server keeps stopping by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashStep {
+    /// It runs without predicting ahead.
+    NoPrediction,
+    /// It runs with this smaller context.
+    SmallerContext(u32),
 }
 
 struct Running {
@@ -139,6 +151,12 @@ pub struct LlamaServer {
     cuda_refused: AtomicBool,
     /// Models that could not load while predicting ahead in this run.
     spec_refused: Mutex<std::collections::HashSet<String>>,
+    /// When a running server last stopped by itself, by model, for the steps `ensure` takes after repeated crashes.
+    crashes: Mutex<Vec<(String, Instant)>>,
+    /// A smaller context for models that kept crashing at their own, until Scoobert restarts.
+    context_cut: Mutex<std::collections::HashMap<String, u32>>,
+    /// This server, for the low-level requests that restart it after a crash.
+    me: Weak<LlamaServer>,
     on_status: Box<dyn Fn(ServerStatus) + Send + Sync>,
 }
 
@@ -156,7 +174,10 @@ impl LlamaServer {
     /// Stops a server left behind by a crash, picks the port for this run, and starts the idle timer.
     pub fn new(settings: SharedSettings, on_status: impl Fn(ServerStatus) + Send + Sync + 'static) -> Arc<Self> {
         kill_orphan();
-        let server = Arc::new(LlamaServer {
+        let server = Arc::new_cyclic(|me| LlamaServer {
+            me: me.clone(),
+            crashes: Mutex::new(Vec::new()),
+            context_cut: Mutex::new(std::collections::HashMap::new()),
             settings,
             // Any web page can send requests to localhost, so the server requires this key.
             api_key: random_hex(24),
@@ -266,6 +287,11 @@ impl LlamaServer {
 
     /// Large models get a smaller default context so the weights and the cache fit in memory together.
     pub fn context_for(&self, model: &LocalModel) -> u32 {
+        let chosen = self.chosen_context(model);
+        self.context_cut.lock().unwrap().get(&model.name).map_or(chosen, |&cut| chosen.min(cut))
+    }
+
+    fn chosen_context(&self, model: &LocalModel) -> u32 {
         let s = self.settings();
         if let Some(&ctx) = s.context_sizes.get(&model.name) {
             return ctx;
@@ -297,6 +323,18 @@ impl LlamaServer {
         catalog::memory_formula(weights, kv)
     }
 
+    /// System memory and graphics card memory `model` takes at `ctx`, counting the whole card as free for it.
+    pub fn memory_split(&self, model: &LocalModel, ctx: u32) -> (u64, u64) {
+        let need = self.memory_needed(model, ctx);
+        match crate::sys::total_vram().filter(|_| self.uses_gpu(&model.name)) {
+            Some(vram) => {
+                let card = vram.saturating_sub(VRAM_MARGIN).min(need);
+                (need.saturating_sub(card).max(MIN_SYSTEM_MEMORY), card)
+            }
+            None => (need, 0),
+        }
+    }
+
     pub fn loaded_model(&self) -> Option<String> {
         self.shared.lock().unwrap().model.as_ref().map(|(m, _)| m.name.clone())
     }
@@ -326,9 +364,14 @@ impl LlamaServer {
 
     /// Whether `model` runs on the graphics card, and the CUDA server when NVIDIA support takes over the card. NVIDIA
     /// support replaces the bundled server unless the user named a server of their own.
+    fn uses_gpu(&self, model: &str) -> bool {
+        let s = self.settings();
+        s.use_gpu && !s.gpu_failed.iter().any(|m| m == model) && !self.gpu_refused.lock().unwrap().contains(model)
+    }
+
     fn backend(&self, model: &str) -> (bool, Option<PathBuf>) {
         let s = self.settings();
-        let gpu = s.use_gpu && !s.gpu_failed.iter().any(|m| m == model) && !self.gpu_refused.lock().unwrap().contains(model);
+        let gpu = self.uses_gpu(model);
         let cuda = if gpu && s.llama_server_path.trim().is_empty() && !self.cuda_refused.load(Ordering::SeqCst) { cuda::server() } else { None };
         (gpu, cuda)
     }
@@ -378,6 +421,16 @@ impl LlamaServer {
         let mut proc = self.proc.lock().await;
         if cancel.is_cancelled() {
             return Err(Cancelled.into());
+        }
+        if let Some(running) = proc.as_mut()
+            && running.ready
+            && !matches!(running.child.try_wait(), Ok(None))
+        {
+            let name = running.model.name.clone();
+            let step = self.crashed(&name, running.extras.iter().any(|a| a == "--spec-type"));
+            // The slot went with the server, so the next request reads its conversation again.
+            self.set_slot_owner(None);
+            (self.on_status)(ServerStatus::Restarted(name, step));
         }
         let (gpu, cuda) = self.backend(&model.name);
         let extras = self.extra_args(model, gpu);
@@ -452,7 +505,7 @@ impl LlamaServer {
             bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
         };
         kill_orphan();
-        if self.request("/health", None, Duration::from_secs(1), None).await.is_ok() {
+        if self.request_once("/health", None, Duration::from_secs(1), None).await.is_ok() {
             bail!("Another program is using port {}. Restart Scoobert to pick a free port.", self.port);
         }
         let ctx = self.context_for(model);
@@ -735,7 +788,7 @@ impl LlamaServer {
                 self.shared.lock().unwrap().model = None;
                 return Err(ExitedWhileLoading(format!("llama-server stopped while loading {}.\n{}", model.name, log_errors())).into());
             }
-            if let Ok(h) = self.request("/health", None, Duration::from_secs(2), Some(cancel)).await
+            if let Ok(h) = self.request_once("/health", None, Duration::from_secs(2), Some(cancel)).await
                 && h["status"] == "ok"
             {
                 if let Some(r) = proc.as_mut() {
@@ -780,6 +833,10 @@ impl LlamaServer {
         let Ok(mut proc) = self.proc.try_lock() else { return };
         let Some(running) = proc.as_mut() else { return };
         if !matches!(running.child.try_wait(), Ok(None)) {
+            // A task using the server starts it again itself, and counts the crash.
+            if self.busy.load(Ordering::SeqCst) > 0 {
+                return;
+            }
             *proc = None;
             {
                 let mut shared = self.shared.lock().unwrap();
@@ -797,7 +854,69 @@ impl LlamaServer {
         }
     }
 
+    /// Sends a request, and when the server cannot be reached because it stopped by itself, starts it again and
+    /// sends the request once more.
     pub async fn request(
+        &self,
+        path: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+        cancel: Option<&CancellationToken>,
+    ) -> anyhow::Result<Value> {
+        match self.request_once(path, body, timeout, cancel).await {
+            Err(err) if unreachable(&err) && self.recover().await => self.request_once(path, body, timeout, cancel).await,
+            other => other,
+        }
+    }
+
+    /// Whether the server has stopped by itself. A server that is going down can run for a moment after its
+    /// connections close, so this waits up to two seconds.
+    pub async fn stopped_by_itself(&self) -> bool {
+        for _ in 0..8 {
+            {
+                let mut proc = self.proc.lock().await;
+                let Some(running) = proc.as_mut().filter(|r| r.ready) else { return false };
+                if !matches!(running.child.try_wait(), Ok(None)) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        false
+    }
+
+    /// Starts the server again if the model it was running stopped by itself. Returns whether it runs now.
+    async fn recover(&self) -> bool {
+        let Some(me) = self.me.upgrade() else { return false };
+        let Some((model, _)) = self.shared.lock().unwrap().model.clone() else { return false };
+        me.ensure(&model).await.is_ok()
+    }
+
+    /// Records that `model`'s server stopped by itself and returns what to change so it stops less. A second stop
+    /// within ten minutes turns off predicting ahead if the server had it on, and a stop after that halves the
+    /// context, down to 8K, for the rest of this run.
+    fn crashed(&self, model: &str, predicted: bool) -> Option<CrashStep> {
+        let mut crashes = self.crashes.lock().unwrap();
+        crashes.retain(|(_, at)| at.elapsed() < Duration::from_secs(600));
+        crashes.push((model.to_string(), Instant::now()));
+        if crashes.iter().filter(|(m, _)| m == model).count() < 2 {
+            return None;
+        }
+        if predicted {
+            self.spec_refused.lock().unwrap().insert(model.to_string());
+            return Some(CrashStep::NoPrediction);
+        }
+        let ctx = self.shared.lock().unwrap().model.as_ref().map(|(_, c)| *c).unwrap_or(DEFAULT_CONTEXT);
+        let smaller = (ctx / 2).max(8192);
+        (smaller < ctx).then(|| {
+            self.context_cut.lock().unwrap().insert(model.to_string(), smaller);
+            CrashStep::SmallerContext(smaller)
+        })
+    }
+
+    /// A request that does not start a stopped server, for the checks inside `ensure` and for the prompt cache,
+    /// which a restarted server no longer holds.
+    async fn request_once(
         &self,
         path: &str,
         body: Option<&Value>,
@@ -1007,7 +1126,7 @@ impl LlamaServer {
     /// closing Scoobert during a save leaves the previous file whole.
     pub async fn save(&self, filename: &str, expected: &[i32]) -> anyhow::Result<()> {
         let partial = format!("{PARTIAL}{filename}");
-        self.request("/slots/0?action=save", Some(&json!({ "filename": partial })), Duration::from_secs(120), None).await?;
+        self.request_once("/slots/0?action=save", Some(&json!({ "filename": partial })), Duration::from_secs(120), None).await?;
         let dir = paths::get().slots();
         // A request from another conversation can run between a read and its save, and saving that conversation's
         // state here would replace this file's good copy.
@@ -1068,7 +1187,7 @@ impl LlamaServer {
             return false;
         }
         let body = json!({ "filename": filename });
-        let ok = self.request("/slots/0?action=restore", Some(&body), Duration::from_secs(120), None).await.is_ok();
+        let ok = self.request_once("/slots/0?action=restore", Some(&body), Duration::from_secs(120), None).await.is_ok();
         if ok && let Ok(f) = std::fs::File::options().write(true).open(&file) {
             let _ = f.set_modified(SystemTime::now());
         }
@@ -1078,7 +1197,7 @@ impl LlamaServer {
     /// Tokens the server has generated for the current reply, read from its slot state. The server holds back a
     /// tool call until it is complete, so this is the only progress Scoobert can show while a file is written.
     pub async fn generated_tokens(&self) -> Option<u64> {
-        let slots = self.request("/slots", None, Duration::from_secs(2), None).await.ok()?;
+        let slots = self.request_once("/slots", None, Duration::from_secs(2), None).await.ok()?;
         let slot = slots.as_array()?.first()?;
         slot["next_token"][0]["n_decoded"].as_u64().or(slot["next_token"]["n_decoded"].as_u64()).or(slot["n_decoded"].as_u64())
     }
@@ -1188,6 +1307,11 @@ pub static QUANT_SUFFIX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock
 pub fn model_stem(file_name: &str) -> String {
     let re = regex::Regex::new(r"(?i)(-\d{5}-of-\d{5})?\.gguf$").unwrap();
     re.replace(file_name, "").into_owned()
+}
+
+/// Whether a request failed because nothing answered at the server's address, as after the server stopped.
+fn unreachable(err: &anyhow::Error) -> bool {
+    err.chain().any(|e| e.downcast_ref::<reqwest::Error>().is_some_and(reqwest::Error::is_connect))
 }
 
 fn path_arg(p: &Path) -> String {

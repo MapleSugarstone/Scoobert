@@ -568,5 +568,10 @@
  "Save a review package": "Salva un pacchetto di revisione",
  "Save a review package: this conversation, its project, and the model logs, in one zip": "Salva un pacchetto di revisione: questa conversazione, il suo progetto e i log del modello, in un unico file ZIP",
  "Saved a review package of {count} files, {size}.": "Pacchetto di revisione salvato: {count} file, {size}.",
- "The review package could not be saved: {error}": "Impossibile salvare il pacchetto di revisione: {error}"
+ "The review package could not be saved: {error}": "Impossibile salvare il pacchetto di revisione: {error}",
+ "{model} stopped unexpectedly, so Scoobert started it again.": "{model} si è arrestato in modo imprevisto, quindi Scoobert lo ha riavviato.",
+ "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} si è arrestato di nuovo in modo imprevisto, quindi ora viene eseguito senza la previsione anticipata finché Scoobert non viene riavviato.",
+ "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} ha continuato ad arrestarsi in modo imprevisto, quindi ora viene eseguito con un contesto di {size}K finché Scoobert non viene riavviato.",
+ "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Richiede circa {memory} di memoria libera oltre a {card} sulla scheda grafica. Ora sono liberi {free}.",
+ "Needs about {memory} of free memory besides {card} on the graphics card.": "Richiede circa {memory} di memoria libera oltre a {card} sulla scheda grafica."
 }

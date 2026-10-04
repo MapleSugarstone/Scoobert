@@ -568,5 +568,10 @@
   "Save a review package": "I-save ang pakete ng pagsusuri",
   "Save a review package: this conversation, its project, and the model logs, in one zip": "I-save ang pakete ng pagsusuri: ang pag-uusap na ito, ang proyekto nito, at ang mga log ng modelo, sa iisang ZIP file",
   "Saved a review package of {count} files, {size}.": "Nai-save ang pakete ng pagsusuri: {count} file, {size}.",
-  "The review package could not be saved: {error}": "Hindi na-save ang pakete ng pagsusuri: {error}"
+  "The review package could not be saved: {error}": "Hindi na-save ang pakete ng pagsusuri: {error}",
+  "{model} stopped unexpectedly, so Scoobert started it again.": "Huminto nang hindi inaasahan ang {model}, kaya muli itong pinatakbo ng Scoobert.",
+  "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "Huminto ulit nang hindi inaasahan ang {model}, kaya tumatakbo ito ngayon nang walang paunang hula hanggang mag-restart ang Scoobert.",
+  "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "Paulit-ulit na huminto nang hindi inaasahan ang {model}, kaya tumatakbo ito ngayon na may {size}K na konteksto hanggang mag-restart ang Scoobert.",
+  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card. {free} ang libre ngayon.",
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card."
 }
