@@ -198,6 +198,8 @@ pub enum Message {
     Send,
     /// Gives the queued messages to the model while it thinks, instead of after its current step.
     SendNow,
+    /// Deletes a message that waits for the current step, by its place in the queue.
+    Unqueue(usize),
     /// Resumes an interrupted task with a hidden note that explains what happened.
     Continue,
     Stop,
@@ -941,6 +943,15 @@ impl App {
                     && !host.deliver_now(&chat.id)
                 {
                     self.toast(tr("Scoobert is writing a tool call, so the message waits until that step finishes."));
+                }
+            }
+            Message::Unqueue(i) => {
+                // A message the task has already read stays, and the list clears when it arrives in the conversation.
+                if let (Some(host), Some(chat)) = (&self.host, &mut self.chat)
+                    && host.unqueue(&chat.id, i)
+                    && i < chat.queued.len()
+                {
+                    chat.queued.remove(i);
                 }
             }
             Message::Continue => {

@@ -127,9 +127,19 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool, browser: bool) -> Vec<V
         ),
         tool(
             "write",
-            "Create a file or replace a whole file. Creates missing folders. Set append to true to add content to the end of an existing file, which is how to write a long file in parts. Give path and append before content.",
-            json!({ "path": path, "append": { "type": "boolean" }, "content": { "type": "string" } }),
-            &["path", "content"],
+            "Write a file, creating missing folders. Set mode to create for a new file, replace to swap all of an existing file's text, or append to add content to the end of a file, which is how to write a long file in parts. Give path and mode before content.",
+            json!({
+                "path": path,
+                "mode": { "type": "string", "enum": ["create", "replace", "append"] },
+                "content": { "type": "string" },
+            }),
+            &["path", "mode", "content"],
+        ),
+        tool(
+            "move",
+            "Put a file in place of another, replacing it, and remove the first. Use it to finish rewriting an existing file that needs more than one write part: write the new version to a draft named like the file with .new added, such as src/map.ts.new, with create and then append, and move the draft to the file's path once it is complete. The file keeps working until then.",
+            json!({ "from": path, "path": path }),
+            &["from", "path"],
         ),
         shell_tool,
         tool(
@@ -224,7 +234,13 @@ pub fn is_read_only(name: &str) -> bool {
 }
 
 pub fn changes_files(name: &str) -> bool {
-    name == "edit" || name == "write"
+    name == "edit" || name == "write" || name == "move"
+}
+
+/// The draft a rewrite of `path` goes to while it takes more than one part. The added extension keeps build tools
+/// from reading a half-written draft.
+pub fn draft_path(path: &str) -> String {
+    format!("{path}.new")
 }
 
 #[derive(Debug, Clone, Default)]
@@ -334,6 +350,7 @@ pub async fn run(
         "read" => read(call, cwd, limits).await,
         "edit" => edit(call, cwd, limits).await,
         "write" => write(call, cwd, limits).await,
+        "move" => move_file(call, cwd, limits).await,
         "bash" | "powershell" => command(call, cwd, shell, limits, cancel, on_output).await,
         "web_search" if limits.web => match super::web::search(arg(call, &["query", "q"]).unwrap_or_default()).await {
             Ok(results) => Ok(Outcome::ok(super::web::format_results(arg(call, &["query", "q"]).unwrap_or_default(), &results))),
@@ -478,19 +495,28 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Could not create {}: {e}", paths::display(dir)))?;
     }
-    let append = call.arguments.get("append").is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"));
+    let append = appends(call);
     if append && content.is_empty() {
         return Err("Nothing was added, because content was empty. Put the text to add in content.".into());
     }
     refuse_system_text(&path, content)?;
+    // After a split, a model often writes the last lines it saved again at the start of the next part.
+    let (content, repeated) = match (&old, append) {
+        (Some(existing), true) => drop_repeated_start(existing, content),
+        _ => (content, 0),
+    };
+    if append && content.trim().is_empty() {
+        return Err(format!("Nothing was added, because every line of content is already at the end of {}.", paths::display(&path)));
+    }
     // A model writing a long file in parts sometimes leaves out append, and each part then replaces the whole file.
     let wipes = if append { None } else { old.as_deref().and_then(|existing| drops_most(existing, content)) };
     if !confirmed_replace(&path, content, wipes.is_some())
         && let Some((lines, kept)) = wipes
     {
+        let shown = paths::display(&path);
+        let draft = draft_path(arg(call, &["path"]).unwrap_or_default());
         return Err(format!(
-            "Nothing was written. {} has {lines} lines, and this write keeps only {kept} of them, so it would delete the rest. To add this text to the end of the file, call write again with append set to true. To change part of the file, use edit. If you do mean to replace the whole file with this text, send the same write again.",
-            paths::display(&path)
+            "Nothing was written. {shown} has {lines} lines, and this write keeps only {kept} of them, so it would delete the rest. To add this text to the end of the file, call write again with mode set to append. To change part of the file, use edit. If you are rewriting the whole file in parts, write them to {draft} with create and then append, and move it to {shown} when it is complete. To replace the file with this text alone, send this write again with the same first lines."
         ));
     }
     let new = match (&old, append) {
@@ -506,6 +532,9 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
         (None, _) => "Created",
     };
     let mut output = format!("{verb} {shown} (now {} bytes).", new.len());
+    if repeated > 0 {
+        output.push_str(&format!(" The first {repeated} lines of content were already the last lines of the file, so they were left out."));
+    }
     // The note that replaces long content in the conversation reads like a failed write unless it is explained.
     if content.len() > SHORTENED_WRITE && kept_in_full(limits, &path, content.len()) {
         output.push_str(KEPT_IN_FULL);
@@ -528,7 +557,70 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     Ok(Outcome { output, diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)), ..Default::default() })
 }
 
+/// Puts the file at `from`, usually a finished draft, in place of the file at `path`.
+async fn move_file(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, String> {
+    let to = target_path(cwd, call, limits.notes.as_deref()).ok_or("move needs path, the file to replace.")?;
+    let raw = arg(call, &["from", "source", "draft"]).ok_or("move needs from, the file to put in its place.")?;
+    let from = resolve(cwd, raw);
+    let (shown_from, shown_to) = (paths::display(&from), paths::display(&to));
+    if !from.is_file() {
+        return Err(format!("{shown_from} does not exist. Write the new version there first, then move it."));
+    }
+    // Only a file inside the project may move, so a call cannot pull files in from elsewhere on the computer.
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let homes = [Some(cwd.to_path_buf()), limits.notes.clone()];
+    if !homes.iter().flatten().any(|h| real(&from).starts_with(real(h))) {
+        return Err(format!("{shown_from} is outside the project folder, so it cannot be moved."));
+    }
+    if real(&from) == real(&to) {
+        return Err("from and path name the same file.".into());
+    }
+    let new = tokio::fs::read_to_string(&from).await.map_err(|e| format!("Could not read {shown_from}: {e}"))?;
+    let old = tokio::fs::read_to_string(&to).await.ok();
+    save_checkpoint(limits.checkpoints.as_deref(), &call.id, &to).await;
+    if let Some(dir) = to.parent() {
+        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Could not create {}: {e}", paths::display(dir)))?;
+    }
+    if tokio::fs::rename(&from, &to).await.is_err() {
+        // Moving across drives cannot rename, so it copies and then removes the first file.
+        tokio::fs::write(&to, &new).await.map_err(|e| format!("Could not write {shown_to}: {e}"))?;
+        let _ = tokio::fs::remove_file(&from).await;
+    }
+    let verb = if old.is_some() { "Replaced" } else { "Created" };
+    Ok(Outcome {
+        output: format!("{verb} {shown_to} with {shown_from} (now {} bytes), and {shown_from} is gone.", new.len()),
+        diff: Some(unified_diff(old.as_deref().unwrap_or(""), &new)),
+        ..Default::default()
+    })
+}
+
 const OUTLINE_LINES: usize = 40;
+
+/// Whether a write adds to the end of its file: mode append, or append true in conversations from before mode.
+pub fn appends(call: &ToolCall) -> bool {
+    let mode = call.arguments.get("mode").and_then(Value::as_str).map(|m| m.trim().to_lowercase());
+    match mode.as_deref() {
+        Some("append" | "add" | "add_to_end" | "append_to_end") => true,
+        Some(_) => false,
+        None => call.arguments.get("append").is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true")),
+    }
+}
+
+/// `content` without the lines at its start that repeat the end of `existing`, with how many were dropped. A repeat
+/// counts from 3 lines, and it needs a line of real text, so a few closing braces do not match by chance.
+fn drop_repeated_start<'a>(existing: &str, content: &'a str) -> (&'a str, usize) {
+    let tail: Vec<&str> = existing.lines().map(str::trim_end).collect();
+    let starts: Vec<usize> = std::iter::once(0).chain(content.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let head: Vec<&str> = content.lines().map(str::trim_end).collect();
+    for k in (3..=head.len().min(tail.len()).min(40)).rev() {
+        let (end, start) = (&tail[tail.len() - k..], &head[..k]);
+        if end == start && start.iter().any(|l| l.trim().len() > 10) {
+            let cut = starts.get(k).copied().unwrap_or(content.len());
+            return (&content[cut..], k);
+        }
+    }
+    (content, 0)
+}
 
 /// The lines of `text` most like the start of `wanted`, as many as `wanted` has up to twelve, when some line is at
 /// least half alike. A model that remembers its own earlier text slightly wrong can then copy the real text.
@@ -591,12 +683,14 @@ fn refuse_system_text(path: &Path, text: &str) -> Result<(), String> {
 }
 
 /// Whether a write that `wipes` most of `path` repeats the one refused just before it, which means the model meant to
-/// replace the file. It remembers this write's refusal, and any other write to the file forgets it.
+/// replace the file. A model writes the text afresh each time, so the same first lines count as the same write. It
+/// remembers this write's refusal, and any other write to the file forgets it.
 fn confirmed_replace(path: &Path, content: &str, wipes: bool) -> bool {
     use std::hash::{Hash, Hasher};
     static REFUSED: Mutex<Option<std::collections::HashMap<PathBuf, u64>>> = Mutex::new(None);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    content.hash(&mut hasher);
+    let opening: Vec<&str> = content.lines().map(str::trim).filter(|l| l.len() > 2).take(5).collect();
+    opening.hash(&mut hasher);
     let hash = hasher.finish();
     let mut refused = REFUSED.lock().unwrap();
     let refused = refused.get_or_insert_with(std::collections::HashMap::new);
@@ -688,7 +782,7 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     if count == 0 {
         if old_n.contains("⟦System") || old_n.contains("Links in this note:") || old_n.contains("Linked from:") {
             return Err(format!(
-                "old_text was not found in {shown}, because ⟦System: …⟧ lines and the summary of a note's links are notes the tools add to their results, not part of the file. To add text at the end of the file, use write with append set to true."
+                "old_text was not found in {shown}, because ⟦System: …⟧ lines and the summary of a note's links are notes the tools add to their results, not part of the file. To add text at the end of the file, use write with mode set to append."
             ));
         }
         return Err(match closest_text(&text, &old_n) {
@@ -1049,7 +1143,7 @@ mod tests {
         assert!(out.is_error && out.output.contains("(active, blocks smoke test)"), "{}", out.output);
         let footer = call("edit", json!({"path": "Notes/Problems.md", "old_text": "[Links in this note: [[Dialogue]] is Notes/Dialogue.md.]", "new_text": "x"}));
         let out = run(&footer, &dir, &shell, &limits, &cancel, |_| {}).await;
-        assert!(out.output.contains("append set to true"), "{}", out.output);
+        assert!(out.output.contains("mode set to append"), "{}", out.output);
         let long = "- line\n".repeat(400);
         let write = call("write", json!({"path": "Notes/Long.md", "content": long}));
         assert!(run(&write, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains(KEPT_IN_FULL.trim()));
@@ -1095,7 +1189,7 @@ mod tests {
         let (shell, limits, cancel) = (Shell::detect(), Limits::default(), CancellationToken::new());
         let part = call("write", json!({"path": "game.js", "content": "function startGame() {\n  run();\n}\n"}));
         let refused = run(&part, &dir, &shell, &limits, &cancel, |_| {}).await;
-        assert!(refused.is_error && refused.output.contains("append set to true"), "{}", refused.output);
+        assert!(refused.is_error && refused.output.contains("mode set to append"), "{}", refused.output);
         assert_eq!(std::fs::read_to_string(dir.join("game.js")).unwrap(), original);
         let edited: String = original.replace("value3 = 3", "value3 = 4");
         let rewrite = call("write", json!({"path": "game.js", "content": edited}));
@@ -1131,6 +1225,44 @@ mod tests {
         let second = call("write", json!({"path": "a.ts", "content": "// weapons\nfunction W() {\n  return 1;\n}\n", "append": true}));
         let out = run(&second, &dir, &shell, &limits, &cancel, |_| {}).await;
         assert!(out.output.contains("Top-level lines in the file now, without the lines inside classes and functions:\nimport x from \"y\";\nexport const PASSIVES = {\nfunction W() {"), "{}", out.output);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn write_modes_and_repeated_lines() {
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (shell, limits, cancel) = (Shell::detect(), Limits::default(), CancellationToken::new());
+        let start = "function alpha() {\n  return computeTheFirstValue();\n}\nfunction beta() {\n  return computeTheSecondValue();\n}\n";
+        assert!(!run(&call("write", json!({"path": "m.js", "mode": "create", "content": start})), &dir, &shell, &limits, &cancel, |_| {}).await.is_error);
+        let more = "function beta() {\n  return computeTheSecondValue();\n}\nfunction gamma() {\n  return 3;\n}\n";
+        let out = run(&call("write", json!({"path": "m.js", "mode": "append", "content": more})), &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(out.output.contains("first 3 lines"), "{}", out.output);
+        assert_eq!(std::fs::read_to_string(dir.join("m.js")).unwrap(), format!("{start}function gamma() {{\n  return 3;\n}}\n"));
+        let braces = "}\n}\n}\nlet z = 1;\n";
+        std::fs::write(dir.join("b.js"), "a\n}\n}\n}\n").unwrap();
+        run(&call("write", json!({"path": "b.js", "mode": "add", "content": braces})), &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert_eq!(std::fs::read_to_string(dir.join("b.js")).unwrap(), format!("a\n}}\n}}\n}}\n{braces}"), "closing braces alone are not a repeat");
+        let replace = run(&call("write", json!({"path": "b.js", "mode": "replace", "content": format!("a\n}}\n}}\n}}\n{braces}let w = 2;\n")})), &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(!replace.is_error && replace.output.starts_with("Replaced"), "{}", replace.output);
+        assert!(appends(&call("write", json!({"path": "x", "append": true, "content": "y"}))), "append from older conversations still works");
+        let old: String = (1..=30).map(|i| format!("let old{i} = {i};\n")).collect();
+        std::fs::write(dir.join("r.js"), &old).unwrap();
+        let part = |tail: &str| call("write", json!({"path": "r.js", "mode": "replace", "content": format!("// map engine\nimport a from \"a\";\nimport b from \"b\";\nconst size = 8;\nconst seed = 1;\n{tail}")}));
+        assert!(run(&part("let x = 1;\n"), &dir, &shell, &limits, &cancel, |_| {}).await.is_error);
+        let again = run(&part("let x = 2;\nlet y = 3;\n"), &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(!again.is_error, "a fresh copy of the same rewrite confirms it: {}", again.output);
+        std::fs::write(dir.join("r.js.new"), "let fresh = 1;\n").unwrap();
+        let moved = run(&call("move", json!({"from": "r.js.new", "path": "r.js"})), &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(!moved.is_error && moved.output.starts_with("Replaced"), "{}", moved.output);
+        assert_eq!(std::fs::read_to_string(dir.join("r.js")).unwrap(), "let fresh = 1;\n");
+        assert!(!dir.join("r.js.new").exists());
+        assert!(run(&call("move", json!({"from": "missing.new", "path": "r.js"})), &dir, &shell, &limits, &cancel, |_| {}).await.is_error);
+        let outside = std::env::temp_dir().join(format!("scoobert-outside-{}.txt", crate::util::random_hex(4)));
+        std::fs::write(&outside, "x\n").unwrap();
+        let pulled = run(&call("move", json!({"from": outside.to_string_lossy(), "path": "r.js"})), &dir, &shell, &limits, &cancel, |_| {}).await;
+        assert!(pulled.is_error && outside.exists(), "{}", pulled.output);
+        let _ = std::fs::remove_file(outside);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -333,7 +333,12 @@ impl Chat {
             items = items.push(row![working_dot(), text(label).size(13).style(theme::muted)].spacing(8).align_y(Alignment::Center));
         }
         for (i, q) in self.queued.iter().enumerate() {
-            let mut note = row![text(tr("Sends when the current step finishes")).size(12).style(theme::muted)].spacing(10).align_y(Alignment::Center);
+            let mut note = row![
+                text(tr("Sends when the current step finishes")).size(12).style(theme::muted),
+                button(text(tr("Delete")).size(12)).padding([3, 10]).style(theme::ghost).on_press(Message::Unqueue(i)),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center);
             // One button sends every waiting message, so it sits under the last one.
             if i + 1 == self.queued.len() {
                 note = note.push(iced::widget::tooltip(

@@ -754,6 +754,18 @@ impl Host {
         }
     }
 
+    /// Drops the held message at `index`, unless the task has read the held messages already. Returns whether it did.
+    pub fn unqueue(&self, id: &str, index: usize) -> bool {
+        let Ok(live) = self.live(id) else { return false };
+        let mut queued = live.queued.lock().unwrap();
+        if index < queued.len() {
+            queued.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Takes back the messages a task ended without reading.
     pub fn take_queued(&self, id: &str) -> Vec<(String, Vec<conversation::Image>)> {
         self.live(id).map(|l| std::mem::take(&mut *l.queued.lock().unwrap())).unwrap_or_default()
@@ -1334,49 +1346,51 @@ impl Host {
     }
 
     /// Saves the complete lines of file writes cut off partway, through the usual approval, and tells the model where
-    /// to continue. After Stop, a write that would replace an existing file saves nothing, since half of it would
-    /// lose the rest of that file. After Scoobert cut a write, the model meant the whole file, so it is saved. The
-    /// tool lists append before content, so a write cut without append replaces the file, and the wipe guard still
-    /// refuses a short part that would drop most of an existing file.
+    /// to continue. A cut rewrite of an existing file goes to its draft, which the model finishes and moves into
+    /// place. The tool lists mode before content, so a write cut without it came from a conversation that only has
+    /// append, where leaving it out replaces the file.
     async fn save_cut_writes(&self, live: &Live, id: &str, calls: Vec<ToolCall>, cut: Cut, cancel: &CancellationToken) -> anyhow::Result<()> {
         let cwd = live.conv.lock().unwrap().cwd.clone();
         let notes = cwd.join(&self.settings().notes_folder);
         for call in calls {
-            let append = call.arguments.get("append").and_then(Value::as_bool);
+            let append = tools::appends(&call);
             let exists = tools::target_path(&cwd, &call, Some(&notes)).is_some_and(|p| p.exists());
             let lines = call.arg("content").lines().count();
-            let path = call.arg("path");
-            let refused = match cut {
-                Cut::Stopped if append != Some(true) && exists => Some(format!(
-                    "The reply was stopped while writing this file, and saving part of it would have replaced the rest, so nothing was saved and {path} is unchanged."
-                )),
-                _ => None,
-            };
-            let result = match refused {
-                Some(output) => ToolResult { call_id: call.id.clone(), name: call.name.clone(), output, is_error: true, diff: None, time: now_millis(), ..Default::default() },
-                None => {
-                    let mut r = self.run_tool(live, id, &cwd, &call, cancel).await;
-                    if !r.is_error {
-                        let why = match cut {
-                            Cut::Stopped => format!("The reply was stopped while writing this file, so only the first {lines} lines of this call were saved."),
-                            Cut::Split => format!("One write holds about 200 lines, so the system stopped this one and saved the first {lines} lines of this call."),
-                            Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only the first {lines} lines of this call were saved."),
-                        };
-                        r.output = format!(
-                            "{} {why} Continue from where the file now ends with write and append set to true, and do not write the saved lines again.",
-                            r.output
-                        );
-                        // The conversation later shows this call without its text, so the end of the file is the
-                        // only record of where to continue. The outline above leaves out everything inside a class.
-                        if let Some(file) = tools::target_path(&cwd, &call, Some(&notes))
-                            && let Ok(text) = tokio::fs::read_to_string(&file).await
-                        {
-                            r.output.push_str(&file_end(&text, FILE_END_LINES));
-                        }
-                    }
-                    r
+            let path = call.arg("path").to_string();
+            // A cut rewrite of an existing file goes to a draft beside it, so the file keeps working, the wipe guard
+            // has nothing to refuse, and the lines written are kept.
+            let draft = (!append && exists).then(|| tools::draft_path(&path));
+            let mut saved = call.clone();
+            if let (Some(draft), Some(args)) = (&draft, saved.arguments.as_object_mut()) {
+                args.insert("path".into(), draft.clone().into());
+                args.insert("mode".into(), "create".into());
+                args.remove("append");
+                if let Some(old) = tools::target_path(&cwd, &saved, Some(&notes)) {
+                    let _ = tokio::fs::remove_file(old).await;
                 }
-            };
+            }
+            let mut result = self.run_tool(live, id, &cwd, &saved, cancel).await;
+            if !result.is_error {
+                let why = match cut {
+                    Cut::Stopped => format!("The reply was stopped while writing this file, so only the first {lines} lines of this call were saved."),
+                    Cut::Split => format!("One write holds about 200 lines, so the system stopped this one and saved the first {lines} lines of this call."),
+                    Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only the first {lines} lines of this call were saved."),
+                };
+                let next = match &draft {
+                    Some(draft) => format!(
+                        "{path} is unchanged, and the lines went to the draft {draft}. Add the rest of the new version to {draft} with write and mode set to append, without writing the saved lines again, then move {draft} to {path}."
+                    ),
+                    None => "Continue from where the file now ends with write and mode set to append, and do not write the saved lines again.".into(),
+                };
+                result.output = format!("{} {why} {next}", result.output);
+                // The conversation later shows this call without its text, so the end of the file is the only record
+                // of where to continue. The outline above leaves out everything inside a class.
+                if let Some(file) = tools::target_path(&cwd, &saved, Some(&notes))
+                    && let Ok(text) = tokio::fs::read_to_string(&file).await
+                {
+                    result.output.push_str(&file_end(&text, FILE_END_LINES));
+                }
+            }
             let message = Message::Tool(result);
             live.conv.lock().unwrap().push(message.clone())?;
             self.emit(Event::Message { conv: id.to_string(), message });
