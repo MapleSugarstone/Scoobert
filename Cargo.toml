@@ -1,6 +1,6 @@
 [package]
 name = "scoobert"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "Desktop coding assistant that runs local Qwen models or hosted models, with project notes"
 authors = ["Maple Sugarstone"]
@@ -33,6 +33,8 @@ rand = "0.9"
 sys-locale = "0.3"
 half = "2"
 image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
+flate2 = "1"
+crc32fast = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

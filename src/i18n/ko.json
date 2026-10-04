@@ -564,5 +564,9 @@
   "A mixture-of-experts model that uses about 3 billion of its 35 billion parameters per word, so it writes several times faster than the 27B, even on a processor, and the graphics card helps it even when it does not fit. It reads images, and it has its own prediction layers for Predict ahead. In Scoobert's coding benchmark it passed as many tasks as the 27B in a third of the time.": "단어당 350억 개 파라미터 중 약 30억 개만 사용하는 전문가 혼합(MoE) 모델이라 프로세서에서도 27B보다 몇 배 빠르게 작성하며, 그래픽 카드에 다 들어가지 않아도 카드가 도움이 됩니다. 이미지를 읽을 수 있고, “미리 예측”용으로 자체 예측 레이어도 갖추고 있습니다. Scoobert의 코딩 벤치마크에서 27B와 같은 수의 작업을 통과했으며 걸린 시간은 3분의 1이었습니다.",
   "Qwen3.6 35B-A3B, compact": "Qwen3.6 35B-A3B, 컴팩트",
   "For 16 GB of memory": "16 GB 메모리용",
-  "The 35B-A3B at 3-bit precision, for a computer with 16 GB of memory. In Scoobert's coding benchmark it passed one task fewer than the 4-bit version at the same speed, and it sometimes reasons in code comments until its reply runs out of room.": "3비트 정밀도의 35B-A3B로, 메모리가 16 GB인 컴퓨터용입니다. Scoobert의 코딩 벤치마크에서 4비트 버전보다 통과한 작업이 1개 적었고 속도는 같았습니다. 응답을 쓸 공간이 바닥날 때까지 코드 주석 안에서 추론하기도 합니다."
+  "The 35B-A3B at 3-bit precision, for a computer with 16 GB of memory. In Scoobert's coding benchmark it passed one task fewer than the 4-bit version at the same speed, and it sometimes reasons in code comments until its reply runs out of room.": "3비트 정밀도의 35B-A3B로, 메모리가 16 GB인 컴퓨터용입니다. Scoobert의 코딩 벤치마크에서 4비트 버전보다 통과한 작업이 1개 적었고 속도는 같았습니다. 응답을 쓸 공간이 바닥날 때까지 코드 주석 안에서 추론하기도 합니다.",
+  "Save a review package": "검토 패키지 저장",
+  "Save a review package: this conversation, its project, and the model logs, in one zip": "검토 패키지 저장: 이 대화, 해당 프로젝트, 모델 로그를 ZIP 파일 하나로 묶습니다",
+  "Saved a review package of {count} files, {size}.": "검토 패키지를 저장했습니다. 파일 {count}개, {size}.",
+  "The review package could not be saved: {error}": "검토 패키지를 저장할 수 없습니다: {error}"
 }

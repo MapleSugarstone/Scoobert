@@ -33,7 +33,7 @@ use crate::i18n::{tr, trf};
 use crate::llama::{ServerStatus, SharedSettings};
 use crate::store::{Approvals, PlanFirst, State, ThemeChoice, Thinking};
 use crate::update::Release;
-use crate::util::{ago, clip, short_count};
+use crate::util::{ago, clip, gb, short_count};
 use chat::Chat;
 use icons::{Icon, icon};
 
@@ -186,6 +186,9 @@ pub enum Message {
     OpenConversation(PathBuf),
     Opened(Result<Box<Snapshot>, String>),
     StartRename(PathBuf, String),
+    /// Saves a zip of the conversation with its project and the model server's logs, for someone to look over.
+    ExportConversation(PathBuf),
+    Exported(Option<Result<(PathBuf, usize, u64), String>>),
     RenameInput(String),
     CommitRename,
     AskConfirm(Confirm),
@@ -506,6 +509,27 @@ impl App {
 
     fn toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
+    }
+
+    /// What someone looking over a review package needs to know about this computer and Scoobert's setup.
+    fn review_report(&self, conv: &crate::agent::conversation::Conversation) -> String {
+        let mut r = format!("Scoobert {} on {} {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+        r.push_str(&format!("Memory: {} total, {} available\n", gb(crate::sys::total_memory()), gb(crate::sys::available_memory())));
+        let card = crate::llama::cuda::detect().map(|g| format!("{} (driver {})", g.name, g.driver)).unwrap_or_else(|| "no NVIDIA card found".into());
+        let vram = crate::sys::free_vram().map(gb).unwrap_or_else(|| "unknown".into());
+        r.push_str(&format!("Graphics card: {card}, {vram} free\n"));
+        r.push_str(&format!("Conversation: {}, model {}, thinking {:?}, {} messages\n", conv.display_title(), conv.model, conv.thinking, conv.messages.len()));
+        r.push_str(&format!("Project: {}\n", conv.cwd.display()));
+        if let Some(host) = &self.host {
+            r.push_str(&format!("Loaded model: {}\n\nModels:\n", host.llama.loaded_model().unwrap_or_else(|| "none".into())));
+            for m in host.llama.models() {
+                let (arch, mtp) = crate::llama::gguf::kind(&m.path);
+                r.push_str(&format!("  {} ({}, {arch}{}), context {}, {}\n", m.name, gb(m.size), if mtp { ", prediction layers" } else { "" }, host.llama.context_for(&m), m.path.display()));
+            }
+        }
+        r.push_str("\nSettings:\n");
+        r.push_str(&serde_json::to_string_pretty(&self.state.settings).unwrap_or_default());
+        r
     }
 
     fn refresh_models(&mut self) {
@@ -841,6 +865,36 @@ impl App {
                 self.renaming = Some((file, title));
                 return operation::focus(RENAME_ID);
             }
+            Message::ExportConversation(file) => {
+                let conv = match crate::agent::conversation::Conversation::load(&file) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.toast(trf("The review package could not be saved: {error}", &[("error", &format!("{e:#}"))]));
+                        return Task::none();
+                    }
+                };
+                let report = self.review_report(&conv);
+                let name = crate::export::file_name(&conv.display_title());
+                let project = conv.cwd.clone();
+                return Task::perform(
+                    async move {
+                        let handle = rfd::AsyncFileDialog::new().set_title(tr("Save a review package")).set_file_name(&name).add_filter("Zip", &["zip"]).save_file().await?;
+                        let out = handle.path().to_path_buf();
+                        let packed = tokio::task::spawn_blocking(move || {
+                            crate::export::review_package(&file, &project, &out, &report).map(|p| (out, p.files, p.bytes)).map_err(|e| format!("{e:#}"))
+                        })
+                        .await;
+                        Some(packed.unwrap_or_else(|e| Err(e.to_string())))
+                    },
+                    Message::Exported,
+                );
+            }
+            Message::Exported(None) => {}
+            Message::Exported(Some(Ok((path, files, bytes)))) => {
+                self.toast(trf("Saved a review package of {count} files, {size}.", &[("count", &files), ("size", &crate::util::size(bytes))]));
+                let _ = opener::reveal(path);
+            }
+            Message::Exported(Some(Err(e))) => self.toast(trf("The review package could not be saved: {error}", &[("error", &e)])),
             Message::RenameInput(value) => {
                 if let Some((_, t)) = &mut self.renaming {
                     *t = value;
@@ -1927,9 +1981,15 @@ impl App {
         let base = container(item).height(32);
         // The buttons cover the time and its fade completely, since the time's fade is in the color of a row that is
         // not hovered.
-        let solid = (time_width + 10.0 + FADE).max(46.0);
+        let solid = (time_width + 10.0 + FADE).max(68.0);
+        let export = iced::widget::tooltip(
+            button(icon(Icon::Download, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::ExportConversation(s.file.clone())),
+            container(text(tr("Save a review package: this conversation, its project, and the model logs, in one zip")).size(12).width(260)).padding([4, 8]).style(theme::tooltip),
+            iced::widget::tooltip::Position::Bottom,
+        );
         let actions = container(
             row![
+                export,
                 button(icon(Icon::Pencil, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::StartRename(s.file.clone(), s.title.clone())),
                 button(icon(Icon::Trash, 14.0)).padding([4, 3]).style(theme::ghost).on_press(Message::AskConfirm(Confirm::DeleteConversation(s.file.clone()))),
             ]
