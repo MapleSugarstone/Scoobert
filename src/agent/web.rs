@@ -251,7 +251,7 @@ fn find_chromium() -> Option<std::path::PathBuf> {
 }
 
 /// Firefox installed for the system, as a Snap, or as a Flatpak, which Linux systems such as Bazzite ship.
-fn find_firefox() -> Option<Found> {
+pub(super) fn find_firefox() -> Option<Found> {
     use std::path::PathBuf;
     let found = |program: PathBuf, sandbox: Sandbox| Found { engine: Engine::Firefox, program, sandbox };
     if cfg!(windows) {

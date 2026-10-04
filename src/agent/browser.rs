@@ -125,8 +125,16 @@ impl Browser {
     pub async fn launch(web: bool, cwd: &Path) -> anyhow::Result<Browser> {
         let found = super::web::find_browser().context("The browser tools need Firefox, Chrome, Edge, or Chromium, and none is installed.")?;
         match found.engine {
-            Engine::Chromium => Self::launch_chromium(&found.program, web).await,
             Engine::Firefox => Self::launch_firefox(&found, web, cwd).await,
+            // Edge closed as it started in every attempt of one session on Windows, while it started from another
+            // program, so a Chromium browser that will not start leaves the work to Firefox when it is installed.
+            Engine::Chromium => match Self::launch_chromium(&found.program, web).await {
+                Err(err) if err.is::<ClosedAtStart>() => match super::web::find_firefox() {
+                    Some(firefox) => Self::launch_firefox(&firefox, web, cwd).await.map_err(|other| anyhow::anyhow!("{err:#}\nFirefox did not start either: {other:#}")),
+                    None => Err(err),
+                },
+                other => other,
+            },
         }
     }
 
@@ -146,6 +154,9 @@ impl Browser {
             "--hide-scrollbars",
             // A game that draws with WebGL gets a software renderer when the browser has no graphics card to use.
             "--enable-unsafe-swiftshader",
+            // Warnings and errors go to the error output, which explains a browser that closes as it starts.
+            "--enable-logging=stderr",
+            "--log-level=1",
         ])
         .arg(format!("--window-size={WIDTH},{HEIGHT}"))
         .arg(format!("--user-data-dir={}", profile.display()));
@@ -156,13 +167,14 @@ impl Browser {
         cmd.arg("about:blank")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000);
         #[cfg(unix)]
         cmd.process_group(0);
-        let child = cmd.spawn().with_context(|| format!("Could not start {}", exe.display()))?;
+        let mut child = cmd.spawn().with_context(|| format!("Could not start {}", exe.display()))?;
+        let output = read_output(child.stderr.take());
         // A job ends the browser's helper processes with it and caps their memory.
         #[cfg(windows)]
         let job = super::sandbox::Job::new(BROWSER_MEMORY).filter(|j| child.id().is_some_and(|p| j.assign(p)));
@@ -181,7 +193,7 @@ impl Browser {
                 break port;
             }
             if let Ok(Some(status)) = process.child.try_wait() {
-                bail!("The browser closed as it started ({status}).");
+                return Err(closed(status, &output).await);
             }
             if start.elapsed() > START_TIMEOUT {
                 bail!("The browser did not start within {} seconds.", START_TIMEOUT.as_secs());
@@ -240,18 +252,7 @@ impl Browser {
         let mut child = cmd.spawn().with_context(|| format!("Could not start {}", found.program.display()))?;
         // Firefox names its port in a file in the profile, and in its error output, which a sandboxed one may only
         // have.
-        let printed: Arc<Mutex<Option<u16>>> = Arc::default();
-        if let Some(stderr) = child.stderr.take() {
-            let printed = printed.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    if let Some(port) = line.split("ws://").nth(1).and_then(|rest| rest.split([':', '/']).nth(1)).and_then(|p| p.trim().parse().ok()) {
-                        *printed.lock().unwrap() = Some(port);
-                    }
-                }
-            });
-        }
+        let output = read_output(child.stderr.take());
         #[cfg(windows)]
         let job = super::sandbox::Job::new(BROWSER_MEMORY).filter(|j| child.id().is_some_and(|p| j.assign(p)));
         let mut process = Process {
@@ -264,11 +265,11 @@ impl Browser {
         let start = Instant::now();
         let port: u16 = loop {
             let written = tokio::fs::read_to_string(&port_file).await.ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["ws_port"].as_u64());
-            if let Some(port) = written.and_then(|p| u16::try_from(p).ok()).or(*printed.lock().unwrap()) {
+            if let Some(port) = written.and_then(|p| u16::try_from(p).ok()).or(output.lock().unwrap().port) {
                 break port;
             }
             if let Ok(Some(status)) = process.child.try_wait() {
-                bail!("The browser closed as it started ({status}).");
+                return Err(closed(status, &output).await);
             }
             if start.elapsed() > START_TIMEOUT {
                 bail!("The browser did not start within {} seconds.", START_TIMEOUT.as_secs());
@@ -607,6 +608,55 @@ impl Browser {
         }
         out
     }
+}
+
+/// A browser that exited before it opened its remote protocol.
+#[derive(Debug)]
+struct ClosedAtStart(String);
+
+impl std::fmt::Display for ClosedAtStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ClosedAtStart {}
+
+/// The last lines a browser printed, which explain a start that fails, and the port of its remote protocol when it
+/// prints one.
+#[derive(Default)]
+struct Output {
+    lines: VecDeque<String>,
+    port: Option<u16>,
+}
+
+fn read_output(stderr: Option<tokio::process::ChildStderr>) -> Arc<Mutex<Output>> {
+    let output: Arc<Mutex<Output>> = Arc::default();
+    if let Some(stderr) = stderr {
+        let output = output.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut o = output.lock().unwrap();
+                if let Some(port) = line.split("ws://").nth(1).and_then(|rest| rest.split([':', '/']).nth(1)).and_then(|p| p.trim().parse().ok()) {
+                    o.port = Some(port);
+                }
+                o.lines.push_back(crate::util::clip(&line, 300));
+                if o.lines.len() > 12 {
+                    o.lines.pop_front();
+                }
+            }
+        });
+    }
+    output
+}
+
+async fn closed(status: std::process::ExitStatus, output: &Mutex<Output>) -> anyhow::Error {
+    // The last lines can arrive just after the exit.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let printed: Vec<String> = output.lock().unwrap().lines.iter().cloned().collect();
+    let tail = if printed.is_empty() { String::new() } else { format!(" Its last output:\n{}", outside(&printed.join("\n"))) };
+    ClosedAtStart(format!("The browser closed as it started ({status}).{tail}")).into()
 }
 
 /// The page's HTML after its scripts ran, for a browser that cannot print it from the command line.
