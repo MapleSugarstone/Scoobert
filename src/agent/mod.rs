@@ -1335,8 +1335,9 @@ impl Host {
 
     /// Saves the complete lines of file writes cut off partway, through the usual approval, and tells the model where
     /// to continue. After Stop, a write that would replace an existing file saves nothing, since half of it would
-    /// lose the rest of that file. After Scoobert cut a write, the model meant the whole file, so it is saved unless
-    /// the call was cut before it said whether to add to an existing file.
+    /// lose the rest of that file. After Scoobert cut a write, the model meant the whole file, so it is saved. The
+    /// tool lists append before content, so a write cut without append replaces the file, and the wipe guard still
+    /// refuses a short part that would drop most of an existing file.
     async fn save_cut_writes(&self, live: &Live, id: &str, calls: Vec<ToolCall>, cut: Cut, cancel: &CancellationToken) -> anyhow::Result<()> {
         let cwd = live.conv.lock().unwrap().cwd.clone();
         let notes = cwd.join(&self.settings().notes_folder);
@@ -1348,9 +1349,6 @@ impl Host {
             let refused = match cut {
                 Cut::Stopped if append != Some(true) && exists => Some(format!(
                     "The reply was stopped while writing this file, and saving part of it would have replaced the rest, so nothing was saved and {path} is unchanged."
-                )),
-                Cut::Split | Cut::OutOfRoom if append.is_none() && exists => Some(format!(
-                    "Nothing was saved, because the write was cut off after {lines} lines, before it said whether to replace {path} or add to it. Write it again in parts of about 150 lines, and give path and append before content."
                 )),
                 _ => None,
             };
