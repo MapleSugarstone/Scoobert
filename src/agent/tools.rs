@@ -75,7 +75,7 @@ fn find_git_bash() -> Option<PathBuf> {
 }
 
 /// Tool definitions in the OpenAI function format. A conversation without a project also gets new_project, and a
-/// computer with a Chromium-based browser gets the browser tools.
+/// computer with Firefox or a Chromium-based browser gets the browser tools.
 pub fn specs(shell: &Shell, no_project: bool, web: bool, browser: bool) -> Vec<Value> {
     let path = json!({ "type": "string", "description": "File path, relative to the project folder or absolute." });
     let tool = |name: &str, description: &str, properties: Value, required: &[&str]| {
@@ -398,7 +398,7 @@ async fn browser_tool(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Ou
         if address.is_none() {
             return Err("No page is open. Open one with browser_open first.".into());
         }
-        *guard = Some(Browser::launch(limits.web).await.map_err(|e| format!("{e:#}"))?);
+        *guard = Some(Browser::launch(limits.web, cwd).await.map_err(|e| format!("{e:#}"))?);
     }
     let Some(browser) = guard.as_mut() else { return Err("The browser did not start.".into()) };
     let element = arg_u64(call, "element").or_else(|| arg_u64(call, "ref"));

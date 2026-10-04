@@ -194,9 +194,44 @@ pub async fn fetch(address: &str) -> anyhow::Result<Page> {
     Ok(page)
 }
 
-/// A Chromium-based browser installed on this computer: Edge on Windows, Chrome or Chromium on Linux, Chrome, Edge,
-/// or Chromium on macOS.
-pub(super) fn find_browser() -> Option<std::path::PathBuf> {
+/// How Scoobert drives a browser: Chrome, Edge, and Chromium through the Chrome DevTools Protocol, and Firefox
+/// through WebDriver BiDi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Engine {
+    Chromium,
+    Firefox,
+}
+
+/// A sandbox the browser runs in, which decides where its throwaway profile can go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Sandbox {
+    None,
+    /// A Flatpak app, started with `flatpak run` and its app ID.
+    Flatpak(&'static str),
+    Snap,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct Found {
+    pub engine: Engine,
+    pub program: std::path::PathBuf,
+    pub sandbox: Sandbox,
+}
+
+/// A browser installed on this computer: a Chromium-based one when there is one, otherwise Firefox. Setting
+/// `SCOOBERT_BROWSER` to firefox or chromium picks that engine when both are installed.
+pub(super) fn find_browser() -> Option<Found> {
+    let want = std::env::var("SCOOBERT_BROWSER").unwrap_or_default().to_lowercase();
+    let chromium = || find_chromium().map(|program| Found { engine: Engine::Chromium, program, sandbox: Sandbox::None });
+    if want == "firefox" {
+        find_firefox().or_else(chromium)
+    } else {
+        chromium().or_else(find_firefox)
+    }
+}
+
+/// Edge on Windows, Chrome or Chromium on Linux, and Chrome, Edge, or Chromium on macOS.
+fn find_chromium() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     if cfg!(windows) {
         let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
@@ -210,15 +245,51 @@ pub(super) fn find_browser() -> Option<std::path::PathBuf> {
     }
     if cfg!(target_os = "macos") {
         let apps = ["Google Chrome.app/Contents/MacOS/Google Chrome", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge", "Chromium.app/Contents/MacOS/Chromium"];
-        let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications"));
-        let roots = [Some(PathBuf::from("/Applications")), home];
-        return roots.iter().flatten().flat_map(|r| apps.iter().map(move |a| r.join(a))).find(|p| p.is_file());
+        return mac_app(&apps);
     }
+    on_path(&["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"])
+}
+
+/// Firefox installed for the system, as a Snap, or as a Flatpak, which Linux systems such as Bazzite ship.
+fn find_firefox() -> Option<Found> {
+    use std::path::PathBuf;
+    let found = |program: PathBuf, sandbox: Sandbox| Found { engine: Engine::Firefox, program, sandbox };
+    if cfg!(windows) {
+        let env = |k: &str| std::env::var_os(k).map(PathBuf::from);
+        let candidates = [
+            env("ProgramFiles").map(|p| p.join("Mozilla Firefox/firefox.exe")),
+            env("ProgramFiles(x86)").map(|p| p.join("Mozilla Firefox/firefox.exe")),
+            env("LOCALAPPDATA").map(|p| p.join("Mozilla Firefox/firefox.exe")),
+        ];
+        return candidates.into_iter().flatten().find(|p| p.is_file()).map(|p| found(p, Sandbox::None));
+    }
+    if cfg!(target_os = "macos") {
+        return mac_app(&["Firefox.app/Contents/MacOS/firefox"]).map(|p| found(p, Sandbox::None));
+    }
+    // Ubuntu's /usr/bin/firefox only starts the Snap, which cannot read a profile in the system's temporary folder.
+    let snap = PathBuf::from("/snap/bin/firefox");
+    if snap.exists() {
+        return Some(found(snap, Sandbox::Snap));
+    }
+    if let Some(program) = on_path(&["firefox", "firefox-esr"]) {
+        return Some(found(program, Sandbox::None));
+    }
+    const APP: &str = "org.mozilla.firefox";
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let installed = [Some(PathBuf::from("/var/lib/flatpak/app")), home.map(|h| h.join(".local/share/flatpak/app"))].into_iter().flatten().any(|d| d.join(APP).is_dir());
+    on_path(&["flatpak"]).filter(|_| installed).map(|p| found(p, Sandbox::Flatpak(APP)))
+}
+
+fn mac_app(apps: &[&str]) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let home = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Applications"));
+    let roots = [Some(PathBuf::from("/Applications")), home];
+    roots.iter().flatten().flat_map(|r| apps.iter().map(move |a| r.join(a))).find(|p| p.is_file())
+}
+
+fn on_path(names: &[&str]) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
-    ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge"]
-        .iter()
-        .flat_map(|name| std::env::split_paths(&path).map(move |d| d.join(name)))
-        .find(|p| p.is_file())
+    names.iter().flat_map(|name| std::env::split_paths(&path).map(move |d| d.join(name))).find(|p| p.is_file())
 }
 
 /// Whether the browser tools can run, checked once, so every request in a session offers the same tools.
@@ -230,8 +301,12 @@ pub fn has_browser() -> bool {
 /// The page's HTML after its scripts ran, from a headless browser with a throwaway profile.
 async fn render(url: &str) -> Option<String> {
     let browser = find_browser()?;
+    // Firefox has no switch that prints the page, so Scoobert drives it as it does for the browser tools.
+    if browser.engine == Engine::Firefox {
+        return tokio::time::timeout(RENDER_TIMEOUT, super::browser::page_html(url)).await.ok().flatten();
+    }
     let profile = std::env::temp_dir().join(format!("scoobert-browser-{}", crate::util::random_hex(6)));
-    let mut cmd = tokio::process::Command::new(browser);
+    let mut cmd = tokio::process::Command::new(browser.program);
     cmd.args(["--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions", "--mute-audio"])
         .arg(format!("--user-data-dir={}", profile.display()))
         .args(["--virtual-time-budget=8000", "--dump-dom", url])

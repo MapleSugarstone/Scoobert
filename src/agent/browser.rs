@@ -1,5 +1,6 @@
-//! A browser the model drives through the Chrome DevTools Protocol, to test the pages and games it builds: it opens a
-//! page, reads its text and controls, clicks, types, presses keys, runs scripts, and takes screenshots.
+//! A browser the model drives to test the pages and games it builds: it opens a page, reads its text and controls,
+//! clicks, types, presses keys, runs scripts, and takes screenshots. Chrome, Edge, and Chromium speak the Chrome
+//! DevTools Protocol, and Firefox speaks WebDriver BiDi, over the same kind of WebSocket.
 
 use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
@@ -18,6 +19,7 @@ use tokio::sync::oneshot;
 
 use super::conversation::Image;
 use super::prompt::{outside, system_note};
+use super::web::{Engine, Found, Sandbox};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const START_TIMEOUT: Duration = Duration::from_secs(30);
@@ -93,21 +95,45 @@ impl Drop for Process {
 }
 
 pub struct Browser {
-    cdp: Cdp,
+    page: Page,
     /// How many console lines the model has seen.
     seen: usize,
     _process: Process,
 }
 
+/// The connection to the page the model drives.
+enum Page {
+    /// Chrome, Edge, or Chromium, through the Chrome DevTools Protocol.
+    Cdp(Socket),
+    /// Firefox, through WebDriver BiDi, with the browsing context of its one tab.
+    Bidi(Socket, String),
+}
+
+impl Page {
+    fn socket(&self) -> &Socket {
+        match self {
+            Page::Cdp(socket) | Page::Bidi(socket, _) => socket,
+        }
+    }
+}
+
 impl Browser {
     /// Starts a headless browser with a throwaway profile, so it has no sign-ins, history, or extensions. Without
     /// `web` it sends every request through a proxy that does not exist, so only pages on this computer and files
-    /// load. That covers what a page fetches and what a script sends, not only the address the model opens.
-    pub async fn launch(web: bool) -> anyhow::Result<Browser> {
-        let exe = super::web::find_browser().context("The browser tools need Chrome, Edge, or Chromium, and none is installed.")?;
+    /// load. That covers what a page fetches and what a script sends, not only the address the model opens. `cwd`
+    /// is the project, which a browser in a Flatpak sandbox is given to read so it can open the project's files.
+    pub async fn launch(web: bool, cwd: &Path) -> anyhow::Result<Browser> {
+        let found = super::web::find_browser().context("The browser tools need Firefox, Chrome, Edge, or Chromium, and none is installed.")?;
+        match found.engine {
+            Engine::Chromium => Self::launch_chromium(&found.program, web).await,
+            Engine::Firefox => Self::launch_firefox(&found, web, cwd).await,
+        }
+    }
+
+    async fn launch_chromium(exe: &Path, web: bool) -> anyhow::Result<Browser> {
         let profile = std::env::temp_dir().join(format!("scoobert-browser-{}", crate::util::random_hex(6)));
         std::fs::create_dir_all(&profile).with_context(|| format!("Could not create {}", profile.display()))?;
-        let mut cmd = tokio::process::Command::new(&exe);
+        let mut cmd = tokio::process::Command::new(exe);
         cmd.args([
             "--headless=new",
             "--remote-debugging-port=0",
@@ -172,7 +198,7 @@ impl Browser {
             .and_then(|t| t["webSocketDebuggerUrl"].as_str())
             .context("The browser opened no page.")?
             .to_string();
-        let cdp = Cdp::connect(&socket).await?;
+        let cdp = Socket::connect(&socket, false).await?;
         // A page that is not focused pauses some games and ignores keys.
         for (method, params) in [
             ("Page.enable", json!({})),
@@ -185,18 +211,96 @@ impl Browser {
         // A page cannot save files to the computer. Older browsers lack the command, and they deny downloads in
         // headless mode anyway.
         let _ = cdp.call("Page.setDownloadBehavior", json!({ "behavior": "deny" })).await;
-        Ok(Browser { cdp, seen: 0, _process: process })
+        Ok(Browser { page: Page::Cdp(cdp), seen: 0, _process: process })
+    }
+
+    async fn launch_firefox(found: &Found, web: bool, cwd: &Path) -> anyhow::Result<Browser> {
+        let profile = firefox_profile(found);
+        std::fs::create_dir_all(profile.join("downloads")).with_context(|| format!("Could not create {}", profile.display()))?;
+        std::fs::write(profile.join("user.js"), firefox_prefs(&profile, web)).with_context(|| format!("Could not write the browser's settings in {}", profile.display()))?;
+        let mut cmd = tokio::process::Command::new(&found.program);
+        // Headless Firefox takes its screen size from these rather than from --window-size.
+        let size = [("MOZ_HEADLESS_WIDTH", WIDTH), ("MOZ_HEADLESS_HEIGHT", HEIGHT)];
+        if let Sandbox::Flatpak(app) = found.sandbox {
+            cmd.arg("run").arg(format!("--filesystem={}:ro", cwd.display()));
+            cmd.args(size.map(|(name, value)| format!("--env={name}={value}")));
+            cmd.arg(app);
+        }
+        cmd.envs(size.map(|(name, value)| (name, value.to_string())));
+        cmd.args(["--headless", "--no-remote", "--remote-debugging-port", "0", "-profile"])
+            .arg(&profile)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = cmd.spawn().with_context(|| format!("Could not start {}", found.program.display()))?;
+        // Firefox names its port in a file in the profile, and in its error output, which a sandboxed one may only
+        // have.
+        let printed: Arc<Mutex<Option<u16>>> = Arc::default();
+        if let Some(stderr) = child.stderr.take() {
+            let printed = printed.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Some(port) = line.split("ws://").nth(1).and_then(|rest| rest.split([':', '/']).nth(1)).and_then(|p| p.trim().parse().ok()) {
+                        *printed.lock().unwrap() = Some(port);
+                    }
+                }
+            });
+        }
+        #[cfg(windows)]
+        let job = super::sandbox::Job::new(BROWSER_MEMORY).filter(|j| child.id().is_some_and(|p| j.assign(p)));
+        let mut process = Process {
+            child,
+            #[cfg(windows)]
+            _job: job,
+            profile,
+        };
+        let port_file = process.profile.join("WebDriverBiDiServer.json");
+        let start = Instant::now();
+        let port: u16 = loop {
+            let written = tokio::fs::read_to_string(&port_file).await.ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v["ws_port"].as_u64());
+            if let Some(port) = written.and_then(|p| u16::try_from(p).ok()).or(*printed.lock().unwrap()) {
+                break port;
+            }
+            if let Ok(Some(status)) = process.child.try_wait() {
+                bail!("The browser closed as it started ({status}).");
+            }
+            if start.elapsed() > START_TIMEOUT {
+                bail!("The browser did not start within {} seconds.", START_TIMEOUT.as_secs());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        let bidi = Socket::connect(&format!("ws://127.0.0.1:{port}/session"), true).await?;
+        bidi.call("session.new", json!({ "capabilities": {} })).await?;
+        let tree = bidi.call("browsingContext.getTree", json!({ "maxDepth": 0 })).await?;
+        let context = match tree["contexts"][0]["context"].as_str() {
+            Some(c) => c.to_string(),
+            None => bidi.call("browsingContext.create", json!({ "type": "tab" })).await?["context"].as_str().context("The browser opened no page.")?.to_string(),
+        };
+        bidi.call("session.subscribe", json!({ "events": ["log.entryAdded", "browsingContext.userPromptOpened"] })).await?;
+        // Firefox 157 allows this only with access to its own internals, which a test page does not need, so the
+        // window size from the command line stands when it refuses.
+        let _ = bidi.call("browsingContext.setViewport", json!({ "context": context, "viewport": { "width": WIDTH, "height": HEIGHT } })).await;
+        Ok(Browser { page: Page::Bidi(bidi, context), seen: 0, _process: process })
     }
 
     pub async fn open(&mut self, url: &str) -> anyhow::Result<String> {
-        let r = self.cdp.call("Page.navigate", json!({ "url": url })).await?;
-        if let Some(err) = r["errorText"].as_str() {
+        let failed = match &self.page {
+            Page::Cdp(cdp) => cdp.call("Page.navigate", json!({ "url": url })).await?["errorText"].as_str().map(str::to_string),
+            Page::Bidi(bidi, context) => bidi.call("browsingContext.navigate", json!({ "context": context, "url": url, "wait": "interactive" })).await.err().map(|e| format!("{e:#}")),
+        };
+        if let Some(err) = failed {
             let hint = if err.contains("CONNECTION_REFUSED") {
                 " Nothing answers at that address. Start the server with the shell tool and background set to true, then check its output with job_output."
             } else {
                 ""
             };
-            bail!("Could not open {url}: {err}.{hint}");
+            bail!("Could not open {url}: {}.{hint}", err.trim_end_matches('.'));
         }
         self.settle().await;
         self.read(0).await
@@ -204,7 +308,7 @@ impl Browser {
 
     /// The page's text from `offset`, its numbered controls, and console messages the model has not seen.
     pub async fn read(&mut self, offset: usize) -> anyhow::Result<String> {
-        let page = self.eval(SNAPSHOT).await?["value"].clone();
+        let page = self.eval(SNAPSHOT).await?;
         let url = &outside(page["url"].as_str().unwrap_or_default());
         let title = &outside(page["title"].as_str().unwrap_or_default());
         let text = &outside(page["text"].as_str().unwrap_or_default());
@@ -250,15 +354,25 @@ impl Browser {
                     r#"(() => {{ const e = document.querySelector('[data-scoobert-ref="{n}"]'); if (!e) return null; e.scrollIntoView({{ block: 'center', inline: 'center' }}); const r = e.getBoundingClientRect(); return [r.x + r.width / 2, r.y + r.height / 2]; }})()"#
                 );
                 let found = self.eval(&script).await?;
-                let Some(pos) = found["value"].as_array() else { bail!("There is no control [{n}] on the page now. Call browser_read to number the controls again.") };
+                let Some(pos) = found.as_array() else { bail!("There is no control [{n}] on the page now. Call browser_read to number the controls again.") };
                 (pos[0].as_f64().unwrap_or(0.0), pos[1].as_f64().unwrap_or(0.0), format!("[{n}]"))
             }
             (None, Some((x, y))) => (x, y, format!("the point x={x}, y={y}")),
             _ => bail!("browser_click needs element, the number of a control from browser_read, or x and y."),
         };
-        self.cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y })).await?;
-        for (kind, buttons) in [("mousePressed", 1), ("mouseReleased", 0)] {
-            self.cdp.call("Input.dispatchMouseEvent", json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 })).await?;
+        match &self.page {
+            Page::Cdp(cdp) => {
+                cdp.call("Input.dispatchMouseEvent", json!({ "type": "mouseMoved", "x": x, "y": y })).await?;
+                for (kind, buttons) in [("mousePressed", 1), ("mouseReleased", 0)] {
+                    cdp.call("Input.dispatchMouseEvent", json!({ "type": kind, "x": x, "y": y, "button": "left", "buttons": buttons, "clickCount": 1 })).await?;
+                }
+            }
+            Page::Bidi(bidi, context) => {
+                let (x, y) = (x.round() as i64, y.round() as i64);
+                let steps = json!([{ "type": "pointerMove", "x": x, "y": y }, { "type": "pointerDown", "button": 0 }, { "type": "pointerUp", "button": 0 }]);
+                let mouse = json!({ "type": "pointer", "id": "mouse", "parameters": { "pointerType": "mouse" }, "actions": steps });
+                bidi.call("input.performActions", json!({ "context": context, "actions": [mouse] })).await?;
+            }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         Ok(self.after(format!("Clicked {what}."), &before).await)
@@ -270,11 +384,31 @@ impl Browser {
             let script = format!(
                 r#"(() => {{ const e = document.querySelector('[data-scoobert-ref="{n}"]'); if (!e) return false; e.scrollIntoView({{ block: 'center' }}); e.focus(); if (typeof e.select === 'function') e.select(); return true; }})()"#
             );
-            if self.eval(&script).await?["value"] != true {
+            if self.eval(&script).await? != true {
                 bail!("There is no control [{n}] on the page now. Call browser_read to number the controls again.");
             }
         }
-        self.cdp.call("Input.insertText", json!({ "text": text })).await?;
+        match &self.page {
+            Page::Cdp(cdp) => {
+                cdp.call("Input.insertText", json!({ "text": text })).await?;
+            }
+            Page::Bidi(bidi, context) => {
+                let presses: Vec<Value> = text
+                    .chars()
+                    .filter(|&c| c != '\r')
+                    .flat_map(|c| {
+                        let value = match c {
+                            '\n' => "\u{E007}".to_string(),
+                            '\t' => "\u{E004}".to_string(),
+                            c => c.to_string(),
+                        };
+                        [json!({ "type": "keyDown", "value": value }), json!({ "type": "keyUp", "value": value })]
+                    })
+                    .collect();
+                let keyboard = json!({ "type": "key", "id": "keyboard", "actions": presses });
+                bidi.call("input.performActions", json!({ "context": context, "actions": [keyboard] })).await?;
+            }
+        }
         if submit {
             self.press(&parse_key("Enter")?, Duration::ZERO).await?;
         }
@@ -308,51 +442,96 @@ impl Browser {
 
     /// Runs JavaScript in the page and returns its value. The code can use await.
     pub async fn script(&mut self, code: &str) -> anyhow::Result<String> {
-        let params = json!({ "expression": code, "returnByValue": true, "awaitPromise": true, "userGesture": true, "replMode": true, "timeout": 20000 });
-        let r = self.cdp.call("Runtime.evaluate", params).await?;
-        if let Some(details) = r.get("exceptionDetails") {
-            bail!("The script threw an error: {}{}", outside(&exception_text(details)), self.console_news());
-        }
-        let result = &r["result"];
-        let value = match result.get("value") {
-            Some(Value::String(s)) => s.clone(),
-            Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
-            None => result["unserializableValue"].as_str().or(result["description"].as_str()).unwrap_or("undefined").to_string(),
+        let result = match &self.page {
+            Page::Cdp(cdp) => {
+                let params = json!({ "expression": code, "returnByValue": true, "awaitPromise": true, "userGesture": true, "replMode": true, "timeout": 20000 });
+                let r = cdp.call("Runtime.evaluate", params).await?;
+                match r.get("exceptionDetails") {
+                    Some(details) => Err(exception_text(details)),
+                    None => {
+                        let result = &r["result"];
+                        Ok(match result.get("value") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
+                            None => result["unserializableValue"].as_str().or(result["description"].as_str()).unwrap_or("undefined").to_string(),
+                        })
+                    }
+                }
+            }
+            Page::Bidi(bidi, context) => {
+                // A script runs as one, where await outside a function is a syntax error or a plain name. Code that
+                // awaits runs as an async function instead: as the expression it returns, or failing that as its body.
+                let r = if code.contains("await") {
+                    let r = evaluate(bidi, context, &format!("(async () => ({code}\n))()")).await?;
+                    if r.as_ref().is_err_and(|e| e.contains("SyntaxError")) { evaluate(bidi, context, &async_body(code)).await? } else { r }
+                } else {
+                    evaluate(bidi, context, code).await?
+                };
+                r.map(|v| match (v["type"].as_str(), plain(&v)) {
+                    (Some("undefined"), _) => "undefined".to_string(),
+                    (_, Value::String(s)) => s,
+                    (_, other) => serde_json::to_string_pretty(&other).unwrap_or_default(),
+                })
+            }
         };
-        let mut out = crate::util::clip(&outside(&value), SCRIPT_CHARS);
-        out.push_str(&self.console_news());
-        Ok(out)
+        match result {
+            Ok(value) => {
+                let mut out = crate::util::clip(&outside(&value), SCRIPT_CHARS);
+                out.push_str(&self.console_news());
+                Ok(out)
+            }
+            Err(error) => bail!("The script threw an error: {}{}", outside(&error), self.console_news()),
+        }
     }
 
-    /// A JPEG of what the page shows, and a line saying what it is.
+    /// An image of what the page shows, and a line saying what it is.
     pub async fn screenshot(&mut self) -> anyhow::Result<(Image, String)> {
-        let r = self.cdp.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 })).await?;
+        let (mime, r) = match &self.page {
+            Page::Cdp(cdp) => ("image/jpeg", cdp.call("Page.captureScreenshot", json!({ "format": "jpeg", "quality": 80 })).await?),
+            Page::Bidi(bidi, context) => {
+                let jpeg = json!({ "context": context, "format": { "type": "image/jpeg", "quality": 0.8 } });
+                match bidi.call("browsingContext.captureScreenshot", jpeg).await {
+                    Ok(r) => ("image/jpeg", r),
+                    // A browser that cannot write JPEG gives its default, PNG.
+                    Err(_) => ("image/png", bidi.call("browsingContext.captureScreenshot", json!({ "context": context })).await?),
+                }
+            }
+        };
         let data = r["data"].as_str().context("The browser returned no screenshot.")?.to_string();
         let url = outside(&self.location().await);
-        let title = outside(&self.eval("document.title").await.ok().and_then(|v| v["value"].as_str().map(str::to_string)).unwrap_or_default());
+        let title = outside(&self.eval("document.title").await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default());
         let what = if title.is_empty() { url.clone() } else { format!("{title} ({url})") };
         let mut line = format!("Took a screenshot of {what}.");
         line.push_str(&self.console_news());
-        Ok((Image { mime: "image/jpeg".into(), data }, line))
+        Ok((Image { mime: mime.into(), data }, line))
     }
 
     pub async fn location(&self) -> String {
-        self.eval("location.href").await.ok().and_then(|v| v["value"].as_str().map(str::to_string)).unwrap_or_default()
+        self.eval("location.href").await.ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
     }
 
+    /// The value of a JavaScript expression, as JSON.
     async fn eval(&self, expression: &str) -> anyhow::Result<Value> {
-        let r = self.cdp.call("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true, "awaitPromise": true })).await?;
-        if let Some(details) = r.get("exceptionDetails") {
-            bail!("{}", exception_text(details));
+        match &self.page {
+            Page::Cdp(cdp) => {
+                let r = cdp.call("Runtime.evaluate", json!({ "expression": expression, "returnByValue": true, "awaitPromise": true })).await?;
+                if let Some(details) = r.get("exceptionDetails") {
+                    bail!("{}", exception_text(details));
+                }
+                Ok(r["result"]["value"].clone())
+            }
+            Page::Bidi(bidi, context) => match evaluate(bidi, context, expression).await? {
+                Ok(v) => Ok(plain(&v)),
+                Err(e) => bail!("{e}"),
+            },
         }
-        Ok(r["result"].clone())
     }
 
     /// Waits for the page to finish loading, and a moment more for the scripts that run after it.
     async fn settle(&self) {
         let start = Instant::now();
         while start.elapsed() < LOAD_TIMEOUT {
-            if self.eval("document.readyState").await.is_ok_and(|v| v["value"] == "complete") {
+            if self.eval("document.readyState").await.is_ok_and(|v| v == "complete") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -373,6 +552,24 @@ impl Browser {
     }
 
     async fn press(&self, key: &Key, hold: Duration) -> anyhow::Result<()> {
+        let cdp = match &self.page {
+            Page::Cdp(cdp) => cdp,
+            Page::Bidi(bidi, context) => {
+                // WebDriver names the modifiers and special keys by code points from U+E000.
+                let mods: Vec<&str> = [(8, "\u{E008}"), (2, "\u{E009}"), (1, "\u{E00A}"), (4, "\u{E03D}")].into_iter().filter(|(bit, _)| key.modifiers & bit != 0).map(|(_, v)| v).collect();
+                let value = webdriver_key(key);
+                let mut steps: Vec<Value> = mods.iter().map(|m| json!({ "type": "keyDown", "value": m })).collect();
+                steps.push(json!({ "type": "keyDown", "value": value }));
+                if !hold.is_zero() {
+                    steps.push(json!({ "type": "pause", "duration": hold.as_millis() as u64 }));
+                }
+                steps.push(json!({ "type": "keyUp", "value": value }));
+                steps.extend(mods.iter().rev().map(|m| json!({ "type": "keyUp", "value": m })));
+                let keyboard = json!({ "type": "key", "id": "keyboard", "actions": steps });
+                bidi.call("input.performActions", json!({ "context": context, "actions": [keyboard] })).await?;
+                return Ok(());
+            }
+        };
         let mut down = json!({
             "type": if key.text.is_some() { "keyDown" } else { "rawKeyDown" },
             "key": key.key, "code": key.code, "windowsVirtualKeyCode": key.key_code, "nativeVirtualKeyCode": key.key_code, "modifiers": key.modifiers,
@@ -381,18 +578,18 @@ impl Browser {
             down["text"] = text.clone().into();
             down["unmodifiedText"] = text.clone().into();
         }
-        self.cdp.call("Input.dispatchKeyEvent", down).await?;
+        cdp.call("Input.dispatchKeyEvent", down).await?;
         if !hold.is_zero() {
             tokio::time::sleep(hold).await;
         }
         let up = json!({ "type": "keyUp", "key": key.key, "code": key.code, "windowsVirtualKeyCode": key.key_code, "nativeVirtualKeyCode": key.key_code, "modifiers": key.modifiers });
-        self.cdp.call("Input.dispatchKeyEvent", up).await?;
+        cdp.call("Input.dispatchKeyEvent", up).await?;
         Ok(())
     }
 
     /// Console messages and errors since the model last saw them.
     fn console_news(&mut self) -> String {
-        let console = self.cdp.console.lock().unwrap();
+        let console = self.page.socket().console.lock().unwrap();
         let first = console.total - console.lines.len();
         let new: Vec<&String> = console.lines.iter().skip(self.seen.saturating_sub(first)).collect();
         let skipped = first.saturating_sub(self.seen);
@@ -410,6 +607,172 @@ impl Browser {
         }
         out
     }
+}
+
+/// The page's HTML after its scripts ran, for a browser that cannot print it from the command line.
+pub async fn page_html(url: &str) -> Option<String> {
+    let browser = Browser::launch(true, &std::env::temp_dir()).await.ok()?;
+    if let Page::Bidi(bidi, context) = &browser.page {
+        bidi.call("browsingContext.navigate", json!({ "context": context, "url": url, "wait": "interactive" })).await.ok()?;
+    }
+    browser.settle().await;
+    // Pages that build themselves from data they fetch after loading get a little longer.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    browser.eval("document.documentElement.outerHTML").await.ok()?.as_str().map(str::to_string)
+}
+
+/// Runs `expression` in the page through WebDriver BiDi. The outer error is the connection's, and the inner one is the
+/// script's own, as text.
+async fn evaluate(bidi: &Socket, context: &str, expression: &str) -> anyhow::Result<Result<Value, String>> {
+    let params = json!({ "expression": expression, "target": { "context": context }, "awaitPromise": true, "resultOwnership": "none", "userActivation": true });
+    let r = bidi.call("script.evaluate", params).await?;
+    if r["type"] == "exception" {
+        let details = &r["exceptionDetails"];
+        let text = details["text"].as_str().unwrap_or("The script threw an error.");
+        return Ok(Err(text.lines().take(6).collect::<Vec<_>>().join("\n")));
+    }
+    Ok(Ok(r["result"].clone()))
+}
+
+/// `code` as an async function that returns its last statement's value when that statement is an expression, as a
+/// browser console shows it.
+fn async_body(code: &str) -> String {
+    let code = code.trim().trim_end_matches(';');
+    let chars: Vec<(usize, char)> = code.char_indices().collect();
+    let (mut depth, mut quote, mut split, mut i) = (0i32, None, 0, 0);
+    while i < chars.len() {
+        let (at, c) = chars[i];
+        let next = chars.get(i + 1).map(|&(_, n)| n);
+        match quote {
+            Some(_) if c == '\\' => i += 1,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                '"' | '\'' | '`' => quote = Some(c),
+                '/' if next == Some('/') => {
+                    while i < chars.len() && chars[i].1 != '\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                '/' if next == Some('*') => {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i].1 == '*' && chars[i + 1].1 == '/') {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ';' | '\n' if depth == 0 => split = at + c.len_utf8(),
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    let (head, last) = code.split_at(split);
+    let last = last.trim();
+    let statements = ["const ", "let ", "var ", "if", "for", "while", "do ", "function", "class ", "return", "try", "switch", "throw", "}", "//", "/*"];
+    if last.is_empty() || statements.iter().any(|s| last.starts_with(s)) {
+        format!("(async () => {{\n{code}\n}})()")
+    } else {
+        format!("(async () => {{\n{head}\nreturn ({last}\n);\n}})()")
+    }
+}
+
+/// A WebDriver BiDi value as plain JSON. Values JSON cannot hold, such as functions and elements, become their type.
+fn plain(v: &Value) -> Value {
+    let items = || v["value"].as_array().cloned().unwrap_or_default();
+    match v["type"].as_str().unwrap_or_default() {
+        "undefined" | "null" => Value::Null,
+        "string" | "boolean" | "number" | "bigint" | "date" => v["value"].clone(),
+        "array" | "set" => Value::Array(items().iter().map(plain).collect()),
+        "object" | "map" => Value::Object(
+            items()
+                .iter()
+                .map(|pair| {
+                    let key = match &pair[0] {
+                        Value::String(s) => s.clone(),
+                        other => plain(other).as_str().map(str::to_string).unwrap_or_else(|| other.to_string()),
+                    };
+                    (key, plain(&pair[1]))
+                })
+                .collect(),
+        ),
+        "regexp" => format!("/{}/{}", v["value"]["pattern"].as_str().unwrap_or_default(), v["value"]["flags"].as_str().unwrap_or_default()).into(),
+        other => format!("[{other}]").into(),
+    }
+}
+
+/// A key as WebDriver names it: the character it types, or a code point from U+E000 for a special key.
+fn webdriver_key(key: &Key) -> String {
+    let special = match key.key.as_str() {
+        "Enter" => 0xE007,
+        "Tab" => 0xE004,
+        "Escape" => 0xE00C,
+        "Backspace" => 0xE003,
+        "Delete" => 0xE017,
+        "ArrowLeft" => 0xE012,
+        "ArrowUp" => 0xE013,
+        "ArrowRight" => 0xE014,
+        "ArrowDown" => 0xE015,
+        "Home" => 0xE011,
+        "End" => 0xE010,
+        "PageUp" => 0xE00E,
+        "PageDown" => 0xE00F,
+        "Shift" => 0xE008,
+        "Control" => 0xE009,
+        "Alt" => 0xE00A,
+        f if f.len() > 1 && f.starts_with('F') => f[1..].parse::<u32>().ok().filter(|n| (1..=12).contains(n)).map_or(0, |n| 0xE031 + n - 1),
+        _ => 0,
+    };
+    char::from_u32(special).filter(|_| special != 0).map_or_else(|| key.key.clone(), String::from)
+}
+
+/// Where a throwaway Firefox profile goes. A Flatpak or a Snap can only read its own folders, which the host sees at
+/// the same path, and the system's temporary folder serves every other Firefox.
+fn firefox_profile(found: &Found) -> PathBuf {
+    let name = format!("scoobert-browser-{}", crate::util::random_hex(6));
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match (&found.sandbox, home) {
+        (Sandbox::Flatpak(app), Some(home)) => home.join(".var/app").join(app).join("cache").join(name),
+        (Sandbox::Snap, Some(home)) => home.join("snap/firefox/common").join(name),
+        _ => std::env::temp_dir().join(name),
+    }
+}
+
+/// Settings for the throwaway profile. Downloads stay in the profile, which is deleted with it, and without `web`
+/// every request goes through a proxy that does not exist. Firefox never sends requests to this computer through a
+/// proxy, so pages on it still load.
+fn firefox_prefs(profile: &Path, web: bool) -> String {
+    let text = |s: &str| serde_json::to_string(s).unwrap_or_default();
+    let downloads = text(&profile.join("downloads").to_string_lossy());
+    let mut prefs = vec![
+        ("browser.shell.checkDefaultBrowser", "false".to_string()),
+        ("browser.download.folderList", "2".into()),
+        ("browser.download.dir", downloads),
+        ("browser.download.useDownloadDir", "true".into()),
+        ("browser.download.always_ask_before_handling_new_types", "false".into()),
+        ("media.volume_scale", text("0.0")),
+    ];
+    if !web {
+        for (name, value) in [
+            ("network.proxy.type", "1".to_string()),
+            ("network.proxy.http", text("127.0.0.1")),
+            ("network.proxy.http_port", "9".into()),
+            ("network.proxy.ssl", text("127.0.0.1")),
+            ("network.proxy.ssl_port", "9".into()),
+            ("network.proxy.share_proxy_settings", "true".into()),
+            ("network.proxy.no_proxies_on", text("")),
+            ("network.proxy.allow_hijacking_localhost", "false".into()),
+            ("network.dns.disablePrefetch", "true".into()),
+            ("network.prefetch-next", "false".into()),
+            ("media.peerconnection.enabled", "false".into()),
+        ] {
+            prefs.push((name, value));
+        }
+    }
+    prefs.iter().map(|(name, value)| format!("user_pref(\"{name}\", {value});\n")).collect()
 }
 
 /// The address browser_open loads: a full address, an address on this computer without its http://, or the path of
@@ -554,23 +917,34 @@ struct Console {
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 type Writer = Arc<tokio::sync::Mutex<OwnedWriteHalf>>;
 
-/// A DevTools Protocol connection to one page, over a WebSocket.
-struct Cdp {
+/// A WebSocket connection to the browser, speaking the DevTools Protocol to one page, or WebDriver BiDi when `bidi`.
+struct Socket {
     writer: Writer,
     next: AtomicU64,
     pending: Pending,
     console: Arc<Mutex<Console>>,
     reader: tokio::task::JoinHandle<()>,
+    bidi: bool,
 }
 
-impl Drop for Cdp {
+impl Drop for Socket {
     fn drop(&mut self) {
         self.reader.abort();
+        // Firefox in a Flatpak runs outside the process group that is killed, so it is asked to close as well.
+        if self.bidi
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            let writer = self.writer.clone();
+            runtime.spawn(async move {
+                let close = json!({ "id": 0, "method": "browser.close", "params": {} }).to_string();
+                let _ = send(&writer, 0x1, close.as_bytes()).await;
+            });
+        }
     }
 }
 
-impl Cdp {
-    async fn connect(address: &str) -> anyhow::Result<Cdp> {
+impl Socket {
+    async fn connect(address: &str, bidi: bool) -> anyhow::Result<Socket> {
         let url = reqwest::Url::parse(address)?;
         let host = url.host_str().context("The browser gave an address without a host.")?.to_string();
         let port = url.port().context("The browser gave an address without a port.")?;
@@ -603,7 +977,7 @@ impl Cdp {
         let pending: Pending = Arc::default();
         let console: Arc<Mutex<Console>> = Arc::default();
         let reader = tokio::spawn(read_loop(read, writer.clone(), pending.clone(), console.clone()));
-        Ok(Cdp { writer, next: AtomicU64::new(1), pending, console, reader })
+        Ok(Socket { writer, next: AtomicU64::new(1), pending, console, reader, bidi })
     }
 
     async fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
@@ -620,6 +994,11 @@ impl Cdp {
                 bail!("The browser did not finish {method} within {} seconds.", CALL_TIMEOUT.as_secs());
             }
         };
+        // WebDriver BiDi names the error and explains it in message, and the DevTools Protocol nests both in error.
+        if reply["type"] == "error" {
+            let why = reply["message"].as_str().filter(|m| !m.is_empty()).or(reply["error"].as_str()).unwrap_or("The browser refused the command.");
+            bail!("{why} ({method})");
+        }
         if let Some(err) = reply.get("error") {
             bail!("{}", err["message"].as_str().unwrap_or("The browser refused the command."));
         }
@@ -731,6 +1110,26 @@ async fn read_loop(mut read: BufReader<OwnedReadHalf>, writer: Writer, pending: 
                 let _ = send(&writer, 0x1, answer.as_bytes()).await;
                 Some(format!("The page showed a {} box, which the system accepted: {}", params["type"].as_str().unwrap_or("dialog"), params["message"].as_str().unwrap_or_default()))
             }
+            "browsingContext.userPromptOpened" => {
+                let answer = json!({ "id": 0, "method": "browsingContext.handleUserPrompt", "params": { "context": params["context"], "accept": true } }).to_string();
+                let _ = send(&writer, 0x1, answer.as_bytes()).await;
+                Some(format!("The page showed a {} box, which the system accepted: {}", params["type"].as_str().unwrap_or("dialog"), params["message"].as_str().unwrap_or_default()))
+            }
+            // WebDriver BiDi reports console calls and uncaught errors as one kind of entry.
+            "log.entryAdded" => {
+                let text = params["text"].as_str().unwrap_or_default();
+                if params["type"] == "console" {
+                    Some(format!("console.{}: {text}", params["method"].as_str().unwrap_or("log")))
+                } else {
+                    let frame = &params["stackTrace"]["callFrames"][0];
+                    let at = frame["url"]
+                        .as_str()
+                        .filter(|u| !u.is_empty())
+                        .map(|u| format!(" ({u}, line {})", frame["lineNumber"].as_u64().unwrap_or(0) + 1))
+                        .unwrap_or_default();
+                    Some(format!("Uncaught error: {text}{at}"))
+                }
+            }
             _ => None,
         };
         if let Some(line) = line {
@@ -769,6 +1168,32 @@ mod tests {
         assert_eq!(k.text.as_deref(), Some("A"));
         assert_eq!(parse_key("space").unwrap().text.as_deref(), Some(" "));
         assert!(parse_key("Hyper+x").is_err());
+    }
+
+    #[test]
+    fn awaiting_scripts_return_their_last_expression() {
+        let code = "const reach = u => fetch(u).then(() => 'ok'); // try it\n({ site: await reach('/'), n: 1 })";
+        assert_eq!(
+            async_body(code),
+            "(async () => {\nconst reach = u => fetch(u).then(() => 'ok'); // try it\n\nreturn (({ site: await reach('/'), n: 1 })\n);\n})()"
+        );
+        assert_eq!(async_body("const s = 'a;b'; await go(s);"), "(async () => {\nconst s = 'a;b';\nreturn (await go(s)\n);\n})()");
+        assert_eq!(async_body("for (const x of xs) { await f(x); }"), "(async () => {\nfor (const x of xs) { await f(x); }\n})()");
+    }
+
+    #[test]
+    fn webdriver_names_special_keys() {
+        assert_eq!(webdriver_key(&parse_key("Enter").unwrap()), "\u{E007}");
+        assert_eq!(webdriver_key(&parse_key("F5").unwrap()), "\u{E035}");
+        assert_eq!(webdriver_key(&parse_key("Shift+a").unwrap()), "A");
+        assert_eq!(webdriver_key(&parse_key("Control+c").unwrap()), "c");
+    }
+
+    #[test]
+    fn bidi_values_become_plain_json() {
+        let v = json!({ "type": "object", "value": [["n", { "type": "number", "value": 2 }], ["xs", { "type": "array", "value": [{ "type": "string", "value": "a" }, { "type": "undefined" }] }]] });
+        assert_eq!(plain(&v), json!({ "n": 2, "xs": ["a", null] }));
+        assert_eq!(plain(&json!({ "type": "function" })), json!("[function]"));
     }
 
     #[test]
