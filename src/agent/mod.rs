@@ -1063,7 +1063,9 @@ impl Host {
                 Ok(guard) => guard,
                 Err(_) => self.wait_showing(id, || tr("Getting ready...").into(), live.background.lock(), cancel).await?,
             };
-            if self.llama.loaded_model().as_deref() != Some(&model.name) {
+            // The image projector loads with the model when the request will carry an image.
+            let images = live.conv.lock().unwrap().messages.iter().any(Message::sends_images) || message.as_ref().is_some_and(|(_, images, _)| !images.is_empty());
+            if !self.llama.loaded_for(model, images) {
                 // Loading takes from seconds to minutes and reports no progress, so the time so far is shown.
                 let (events, conv, name, stop) = (self.events.clone(), id.to_string(), model.name.clone(), CancellationToken::new());
                 let first = !self.llama.loaded_before(&model.name);
@@ -1080,7 +1082,7 @@ impl Host {
                     }
                 });
                 let loaded = tokio::select! {
-                    r = self.llama.ensure(model) => r,
+                    r = self.llama.ensure_with(model, images) => r,
                     _ = cancel.cancelled() => Err(crate::util::Cancelled.into()),
                 };
                 stop.cancel();
@@ -1423,7 +1425,10 @@ impl Host {
         let mut attempt = 0;
         loop {
             if let Target::Local(model) = target {
-                self.llama.ensure(model).await?;
+                match self.live(id) {
+                    Ok(live) => self.ready_for(&live, target, body).await?,
+                    Err(_) => self.llama.ensure_with(model, stream::has_images(body)).await?,
+                }
             }
             // The server holds back a tool call until it is complete, so a ticker reports how far the reply has got.
             let ticker = CancellationToken::new();
@@ -1565,6 +1570,7 @@ impl Host {
         let draft = conv.summary_draft.clone().filter(|d| ep.local && d.start == start && d.kept_from == kept_from);
         let label = tr(if draft.is_some() { "Continuing the summary of earlier messages" } else { "Summarizing earlier messages to make room" });
         self.emit(Event::Activity { conv: id.into(), text: Some(label.into()) });
+        self.ready_for(live, target, &body).await?;
         let written = Mutex::new(draft.as_ref().map(|d| d.text.clone()).unwrap_or_default());
         let pieces = AtomicU64::new(0);
         let on_text = |t: &str| {
@@ -2079,7 +2085,7 @@ impl Host {
             let name = self.llama.slot_file("shared", &LlamaServer::hash(&prefix));
             (prefix, name)
         } else {
-            let Some(prefix) = self.history_prefix(live, &target, exclude_last).await? else { return Ok(()) };
+            let Some(prefix) = self.history_prefix(live, &target, exclude_last, false).await? else { return self.restore_before_images(live, &target).await };
             (prefix, self.llama.slot_file("chat", &conv.id))
         };
         let tokens = self.llama.tokenize(&prefix).await?;
@@ -2119,14 +2125,18 @@ impl Host {
     }
 
     /// The rendered start of the next request: instructions, tools, and messages, without the newest message when
-    /// `exclude_last`. None when a message has images, which the saved prompts leave out.
-    async fn history_prefix(&self, live: &Live, target: &Target, exclude_last: bool) -> anyhow::Result<Option<String>> {
+    /// `exclude_last`. The saved prompts leave images out, so a message with images ends it when `before_images`, and
+    /// otherwise makes it None.
+    async fn history_prefix(&self, live: &Live, target: &Target, exclude_last: bool, before_images: bool) -> anyhow::Result<Option<String>> {
         let (system, mut messages, thinking) = self.request_parts(live);
         if exclude_last {
             messages.pop();
         }
-        if messages.iter().any(Message::sends_images) {
-            return Ok(None);
+        if let Some(first) = messages.iter().position(Message::sends_images) {
+            if !before_images {
+                return Ok(None);
+            }
+            messages.truncate(first);
         }
         let tools = self.tool_specs(live);
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget: None, max_tokens: self.max_tokens(target) };
@@ -2134,10 +2144,39 @@ impl Host {
     }
 
     async fn history_tokens(&self, live: &Live, target: &Target, exclude_last: bool) -> anyhow::Result<Option<Vec<i32>>> {
-        match self.history_prefix(live, target, exclude_last).await? {
+        match self.history_prefix(live, target, exclude_last, false).await? {
             Some(prefix) => Ok(Some(self.llama.tokenize(&prefix).await?)),
             None => Ok(None),
         }
+    }
+
+    /// Starts a local model for `body`, with its image projector when the request carries an image. A restart for the
+    /// projector, such as at a task's first screenshot, restores the saved prompt before the first image.
+    async fn ready_for(&self, live: &Live, target: &Target, body: &Value) -> anyhow::Result<()> {
+        let Target::Local(model) = target else { return Ok(()) };
+        let images = stream::has_images(body);
+        let reload = images && !self.llama.loaded_for(model, true);
+        self.llama.ensure_with(model, images).await?;
+        if reload && let Err(err) = self.restore_before_images(live, target).await {
+            eprintln!("[cache] {err:#}");
+        }
+        Ok(())
+    }
+
+    /// Restores the saved prompt for a conversation's text before its first image when the slot does not hold the
+    /// conversation, as after the server restarted to load the image projector. The request then reads only what
+    /// came after the last save. Nothing is saved here, since the slot files cannot hold the images.
+    async fn restore_before_images(&self, live: &Live, target: &Target) -> anyhow::Result<()> {
+        let id = live.conv.lock().unwrap().id.clone();
+        if self.llama.slot_owner().as_deref() == Some(&id) {
+            return Ok(());
+        }
+        if let Some(prefix) = self.history_prefix(live, target, false, true).await? {
+            let tokens = self.llama.tokenize(&prefix).await?;
+            self.llama.restore_longest(&tokens).await;
+        }
+        self.llama.set_slot_owner(Some(id));
+        Ok(())
     }
 
     /// The prompt every new conversation in `cwd` starts with: instructions, tools, and the environment block that
@@ -2370,6 +2409,7 @@ impl Host {
         let req = ChatRequest { system: &system, messages: &messages, tools: &tools, thinking, thinking_budget, max_tokens };
         let body = stream::payload(&ep, &req);
         let _busy = ep.local.then(|| self.llama.busy());
+        self.ready_for(live, &target, &body).await?;
         let reply = stream::send(&self.http, &ep, &body, cancel, |_| {}).await?;
         if reply.stop == StopReason::Aborted {
             return Err(crate::util::Cancelled.into());
@@ -2499,33 +2539,24 @@ fn clean_title(answer: &str) -> Option<String> {
     (words >= 1 && words <= 10 && title.chars().count() <= 80).then(|| title.to_string())
 }
 
-/// Long file contents the model already saved are replaced by a line saying where they went. The file is on disk
-/// for the model to read again, and keeping every written file in the prompt would fill a small context fast.
+/// Shows long writes made before 0.5.8 by their first and last lines, as their results promised, so those
+/// conversations keep their caches. Later writes stay in full: a model that saw its own write shortened took it for a
+/// cut-off write and deleted the file.
 fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
     const LONG: usize = tools::SHORTENED_WRITE;
-    // Each saved call, and which note its result promised: 2 for the first and last lines framed as Scoobert's text,
-    // 1 for them unframed, as before 0.4.7, and 0 for a count, as before 0.2.6. Notes whose result says they stay in
-    // full are left out.
-    let saved: HashMap<String, u8> = messages
+    // Each shortened call, and whether its result framed the note as Scoobert's text, as from 0.4.7.
+    let saved: HashMap<String, bool> = messages
         .iter()
         .filter_map(|m| match m {
-            Message::Tool(t) if !t.is_error && !t.output.contains(tools::KEPT_IN_FULL.trim()) => {
-                let style = if t.output.contains(tools::SHORTENED_SYSTEM.trim()) {
-                    2
-                } else if t.output.contains(tools::SHORTENED_NOTICE.trim()) {
-                    1
-                } else {
-                    0
-                };
-                Some((t.call_id.clone(), style))
-            }
+            Message::Tool(t) if !t.is_error && t.output.contains(tools::SHORTENED_SYSTEM.trim()) => Some((t.call_id.clone(), true)),
+            Message::Tool(t) if !t.is_error && t.output.contains(tools::SHORTENED_NOTICE.trim()) => Some((t.call_id.clone(), false)),
             _ => None,
         })
         .collect();
     for m in &mut messages {
         let Message::Assistant(a) = m else { continue };
         for call in &mut a.tool_calls {
-            let Some(&style) = saved.get(&call.id) else { continue };
+            let Some(&framed) = saved.get(&call.id) else { continue };
             let path = call.arg("path").to_string();
             let Some(args) = call.arguments.as_object_mut() else { continue };
             // The text moves to a field of another name, so the history never shows a note where file content goes,
@@ -2537,16 +2568,16 @@ fn shorten_saved_writes(mut messages: Vec<Message>) -> Vec<Message> {
                 let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
                 let first = crate::util::clip(lines.first().copied().unwrap_or_default(), 120);
                 let last = crate::util::clip(lines.last().copied().unwrap_or_default(), 120);
-                let note = match style {
-                    2 => format!(
+                let note = if framed {
+                    format!(
                         "{}\nFirst line: {first}\nLast line: {last}",
                         prompt::system_note(&format!(
                             "{} lines saved in full in {path}, shown here by their first and last line to save room. Read the file for its exact text.",
                             text.lines().count()
                         ))
-                    ),
-                    1 => format!("{} lines saved in full in {path}, shown here by their first and last line to save room.\nFirst line: {first}\nLast line: {last}", text.lines().count()),
-                    _ => format!("{} characters, saved in full in {path}", text.chars().count()),
+                    )
+                } else {
+                    format!("{} lines saved in full in {path}, shown here by their first and last line to save room.\nFirst line: {first}\nLast line: {last}", text.lines().count())
                 };
                 args.remove(key);
                 args.insert(format!("{key}_saved"), note.into());
@@ -2805,19 +2836,21 @@ mod tests {
     use super::{clean_title, kept_from, needs_continue};
 
     #[test]
-    fn shortens_long_saved_writes_only() {
+    fn shortens_only_writes_whose_result_said_so() {
         let big = "x".repeat(3000);
         let write = |id: &str| ToolCall { id: id.into(), name: "write".into(), arguments: serde_json::json!({ "path": "a.ts", "content": big }) };
+        let result = |id: &str, output: String, is_error: bool| Message::Tool(ToolResult { call_id: id.into(), name: "write".into(), output, is_error, diff: None, time: 0, ..Default::default() });
         let messages = vec![
-            Message::Assistant(AssistantMessage { tool_calls: vec![write("ok"), write("failed")], ..Default::default() }),
-            Message::Tool(ToolResult { call_id: "ok".into(), name: "write".into(), output: "Created".into(), is_error: false, diff: None, time: 0, ..Default::default() }),
-            Message::Tool(ToolResult { call_id: "failed".into(), name: "write".into(), output: "Could not write".into(), is_error: true, diff: None, time: 0, ..Default::default() }),
+            Message::Assistant(AssistantMessage { tool_calls: vec![write("old"), write("new"), write("failed")], ..Default::default() }),
+            result("old", format!("Created a.ts.{}", super::tools::SHORTENED_SYSTEM), false),
+            result("new", "Created a.ts (now 3000 bytes).".into(), false),
+            result("failed", "Could not write".into(), true),
         ];
         let out = super::shorten_saved_writes(messages);
         let Message::Assistant(a) = &out[0] else { panic!() };
-        assert!(a.tool_calls[0].arguments.get("content").is_none());
-        assert_eq!(a.tool_calls[0].arg("content_saved"), "3000 characters, saved in full in a.ts");
+        assert!(a.tool_calls[0].arguments.get("content").is_none() && a.tool_calls[0].arg("content_saved").contains("1 lines saved in full in a.ts"));
         assert_eq!(a.tool_calls[1].arg("content").len(), 3000);
+        assert_eq!(a.tool_calls[2].arg("content").len(), 3000);
     }
 
     #[test]

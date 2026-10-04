@@ -152,6 +152,12 @@ fn openai_payload(ep: &Endpoint, req: &ChatRequest) -> Value {
     Value::Object(body)
 }
 
+/// Whether a chat request carries an image, which a local model reads through its image projector.
+pub fn has_images(body: &Value) -> bool {
+    let parts = |m: &Value| m["content"].as_array().is_some_and(|p| p.iter().any(|p| p["type"] == "image_url"));
+    body["messages"].as_array().is_some_and(|messages| messages.iter().any(parts))
+}
+
 fn openai_user_content(text: &str, images: &[Image]) -> Value {
     if images.is_empty() {
         return text.into();

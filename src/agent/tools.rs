@@ -537,12 +537,6 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if repeated > 0 {
         output.push_str(&format!(" The first {repeated} lines of content were already the last lines of the file, so they were left out."));
     }
-    // The note that replaces long content in the conversation reads like a failed write unless it is explained.
-    if content.len() > SHORTENED_WRITE && kept_in_full(limits, &path, content.len()) {
-        output.push_str(KEPT_IN_FULL);
-    } else if content.len() > SHORTENED_WRITE {
-        output.push_str(SHORTENED_SYSTEM);
-    }
     // After a part is added, the file's top-level lines show what earlier parts already declared.
     if append {
         let lines = outline(&new, path.extension().is_some_and(|e| e.eq_ignore_ascii_case("md")));
@@ -730,27 +724,15 @@ fn confirmed_replace(path: &Path, content: &str, wipes: bool) -> bool {
     repeat
 }
 
-/// Writes longer than this show as a short note in later requests.
+/// Writes before 0.5.8 longer than this show as a short note in later requests.
 pub const SHORTENED_WRITE: usize = 1500;
 
-/// Ended the result of a long write before 0.4.7. `shorten_saved_writes` still looks for it, so each write keeps the
-/// note its conversation was cached with.
+/// Ended the result of a long write from 0.2.6 to 0.4.7. `shorten_saved_writes` still looks for it, so each write keeps
+/// the note its conversation was cached with.
 pub const SHORTENED_NOTICE: &str = " From here on the conversation shows this call by its first and last lines, to save room. The file holds all of it.";
 
-/// Ends the result of a long write, framed as Scoobert's text.
+/// Ended the result of a long write from 0.4.7 to 0.5.8, framed as Scoobert's text.
 pub const SHORTENED_SYSTEM: &str = " ⟦System: from here on the conversation shows this write by its first and last lines, to save room. The file holds all of it.⟧";
-
-/// Ends the result of a long write or edit to a note, which `shorten_saved_writes` leaves in full. A model edits a note
-/// right after writing it, from the text it remembers, and a note shown by its first and last lines made those edits
-/// miss. Calls made before this existed have no marker and stay shortened, so their conversations keep their caches.
-pub const KEPT_IN_FULL: &str = " The conversation keeps this note's text in full.";
-
-/// Notes up to this size stay in full in the conversation.
-const NOTE_IN_FULL: usize = 12_000;
-
-fn kept_in_full(limits: &Limits, path: &Path, size: usize) -> bool {
-    size <= NOTE_IN_FULL && limits.notes.as_deref().is_some_and(|notes| path.starts_with(notes))
-}
 
 /// Whether a command writes a file from a heredoc or a PowerShell here-string. Only the line that opens a heredoc
 /// is checked for a redirect, since the text inside it is often code with `>` in it.
@@ -830,11 +812,7 @@ async fn edit(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let updated = if all { text.replace(&old_n, &new_n) } else { text.replacen(&old_n, &new_n, 1) };
     let written = if crlf { updated.replace('\n', "\r\n") } else { updated.clone() };
     tokio::fs::write(&path, &written).await.map_err(|e| format!("Could not write {shown}: {e}"))?;
-    let mut output = if count > 1 { format!("Edited {shown} in {count} places.") } else { format!("Edited {shown}.") };
-    let longest = old_text.len().max(new_text.len());
-    if longest > SHORTENED_WRITE && kept_in_full(limits, &path, longest) {
-        output.push_str(KEPT_IN_FULL);
-    }
+    let output = if count > 1 { format!("Edited {shown} in {count} places.") } else { format!("Edited {shown}.") };
     Ok(Outcome { output, diff: Some(unified_diff(&text, &updated)), ..Default::default() })
 }
 
@@ -1175,7 +1153,7 @@ mod tests {
         assert!(out.output.contains("mode set to append"), "{}", out.output);
         let long = "- line\n".repeat(400);
         let write = call("write", json!({"path": "Notes/Long.md", "content": long}));
-        assert!(run(&write, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains(KEPT_IN_FULL.trim()));
+        assert!(!run(&write, &dir, &shell, &limits, &cancel, |_| {}).await.output.contains(SHORTENED_SYSTEM.trim()));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -124,10 +124,14 @@ struct Running {
     cuda: bool,
     /// Its arguments for predicting ahead and for the context's precision, which also restart it when they change.
     extras: Vec<String>,
+    /// Whether it loaded the model's image projector.
+    vision: bool,
 }
 
 struct Shared {
     model: Option<(LocalModel, u32)>,
+    /// Whether the server loaded the model's image projector.
+    vision: bool,
     slot_owner: Option<String>,
     last_use: Instant,
     last_save: Instant,
@@ -186,7 +190,7 @@ impl LlamaServer {
             // moment fails, so every request opens its own.
             http: reqwest::Client::builder().pool_max_idle_per_host(0).build().unwrap_or_default(),
             proc: tokio::sync::Mutex::new(None),
-            shared: Mutex::new(Shared { model: None, slot_owner: None, last_use: Instant::now(), last_save: Instant::now() }),
+            shared: Mutex::new(Shared { model: None, vision: false, slot_owner: None, last_use: Instant::now(), last_save: Instant::now() }),
             busy: AtomicUsize::new(0),
             gpu_refused: Mutex::new(std::collections::HashSet::new()),
             loading: Mutex::new(CancellationToken::new()),
@@ -304,10 +308,10 @@ impl LlamaServer {
         gguf::trained_context(&model.path).map_or(default, |trained| default.min(trained.min(u32::MAX as u64) as u32))
     }
 
+    /// Free memory `model` needs at `ctx`, without its image projector, which loads only for a request with an image.
     pub fn memory_needed(&self, model: &LocalModel, ctx: u32) -> u64 {
         let s = self.settings();
-        let mmproj = model.mmproj.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len()).unwrap_or(0);
-        let mut weights = model.size + mmproj;
+        let mut weights = model.size;
         let mut kv = ctx as u64 * gguf::kv_bytes_per_token(&model.path);
         // A draft model loads beside the model with a context of its own.
         if let Some(name) = s.speculation.get(&model.name).and_then(|v| v.strip_prefix("draft:"))
@@ -337,6 +341,12 @@ impl LlamaServer {
 
     pub fn loaded_model(&self) -> Option<String> {
         self.shared.lock().unwrap().model.as_ref().map(|(m, _)| m.name.clone())
+    }
+
+    /// Whether the server runs `model`, with its image projector when `images` is true.
+    pub fn loaded_for(&self, model: &LocalModel, images: bool) -> bool {
+        let s = self.shared.lock().unwrap();
+        s.model.as_ref().is_some_and(|(m, _)| m.name == model.name) && (s.vision || !images || model.mmproj.is_none())
     }
 
     /// How the loaded model runs: on the graphics card, through NVIDIA support, and with which extra arguments.
@@ -416,6 +426,13 @@ impl LlamaServer {
 
     /// Starts the server with `model` unless it is already running it.
     pub async fn ensure(self: &Arc<Self>, model: &LocalModel) -> anyhow::Result<()> {
+        self.ensure_with(model, false).await
+    }
+
+    /// Starts the server with `model` unless it is already running it, with the model's image projector when `images`
+    /// is true. A loaded projector stays until the server next stops, since unloading it means loading the model again.
+    pub async fn ensure_with(self: &Arc<Self>, model: &LocalModel, images: bool) -> anyhow::Result<()> {
+        let mut vision = images && model.mmproj.is_some();
         self.touch();
         let cancel = self.loading.lock().unwrap().clone();
         let mut proc = self.proc.lock().await;
@@ -427,6 +444,7 @@ impl LlamaServer {
             && !matches!(running.child.try_wait(), Ok(None))
         {
             let name = running.model.name.clone();
+            vision |= running.vision && running.model.path == model.path;
             let step = self.crashed(&name, running.extras.iter().any(|a| a == "--spec-type"));
             // The slot went with the server, so the next request reads its conversation again.
             self.set_slot_owner(None);
@@ -441,7 +459,8 @@ impl LlamaServer {
                 && running.model.args == model.args
                 && running.gpu == gpu
                 && running.cuda == cuda.is_some()
-                && running.extras == extras;
+                && running.extras == extras
+                && (running.vision || !vision);
             if alive && same {
                 if running.ready {
                     return Ok(());
@@ -457,7 +476,7 @@ impl LlamaServer {
             }
         }
         self.stop_locked(&mut proc).await;
-        let mut result = self.start_locked(&mut proc, model, gpu, cuda.clone(), &cancel).await;
+        let mut result = self.start_locked(&mut proc, model, gpu, cuda.clone(), vision, &cancel).await;
         // A way of predicting ahead that the model cannot load with, such as a draft model of another family, is
         // dropped for the rest of this run before the card or CUDA take the blame.
         if extras.iter().any(|a| a == "--spec-type")
@@ -467,7 +486,7 @@ impl LlamaServer {
             eprintln!("[llama] {} could not load while predicting ahead: {err:#}", model.name);
             self.spec_refused.lock().unwrap().insert(model.name.clone());
             (self.on_status)(ServerStatus::SpecFailed(model.name.clone()));
-            result = self.start_locked(&mut proc, model, gpu, cuda.clone(), &cancel).await;
+            result = self.start_locked(&mut proc, model, gpu, cuda.clone(), vision, &cancel).await;
         }
         // CUDA that cannot load the model leaves it to the card's default support, for the rest of this run.
         if cuda.is_some()
@@ -477,7 +496,7 @@ impl LlamaServer {
             eprintln!("[llama] CUDA could not load {}: {err:#}", model.name);
             self.cuda_refused.store(true, Ordering::SeqCst);
             (self.on_status)(ServerStatus::CudaFailed(model.name.clone()));
-            result = self.start_locked(&mut proc, model, gpu, None, &cancel).await;
+            result = self.start_locked(&mut proc, model, gpu, None, vision, &cancel).await;
         }
         // A graphics card that cannot load the model leaves it to the processor, and the app remembers the model. Only
         // a server that dies while loading counts, since a check that fails before the start is not the card's doing.
@@ -488,7 +507,7 @@ impl LlamaServer {
             eprintln!("[llama] the graphics card could not load {}: {err:#}", model.name);
             self.gpu_refused.lock().unwrap().insert(model.name.clone());
             (self.on_status)(ServerStatus::GpuFailed(model.name.clone()));
-            result = self.start_locked(&mut proc, model, false, None, &cancel).await;
+            result = self.start_locked(&mut proc, model, false, None, vision, &cancel).await;
         }
         if let Err(err) = &result
             && !crate::util::is_cancelled(err)
@@ -499,7 +518,17 @@ impl LlamaServer {
     }
 
     /// Starts a server for `model`: `server` when given, such as the CUDA build, otherwise the configured or bundled one.
-    async fn start_locked(&self, proc: &mut Option<Running>, model: &LocalModel, gpu: bool, server: Option<PathBuf>, cancel: &CancellationToken) -> anyhow::Result<()> {
+    /// `vision` loads the model's image projector.
+    async fn start_locked(
+        &self,
+        proc: &mut Option<Running>,
+        model: &LocalModel,
+        gpu: bool,
+        server: Option<PathBuf>,
+        vision: bool,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let projector = model.mmproj.as_ref().filter(|_| vision);
         let cuda_server = server.is_some();
         let Some(exe) = server.or_else(|| self.executable()) else {
             bail!("Scoobert could not find llama.cpp. Reinstall Scoobert, or set the llama-server path in Settings.");
@@ -509,7 +538,7 @@ impl LlamaServer {
             bail!("Another program is using port {}. Restart Scoobert to pick a free port.", self.port);
         }
         let ctx = self.context_for(model);
-        let mut need = self.memory_needed(model, ctx);
+        let mut need = self.memory_needed(model, ctx) + projector.and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
         // On the graphics card, llama.cpp puts the layers that fit in the card's own memory, less a margin it keeps
         // free, so system memory holds only the rest.
         if gpu && let Some(vram) = crate::sys::free_vram() {
@@ -533,7 +562,7 @@ impl LlamaServer {
         }
         let slots = paths::get().slots();
         let mut args: Vec<String> = vec!["-m".into(), path_arg(&model.path), "--alias".into(), model.name.clone()];
-        if let Some(mmproj) = &model.mmproj {
+        if let Some(mmproj) = projector {
             args.extend(["--mmproj".into(), path_arg(mmproj)]);
         }
         if let Some(template) = reasoning_keeping_template(model) {
@@ -608,10 +637,11 @@ impl LlamaServer {
         if let Some(pid) = child.id() {
             let _ = std::fs::write(paths::get().pid_file(), pid.to_string());
         }
-        *proc = Some(Running { child, model: model.clone(), ready: false, gpu, cuda: cuda_server, extras });
+        *proc = Some(Running { child, model: model.clone(), ready: false, gpu, cuda: cuda_server, extras, vision: projector.is_some() });
         {
             let mut shared = self.shared.lock().unwrap();
             shared.model = Some((model.clone(), ctx));
+            shared.vision = projector.is_some();
             shared.slot_owner = None;
         }
         (self.on_status)(ServerStatus::Loading(model.name.clone()));

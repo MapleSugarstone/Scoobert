@@ -1,6 +1,6 @@
-//! Sends a message to a model that cannot see images, then one with an image attached, and prints how the image
-//! helper describes it and how long each step takes.
-//! Usage: SCOOBERT_HOME=<scratch> cargo run --release --example image_check -- <project folder> <model name> <image file>
+//! Sends a message without an image, then one with an image attached, and prints how the model sees it (directly, by
+//! loading its image projector, or through the image helper), the server's loads, and how long each step takes.
+//! Usage: SCOOBERT_HOME=<scratch> cargo run --release --example image_check -- <project folder> <model name> <image file> [models folder]
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -15,7 +15,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let project = PathBuf::from(&args[1]);
-    let settings = Settings { model: args[2].clone(), approvals: Approvals::Auto, thinking: Thinking::Off, ..Settings::default() };
+    let models_dir = args.get(4).cloned().unwrap_or_default();
+    let settings = Settings { model: args[2].clone(), models_dir, approvals: Approvals::Auto, thinking: Thinking::Off, ..Settings::default() };
     use base64::Engine;
     let image = Image { mime: "image/jpeg".into(), data: base64::engine::general_purpose::STANDARD.encode(std::fs::read(&args[3]).unwrap()) };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -55,6 +56,7 @@ async fn run(rx: &mut UnboundedReceiver<Event>, start: Instant) {
                 }
             }
             Event::Message { message: Message::Assistant(a), .. } => println!("[{t}s] reply: {}", a.text.trim()),
+            Event::Server(status) => println!("[{t}s] server {status:?}"),
             Event::Error { message, .. } => println!("[{t}s] error: {message}"),
             Event::Settled { .. } => {
                 println!("[{t}s] settled");
