@@ -346,12 +346,9 @@ impl LlamaServer {
         // A model left out uses its own prediction layers when its file has them, and "off" turns them off.
         let choice = s.speculation.get(&model.name).cloned().or_else(|| gguf::kind(&model.path).1.then(|| "mtp".to_string()));
         match choice.as_deref() {
-            // On a processor, 8 tokens a step suited the dense 27B, and 3 suited the 35B-A3B, whose own pass is cheap
-            // next to its prediction layer.
-            Some("mtp") => {
-                let step = if gguf::mixture_of_experts(&model.path) { "3" } else { "8" };
-                args.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", step].map(String::from));
-            }
+            // 3 tokens a step: on prose, where the layers guess about 40% right, 8 cost the 27B 30% of its speed,
+            // while on code 3 and 8 were even.
+            Some("mtp") => args.extend(["--spec-type", "draft-mtp", "--spec-draft-n-max", "3"].map(String::from)),
             // Text the model writes often repeats text already in the conversation, such as code it edits.
             Some("ngram") => args.extend(["--spec-type", "ngram-simple"].map(String::from)),
             Some(other) => {
@@ -489,6 +486,11 @@ impl LlamaServer {
         if let Some(template) = reasoning_keeping_template(model) {
             args.extend(["--chat-template-file".into(), path_arg(&template)]);
         }
+        // The server only notices a cancelled request between batches, so a processor reads in small batches to keep
+        // Stop quick. With the graphics card, llama.cpp copies the weights it keeps in RAM to the card for every
+        // batch it reads, so small batches spend their time copying: a 35B-A3B mostly in RAM beside an 8 GB card
+        // read 25 to 67 tokens a second in batches of 256.
+        let batch = if gpu { "1024" } else { "256" };
         #[rustfmt::skip]
         args.extend([
             "-c", &ctx.to_string(),
@@ -499,9 +501,8 @@ impl LlamaServer {
             // Hybrid models need checkpoints to rewind a few tokens.
             "--ctx-checkpoints", "8",
             "--checkpoint-min-step", "0",
-            // The server only notices a cancelled request between batches, so small batches keep Stop quick.
-            "-b", "256",
-            "-ub", "256",
+            "-b", batch,
+            "-ub", batch,
             "--slot-save-path", &path_arg(&slots),
             "--host", "127.0.0.1",
             "--port", &self.port.to_string(),

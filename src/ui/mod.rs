@@ -514,6 +514,8 @@ impl App {
     /// What someone looking over a review package needs to know about this computer and Scoobert's setup.
     fn review_report(&self, conv: &crate::agent::conversation::Conversation) -> String {
         let mut r = format!("Scoobert {} on {} {}\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+        r.push_str(&format!("Processor: {}, {threads} threads\n", cpu_name()));
         r.push_str(&format!("Memory: {} total, {} available\n", gb(crate::sys::total_memory()), gb(crate::sys::available_memory())));
         let card = crate::llama::cuda::detect().map(|g| format!("{} (driver {})", g.name, g.driver)).unwrap_or_else(|| "no NVIDIA card found".into());
         let vram = crate::sys::free_vram().map(gb).unwrap_or_else(|| "unknown".into());
@@ -2312,6 +2314,18 @@ static NEEDS_WEB: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|
     ))
     .unwrap()
 });
+
+/// The processor's name as the system reports it, for review packages.
+fn cpu_name() -> String {
+    let name = if cfg!(target_os = "linux") {
+        std::fs::read_to_string("/proc/cpuinfo").ok().and_then(|t| t.lines().find(|l| l.starts_with("model name")).and_then(|l| l.split(':').nth(1)).map(|s| s.trim().to_string()))
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("sysctl").args(["-n", "machdep.cpu.brand_string"]).output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        std::env::var("PROCESSOR_IDENTIFIER").ok()
+    };
+    name.filter(|n| !n.is_empty()).unwrap_or_else(|| "unknown".into())
+}
 
 fn project_name(p: &std::path::Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| crate::paths::display(p))
