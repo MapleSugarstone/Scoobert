@@ -218,7 +218,7 @@ impl Chat {
                         self.activity = None;
                         self.progress = None;
                     }
-                    Delta::Progress { .. } | Delta::LongWrite { .. } => {}
+                    Delta::Progress { .. } => {}
                 }
             }
             // The continued reply streams in with everything the stopped one held.

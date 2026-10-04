@@ -127,7 +127,7 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool, browser: bool) -> Vec<V
         ),
         tool(
             "write",
-            "Write a file, creating missing folders. Set mode to create for a new file, replace to swap all of an existing file's text, or append to add content to the end of a file, which is how to write a long file in parts. Give path and mode before content.",
+            "Write a file, creating missing folders. Set mode to create for a new file, replace to swap all of an existing file's text, or append to add content to the end of a file. Give path and mode before content.",
             json!({
                 "path": path,
                 "mode": { "type": "string", "enum": ["create", "replace", "append"] },
@@ -137,7 +137,7 @@ pub fn specs(shell: &Shell, no_project: bool, web: bool, browser: bool) -> Vec<V
         ),
         tool(
             "move",
-            "Put a file in place of another, replacing it, and remove the first. Use it to finish rewriting an existing file that needs more than one write part: write the new version to a draft named like the file with .new added, such as src/map.ts.new, with create and then append, and move the draft to the file's path once it is complete. The file keeps working until then.",
+            "Put a file in place of another, replacing it, and remove the first. Use it to move a finished draft, such as src/map.ts.new, over the file it replaces.",
             json!({ "from": path, "path": path }),
             &["from", "path"],
         ),
@@ -438,8 +438,11 @@ async fn read(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, S
     let text = super::prompt::outside(&String::from_utf8_lossy(&bytes));
     let lines: Vec<&str> = text.lines().collect();
     let start = arg_u64(call, "offset").unwrap_or(1).max(1) as usize - 1;
+    // A model looking for where a file ends often asks for the line after it, so the error shows the numbered end.
     if start >= lines.len() && !lines.is_empty() {
-        return Err(format!("The file has {} lines, so offset {} is past its end.", lines.len(), start + 1));
+        let from = lines.len().saturating_sub(PAST_END_LINES);
+        let end: Vec<String> = (from..lines.len()).map(|i| format!("{}: {}", i + 1, crate::util::clip(lines[i], 160))).collect();
+        return Err(format!("The file has {} lines, so offset {} is past its end. It ends with:\n{}", lines.len(), start + 1, end.join("\n")));
     }
     let limit = arg_u64(call, "limit").map(|l| l as usize).unwrap_or(MAX_LINES).min(MAX_LINES);
     let mut out = String::new();
@@ -508,15 +511,14 @@ async fn write(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outcome, 
     if append && content.trim().is_empty() {
         return Err(format!("Nothing was added, because every line of content is already at the end of {}.", paths::display(&path)));
     }
-    // A model writing a long file in parts sometimes leaves out append, and each part then replaces the whole file.
+    // A model continuing a cut-off write sometimes leaves out append, and the rest then replaces the whole file.
     let wipes = if append { None } else { old.as_deref().and_then(|existing| drops_most(existing, content)) };
     if !confirmed_replace(&path, content, wipes.is_some())
         && let Some((lines, kept)) = wipes
     {
         let shown = paths::display(&path);
-        let draft = draft_path(arg(call, &["path"]).unwrap_or_default());
         return Err(format!(
-            "Nothing was written. {shown} has {lines} lines, and this write keeps only {kept} of them, so it would delete the rest. To add this text to the end of the file, call write again with mode set to append. To change part of the file, use edit. If you are rewriting the whole file in parts, write them to {draft} with create and then append, and move it to {shown} when it is complete. To replace the file with this text alone, send this write again with the same first lines."
+            "Nothing was written. {shown} has {lines} lines, and this write keeps only {kept} of them, so it would delete the rest. To add this text to the end of the file, call write again with mode set to append. To change part of the file, use edit. To replace the file with this text alone, send this write again with the same first lines."
         ));
     }
     let new = match (&old, append) {
@@ -595,6 +597,7 @@ async fn move_file(call: &ToolCall, cwd: &Path, limits: &Limits) -> Result<Outco
 }
 
 const OUTLINE_LINES: usize = 40;
+const PAST_END_LINES: usize = 6;
 
 /// Whether a write adds to the end of its file: mode append, or append true in conversations from before mode.
 pub fn appends(call: &ToolCall) -> bool {
@@ -604,6 +607,32 @@ pub fn appends(call: &ToolCall) -> bool {
         Some(_) => false,
         None => call.arguments.get("append").is_some_and(|v| v.as_bool() == Some(true) || v.as_str() == Some("true")),
     }
+}
+
+/// Shortens a write cut off partway so it stops before the last block in its final 40% that starts at the outermost
+/// level there after a blank line. A model continues a file more reliably at the start of a block than inside one.
+pub fn keep_whole_blocks(call: &mut ToolCall) {
+    if call.name != "write" {
+        return;
+    }
+    let Some(content) = call.arguments.get("content").and_then(Value::as_str) else { return };
+    let Some(keep) = whole_blocks(content) else { return };
+    let kept: String = content.split_inclusive('\n').take(keep).collect();
+    if let Some(args) = call.arguments.as_object_mut() {
+        args.insert("content".into(), kept.into());
+    }
+}
+
+/// How many lines of `content` end before such a block, or None when its final 40% starts none.
+fn whole_blocks(content: &str) -> Option<usize> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.len() < 10 {
+        return None;
+    }
+    let from = lines.len() * 3 / 5;
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let outer = lines[from..].iter().filter(|l| !l.trim().is_empty()).map(|l| indent(l)).min()?;
+    (from..lines.len()).rev().find(|&i| lines[i - 1].trim().is_empty() && !lines[i].trim().is_empty() && indent(lines[i]) <= outer)
 }
 
 /// `content` without the lines at its start that repeat the end of `existing`, with how many were dropped. A repeat
@@ -1263,6 +1292,25 @@ mod tests {
         let pulled = run(&call("move", json!({"from": outside.to_string_lossy(), "path": "r.js"})), &dir, &shell, &limits, &cancel, |_| {}).await;
         assert!(pulled.is_error && outside.exists(), "{}", pulled.output);
         let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cut_writes_end_between_blocks_and_reads_past_the_end_show_the_end() {
+        let methods: String = (1..=4).map(|i| format!("  m{i}() {{\n    if (a) {{\n      b();\n    }}\n  }}\n\n")).collect();
+        let content = format!("class G {{\n{methods}  handleEnter() {{\n    if (s) {{\n      if (p) {{\n        go();\n");
+        let mut cut = call("write", json!({"path": "g.ts", "mode": "append", "content": content}));
+        keep_whole_blocks(&mut cut);
+        assert!(cut.arg("content").ends_with("  m4() {\n    if (a) {\n      b();\n    }\n  }\n\n"), "{}", cut.arg("content"));
+        let mut dense = call("write", json!({"path": "d.ts", "content": "x;\n".repeat(20)}));
+        keep_whole_blocks(&mut dense);
+        assert_eq!(dense.arg("content"), "x;\n".repeat(20), "a write with no blank lines keeps every line");
+        let dir = std::env::temp_dir().join(format!("scoobert-test-{}", crate::util::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), (1..=30).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        let (shell, limits, token) = (Shell::detect(), Limits::default(), CancellationToken::new());
+        let out = run(&call("read", json!({"path": "f.txt", "offset": 31})), &dir, &shell, &limits, &token, |_| {}).await;
+        assert!(out.is_error && out.output.ends_with("offset 31 is past its end. It ends with:\n25: line 25\n26: line 26\n27: line 27\n28: line 28\n29: line 29\n30: line 30"), "{}", out.output);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

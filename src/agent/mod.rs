@@ -153,8 +153,6 @@ struct Live {
     step_cancel: Mutex<Option<CancellationToken>>,
     /// When the request in flight last streamed thinking.
     last_thought: Mutex<Option<std::time::Instant>>,
-    /// The request in flight was stopped because a file write grew past `stream::WRITE_PART_CHARS`.
-    split: AtomicBool,
     /// Commands the model started in the background, which end when the conversation closes.
     jobs: Arc<jobs::Jobs>,
     /// The browser the model tests pages in, which closes when the task ends.
@@ -168,8 +166,6 @@ struct Live {
 enum Cut {
     /// The user pressed Stop.
     Stopped,
-    /// Scoobert stopped a write that grew past one part.
-    Split,
     /// The reply ran out of room in the context.
     OutOfRoom,
 }
@@ -491,7 +487,8 @@ impl Host {
 
     fn max_tokens(&self, target: &Target) -> u32 {
         match target {
-            Target::Local(m) => MAX_OUTPUT_TOKENS.min(self.llama.context_for(m) / 2),
+            // A local reply may use half the context, so the model can write a long file in one call.
+            Target::Local(m) => self.llama.context_for(m) / 2,
             Target::Hosted(..) => MAX_OUTPUT_TOKENS,
         }
     }
@@ -575,7 +572,6 @@ impl Host {
             turn: Mutex::new(None),
             step_cancel: Mutex::new(None),
             last_thought: Mutex::new(None),
-            split: AtomicBool::new(false),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -1270,19 +1266,6 @@ impl Host {
                     self.emit(Event::Message { conv: id.to_string(), message });
                 }
             }
-            // A write that grew past one part was stopped. Its complete lines are saved, and the model writes the rest
-            // in the next part.
-            if live.split.swap(false, Ordering::SeqCst) && !cancel.is_cancelled() {
-                if let Ok(mut cut) = result
-                    && !cut.tool_calls.is_empty()
-                {
-                    cut.resend_thinking = false;
-                    let calls = cut.tool_calls.clone();
-                    self.add_reply(live, id, cut, replaces)?;
-                    self.save_cut_writes(live, id, calls, Cut::Split, cancel).await?;
-                }
-                continue;
-            }
             // The user sent a message while the model thought. The thinking so far stays, and the next request
             // adds the message after it.
             if step.is_cancelled() && !cancel.is_cancelled() {
@@ -1316,6 +1299,9 @@ impl Host {
             // A continued reply stopped before it added anything leaves the stopped reply as it was.
             if continued && !replaces && reply.stop == StopReason::Aborted {
                 return Ok(());
+            }
+            if reply.stop == StopReason::Length {
+                reply.tool_calls.iter_mut().for_each(tools::keep_whole_blocks);
             }
             let calls = reply.tool_calls.clone();
             let stop = reply.stop;
@@ -1408,7 +1394,6 @@ impl Host {
             if !result.is_error {
                 let why = match cut {
                     Cut::Stopped => format!("The reply was stopped while writing this file, so only the first {lines} lines of this call were saved."),
-                    Cut::Split => format!("One write holds about 200 lines, so the system stopped this one and saved the first {lines} lines of this call."),
                     Cut::OutOfRoom => format!("The reply ran out of room in the context while writing this file, so only the first {lines} lines of this call were saved."),
                 };
                 let next = match &draft {
@@ -1465,14 +1450,6 @@ impl Host {
                     match &delta {
                         Delta::Thinking(_) => *live.last_thought.lock().unwrap() = Some(std::time::Instant::now()),
                         Delta::Text(_) | Delta::ToolCall(_) | Delta::ToolInput(_) => *live.last_thought.lock().unwrap() = None,
-                        // The write so far is saved and the model continues it in another part. A write that has not
-                        // named its file yet runs on, since nothing could be saved.
-                        Delta::LongWrite { path: Some(_) } => {
-                            if let Some(step) = live.step_cancel.lock().unwrap().as_ref() {
-                                live.split.store(true, Ordering::SeqCst);
-                                step.cancel();
-                            }
-                        }
                         _ => {}
                     }
                 }

@@ -43,8 +43,6 @@ pub enum Delta {
     ToolCall(String),
     /// Characters of tool-call arguments received so far, such as the content of a file being written.
     ToolInput(usize),
-    /// A file write passed `WRITE_PART_CHARS`. `path` is its file, or `None` when the part so far cannot be saved yet.
-    LongWrite { path: Option<String> },
     /// Tokens the local model has generated so far for this reply.
     Generated(u64),
     /// How much of the prompt llama-server has read, and the whole prompt's size in tokens.
@@ -174,10 +172,6 @@ fn arguments_text(args: &Value) -> String {
         other => other.to_string(),
     }
 }
-
-/// Characters of arguments after which Scoobert stops a file write and saves what arrived, so one call cannot fill the
-/// context. It is about 200 lines of code, and the instructions ask for parts of about 150.
-pub const WRITE_PART_CHARS: usize = 9_000;
 
 /// A file write cut off by Stop, reduced to the complete lines it had written. Any other call, and a write without a
 /// complete line yet, is dropped.
@@ -483,27 +477,16 @@ struct PendingCall {
     id: String,
     name: String,
     args: String,
-    /// `Delta::LongWrite` went out for this call.
-    long: bool,
 }
 
 impl PendingCall {
     fn new(id: String, name: String) -> Self {
-        PendingCall { id, name, args: String::new(), long: false }
+        PendingCall { id, name, args: String::new() }
     }
 
-    /// Adds arguments, and reports a file write the first time it grows past `WRITE_PART_CHARS`.
     fn push_args(&mut self, more: &str, on_delta: &mut impl FnMut(Delta)) {
         self.args.push_str(more);
         on_delta(Delta::ToolInput(self.args.len()));
-        if !self.long && self.name == "write" && self.args.len() > WRITE_PART_CHARS {
-            self.long = true;
-            let fields = partial_object(&self.args);
-            let field = |key: &str| fields.iter().find(|(k, _)| k == key).and_then(|(_, v)| v.as_str());
-            // The part so far can be saved only once the write has named its file and finished a line.
-            let path = field("path").filter(|_| field("content").is_some_and(|c| c.contains('\n'))).map(String::from);
-            on_delta(Delta::LongWrite { path });
-        }
     }
 }
 
@@ -731,19 +714,6 @@ mod tests {
         let msg = acc.finish();
         assert_eq!(msg.stop, StopReason::Length);
         assert_eq!(msg.tool_calls[0].arguments["content"], "one\n");
-    }
-
-    #[test]
-    fn a_long_write_is_reported_once_with_its_path() {
-        let mut call = PendingCall::new("c1".into(), "write".into());
-        let mut seen = Vec::new();
-        call.push_args("{\"path\": \"a.ts\", \"content\": \"", &mut |d| seen.push(d));
-        let line = "x".repeat(99) + "\\n";
-        for _ in 0..(WRITE_PART_CHARS / 100 + 2) {
-            call.push_args(&line, &mut |d| seen.push(d));
-        }
-        let long: Vec<&Delta> = seen.iter().filter(|d| matches!(d, Delta::LongWrite { .. })).collect();
-        assert!(matches!(long.as_slice(), [Delta::LongWrite { path: Some(p) }] if p == "a.ts"));
     }
 
     #[test]

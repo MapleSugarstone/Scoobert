@@ -180,14 +180,15 @@ pub fn work_area() -> Option<(f32, f32, f32, f32)> {
     imp::work_area()
 }
 
-/// Gives this process the PATH of the user's login shell on macOS. An app opened from Finder or the Dock gets
-/// only the system folders, so tools installed with Homebrew and similar would not be found. Call it before any
-/// other thread starts, since it changes the environment.
+/// Gives this process the PATH of the user's login shell on macOS and Linux. An app opened from Finder, the Dock, or a
+/// desktop menu gets only the system folders, so tools installed with Homebrew and similar would not be found. Call it
+/// before any other thread starts, since it changes the environment.
 pub fn use_login_path() {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         const MARK: &str = "SCOOBERT_PATH=";
-        let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/')).unwrap_or_else(|| "/bin/zsh".into());
+        let login = if cfg!(target_os = "macos") { "/bin/zsh" } else { "/bin/bash" };
+        let shell = std::env::var("SHELL").ok().filter(|s| s.starts_with('/') && !s.ends_with("fish")).unwrap_or_else(|| login.into());
         // A profile that prints text or waits would otherwise delay the window, so the answer gets 3 seconds.
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -196,8 +197,18 @@ pub fn use_login_path() {
         });
         let printed = rx.recv_timeout(std::time::Duration::from_secs(3)).ok().flatten().unwrap_or_default();
         let path = printed.rsplit_once(MARK).map(|(_, p)| p.trim().to_string()).unwrap_or_default();
-        let fallback = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-        let path = if path.contains("/usr/bin") { path } else { format!("{fallback}:{}", std::env::var("PATH").unwrap_or_default()) };
+        let fallback = if cfg!(target_os = "macos") { "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" } else { "/usr/local/bin:/usr/bin:/bin" };
+        let mut path = if path.contains("/usr/bin") { path } else { fallback.to_string() };
+        // The folders the app started with stay, after the login shell's. Homebrew on Linux adds itself only to
+        // interactive shells on some systems, such as Bazzite.
+        let current = std::env::var("PATH").unwrap_or_default();
+        let brew: &[&str] = if cfg!(target_os = "linux") { &["/home/linuxbrew/.linuxbrew/bin", "/home/linuxbrew/.linuxbrew/sbin"] } else { &[] };
+        for dir in current.split(':').chain(brew.iter().copied().filter(|d| std::path::Path::new(d).is_dir())) {
+            let listed = path.split(':').any(|p| p == dir || p.strip_prefix("/var") == Some(dir));
+            if !dir.is_empty() && !listed {
+                path = format!("{path}:{dir}");
+            }
+        }
         // SAFETY: main calls this before the app starts its threads, and the helper thread above only waits on the
         // shell it already started.
         unsafe { std::env::set_var("PATH", path) };
