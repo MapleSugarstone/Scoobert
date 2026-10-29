@@ -575,5 +575,8 @@
  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Richiede circa {memory} di memoria libera oltre a {card} sulla scheda grafica. Ora sono liberi {free}.",
  "Needs about {memory} of free memory besides {card} on the graphics card.": "Richiede circa {memory} di memoria libera oltre a {card} sulla scheda grafica.",
  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "La risposta si è ridotta a un solo carattere ripetuto, quindi Scoobert riavvia il modello e chiede di nuovo.",
- "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Il modello ha continuato a scrivere lo stesso carattere più e più volte, quindi l'attività si è interrotta. Riavvia Scoobert, poi seleziona Continua."
+ "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Il modello ha continuato a scrivere lo stesso carattere più e più volte, quindi l'attività si è interrotta. Riavvia Scoobert, poi seleziona Continua.",
+ "The reply started repeating itself, so Scoobert asks again.": "La risposta ha iniziato a ripetersi, quindi Scoobert chiede di nuovo.",
+ "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "La risposta ha continuato a ripetersi, quindi Scoobert riassume la conversazione e chiede di nuovo.",
+ "The model kept repeating itself, so the task stopped. Press Continue to try again.": "Il modello ha continuato a ripetersi, quindi l'attività si è interrotta. Seleziona Continua per riprovare."
 }

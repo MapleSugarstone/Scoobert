@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Պետք է մոտ {memory} ազատ հիշողություն, ինչպես նաև {card} գրաֆիկական քարտի վրա։ Հիմա ազատ է {free}։",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "Պետք է մոտ {memory} ազատ հիշողություն, ինչպես նաև {card} գրաֆիկական քարտի վրա։",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Պատասխանը վերածվեց մեկ կրկնվող նիշի, ուստի Scoobert-ը վերագործարկում է մոդելը և նորից հարցնում։",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Մոդելն անընդհատ գրում էր միևնույն նիշը, ուստի առաջադրանքը կանգ առավ։ Վերագործարկեք Scoobert-ը, ապա ընտրեք Շարունակել։"
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Մոդելն անընդհատ գրում էր միևնույն նիշը, ուստի առաջադրանքը կանգ առավ։ Վերագործարկեք Scoobert-ը, ապա ընտրեք Շարունակել։",
+  "The reply started repeating itself, so Scoobert asks again.": "Պատասխանը սկսեց կրկնվել, ուստի Scoobert-ը նորից հարցնում է։",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "Պատասխանն անընդհատ կրկնվում էր, ուստի Scoobert-ը ամփոփում է զրույցը և նորից հարցնում։",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "Մոդելն անընդհատ կրկնվում էր, ուստի առաջադրանքը կանգ առավ։ Նորից փորձելու համար ընտրեք Շարունակել։"
 }

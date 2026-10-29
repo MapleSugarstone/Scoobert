@@ -575,5 +575,8 @@
  "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Требуется около {memory} свободной памяти помимо {card} на видеокарте. Сейчас свободно {free}.",
  "Needs about {memory} of free memory besides {card} on the graphics card.": "Требуется около {memory} свободной памяти помимо {card} на видеокарте.",
  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Ответ превратился в один повторяющийся символ, поэтому Scoobert перезапускает модель и спрашивает снова.",
- "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Модель продолжала писать один и тот же символ снова и снова, поэтому задача остановлена. Перезапустите Scoobert, затем нажмите «Продолжить»."
+ "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Модель продолжала писать один и тот же символ снова и снова, поэтому задача остановлена. Перезапустите Scoobert, затем нажмите «Продолжить».",
+ "The reply started repeating itself, so Scoobert asks again.": "Ответ начал повторяться, поэтому Scoobert спрашивает снова.",
+ "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "Ответ продолжал повторяться, поэтому Scoobert составляет сводку беседы и спрашивает снова.",
+ "The model kept repeating itself, so the task stopped. Press Continue to try again.": "Модель продолжала повторяться, поэтому задача остановлена. Нажмите «Продолжить», чтобы повторить попытку."
 }

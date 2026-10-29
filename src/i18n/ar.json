@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "يحتاج إلى نحو {memory} من الذاكرة المتاحة إضافةً إلى {card} على بطاقة الرسوميات. المتاح الآن {free}.",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "يحتاج إلى نحو {memory} من الذاكرة المتاحة إضافةً إلى {card} على بطاقة الرسوميات.",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "تحوّل الرد إلى حرف واحد مكرر، لذا يعيد Scoobert تشغيل النموذج ويطلب الرد مرة أخرى.",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "ظل النموذج يكتب حرفًا واحدًا مرارًا وتكرارًا، لذا توقفت المهمة. أعد تشغيل Scoobert ثم اختر متابعة."
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "ظل النموذج يكتب حرفًا واحدًا مرارًا وتكرارًا، لذا توقفت المهمة. أعد تشغيل Scoobert ثم اختر متابعة.",
+  "The reply started repeating itself, so Scoobert asks again.": "بدأ الرد يكرر نفسه، لذا يطلب Scoobert الرد مرة أخرى.",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "ظل الرد يكرر نفسه، لذا يلخّص Scoobert المحادثة ويطلب الرد مرة أخرى.",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "ظل النموذج يكرر نفسه، لذا توقفت المهمة. اختر متابعة لإعادة المحاولة."
 }

@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê. Niha {free} vala ye.",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê.",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Bersiv bû tenê yek tîpa dubarekirî, ji ber vê yekê Scoobert modelê ji nû ve dest pê dike û dîsa dipirse.",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Modelê dîsa û dîsa heman tîp dinivîsand, ji ber vê yekê peywir rawestiya. Scoobert ji nû ve bide destpêkirin, paşê Bidomîne bitikîne."
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Modelê dîsa û dîsa heman tîp dinivîsand, ji ber vê yekê peywir rawestiya. Scoobert ji nû ve bide destpêkirin, paşê Bidomîne bitikîne.",
+  "The reply started repeating itself, so Scoobert asks again.": "Bersivê dest bi dubarekirina xwe kir, ji ber vê yekê Scoobert dîsa dipirse.",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "Bersivê berdewam xwe dubare dikir, ji ber vê yekê Scoobert gotûbêjê kurt dike û dîsa dipirse.",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "Modelê berdewam xwe dubare dikir, ji ber vê yekê peywir rawestiya. Bidomîne bitikîne da ku dîsa biceribînî."
 }

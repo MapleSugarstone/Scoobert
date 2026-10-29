@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "グラフィックスカードの{card}に加えて、空きメモリが約{memory}必要です。現在の空きは{free}です。",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "グラフィックスカードの{card}に加えて、空きメモリが約{memory}必要です。",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "返信が1文字の繰り返しになったため、Scoobertはモデルを再起動して、もう一度リクエストします。",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "モデルが同じ1文字を書き続けたため、タスクを停止しました。Scoobertを再起動してから「続ける」を選んでください。"
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "モデルが同じ1文字を書き続けたため、タスクを停止しました。Scoobertを再起動してから「続ける」を選んでください。",
+  "The reply started repeating itself, so Scoobert asks again.": "返信が同じ内容を繰り返し始めたため、Scoobertはもう一度リクエストします。",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "返信が同じ内容を繰り返し続けたため、Scoobertは会話を要約して、もう一度リクエストします。",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "モデルが同じ内容を繰り返し続けたため、タスクを停止しました。「続ける」を選んで、もう一度お試しください。"
 }

@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card. {free} ang libre ngayon.",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card.",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Naging iisang karakter na paulit-ulit ang sagot, kaya nire-restart ng Scoobert ang modelo at muli itong tinatanong.",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Paulit-ulit na isinulat ng modelo ang iisang karakter, kaya huminto ang gawain. I-restart ang Scoobert, pagkatapos ay piliin ang Magpatuloy."
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Paulit-ulit na isinulat ng modelo ang iisang karakter, kaya huminto ang gawain. I-restart ang Scoobert, pagkatapos ay piliin ang Magpatuloy.",
+  "The reply started repeating itself, so Scoobert asks again.": "Nagsimulang ulitin ng sagot ang sarili nito, kaya muling nagtatanong ang Scoobert.",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "Patuloy na inulit ng sagot ang sarili nito, kaya binubuod ng Scoobert ang pag-uusap at muling nagtatanong.",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "Patuloy na inulit ng modelo ang sarili nito, kaya huminto ang gawain. Piliin ang Magpatuloy para subukan muli."
 }

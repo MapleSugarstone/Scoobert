@@ -157,6 +157,8 @@ struct Live {
     last_thought: Mutex<Option<std::time::Instant>>,
     /// The request in flight was stopped because its reply repeated one character from the start.
     degenerate: AtomicBool,
+    /// The request in flight was stopped because its reply fell into repeating one phrase.
+    looping: AtomicBool,
     /// Commands the model started in the background, which end when the conversation closes.
     jobs: Arc<jobs::Jobs>,
     /// The browser the model tests pages in, which closes when the task ends.
@@ -577,6 +579,7 @@ impl Host {
             step_cancel: Mutex::new(None),
             last_thought: Mutex::new(None),
             degenerate: AtomicBool::new(false),
+            looping: AtomicBool::new(false),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -1193,6 +1196,7 @@ impl Host {
         // One summary per state of the conversation; summarizing again without new messages cannot help.
         let mut compacted_at = None;
         let mut crash_resumes = 0;
+        let (mut loops, mut penalize) = (0, false);
         loop {
             self.deliver_queued(live, id)?;
             // A message the user sent meanwhile follows the stopped reply, so the model reads that reply as it is.
@@ -1225,6 +1229,11 @@ impl Host {
             let mut body = stream::payload(&ep, &req);
             if ep.local {
                 body["return_progress"] = true.into();
+                // Qwen's makers suggest a presence penalty against endless repetition. On every request it would also
+                // penalize the names code reuses, so only the request after a loop gets it.
+                if std::mem::take(&mut penalize) {
+                    body["presence_penalty"] = 1.5.into();
+                }
             }
             let step = cancel.child_token();
             *live.step_cancel.lock().unwrap() = Some(step.clone());
@@ -1256,6 +1265,33 @@ impl Host {
                     continue;
                 }
                 bail!(tr("The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue."));
+            }
+            // The reply fell into repeating one phrase. It is dropped and asked again with a presence penalty, and the
+            // second time in a task after a summary, since a long context is where the model loops.
+            if live.looping.swap(false, Ordering::SeqCst) && !cancel.is_cancelled() {
+                loops += 1;
+                if loops > 2 {
+                    bail!(tr("The model kept repeating itself, so the task stopped. Press Continue to try again."));
+                }
+                self.emit(Event::Dropped { conv: id.into() });
+                if continued {
+                    let stopped = live.conv.lock().unwrap().messages.last().cloned();
+                    if let Some(message) = stopped {
+                        self.emit(Event::Message { conv: id.to_string(), message });
+                    }
+                }
+                penalize = true;
+                if loops == 2 && compacted_at != Some(len) {
+                    let note = tr("The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.");
+                    self.emit(Event::Activity { conv: id.into(), text: Some(note.into()) });
+                    self.compact(live, id, &target, &ep, true, cancel).await?;
+                    compacted_at = Some(live.conv.lock().unwrap().messages.len());
+                } else {
+                    let note = tr("The reply started repeating itself, so Scoobert asks again.");
+                    self.emit(Event::Activity { conv: id.into(), text: Some(note.into()) });
+                    continuing = continued;
+                }
+                continue;
             }
             // The local server stopped by itself partway through the reply. The next request starts it again, and the
             // model continues what it wrote so far.
@@ -1478,26 +1514,30 @@ impl Host {
             let mut started = false;
             let live = self.live(id).ok();
             let (mut text_run, mut thought_run) = (Repeat::default(), Repeat::default());
+            let (mut text_loop, mut thought_loop) = (PhraseLoop::default(), PhraseLoop::default());
             let result = stream::send(&self.http, ep, body, cancel, |delta| {
                 if let Some(live) = &live {
-                    let broken = match &delta {
+                    let (broken, looping) = match &delta {
                         Delta::Thinking(t) => {
                             *live.last_thought.lock().unwrap() = Some(std::time::Instant::now());
-                            thought_run.push(t)
+                            (thought_run.push(t), thought_loop.push(t))
                         }
                         Delta::Text(t) => {
                             *live.last_thought.lock().unwrap() = None;
-                            text_run.push(t)
+                            (text_run.push(t), text_loop.push(t))
                         }
                         Delta::ToolCall(_) | Delta::ToolInput(_) => {
                             *live.last_thought.lock().unwrap() = None;
-                            false
+                            (false, false)
                         }
-                        _ => false,
+                        _ => (false, false),
                     };
-                    if broken
+                    let flag = if broken { Some(&live.degenerate) } else if looping { Some(&live.looping) } else { None };
+                    if let Some(flag) = flag
                         && ep.local
-                        && !live.degenerate.swap(true, Ordering::SeqCst)
+                        && !live.degenerate.load(Ordering::SeqCst)
+                        && !live.looping.load(Ordering::SeqCst)
+                        && !flag.swap(true, Ordering::SeqCst)
                         && let Some(step) = live.step_cancel.lock().unwrap().as_ref()
                     {
                         step.cancel();
@@ -2831,6 +2871,40 @@ fn context_overflow(error: &str) -> bool {
 }
 
 /// Errors that usually pass: dropped connections, rate limits, overloaded servers, a model server restarting.
+/// Whether streamed text ends in one short phrase over and over, as a model writes when it falls into a loop late in a
+/// long context. Code and prose repeat words and lines, but not one phrase a dozen times in a row.
+#[derive(Default)]
+struct PhraseLoop {
+    tail: std::collections::VecDeque<char>,
+    since: usize,
+}
+
+impl PhraseLoop {
+    const LONGEST: usize = 60;
+    const TIMES: usize = 12;
+    const SPAN: usize = 400;
+
+    fn push(&mut self, piece: &str) -> bool {
+        let keep = Self::SPAN.max(Self::LONGEST * Self::TIMES);
+        for c in piece.chars() {
+            if self.tail.len() == keep {
+                self.tail.pop_front();
+            }
+            self.tail.push_back(c);
+        }
+        self.since += piece.chars().count();
+        if self.since < 64 {
+            return false;
+        }
+        self.since = 0;
+        let end: Vec<char> = self.tail.iter().rev().copied().collect();
+        (1..=Self::LONGEST).any(|p| {
+            let need = (p * Self::TIMES).max(Self::SPAN);
+            end.len() >= need && (p..need).all(|i| end[i] == end[i - p]) && !end[..p].iter().all(|c| c.is_whitespace())
+        })
+    }
+}
+
 /// Whether streamed text is one character repeated from its start, which a model whose server state broke writes from
 /// its first token. Text that starts any other way never counts.
 #[derive(Default)]
@@ -2905,6 +2979,21 @@ mod tests {
     use super::conversation::{AssistantMessage, Message, ToolCall, ToolResult, UserMessage};
     use super::conversation::StopReason;
     use super::{clean_title, kept_from, needs_continue};
+
+    #[test]
+    fn spots_a_reply_that_loops_on_one_phrase() {
+        let feed = |text: &str| {
+            let mut watch = super::PhraseLoop::default();
+            let chars: Vec<char> = text.chars().collect();
+            chars.chunks(7).any(|c| watch.push(&c.iter().collect::<String>()))
+        };
+        assert!(feed(&format!("Now I need to add Act 2 {}", "Act 2-specific".repeat(40))));
+        let prose = "The beetle walks through the garden. It finds a door, and the door is locked. ".repeat(3)
+            + "Each tile is eight pixels wide, and every sprite uses at most three colors from the palette. ";
+        assert!(!feed(&prose.repeat(2)), "a sentence said twice is not a loop");
+        assert!(!feed(&format!("Done.{}", " ".repeat(800))), "trailing spaces are not a loop");
+        assert!(!feed(&format!("Short loop: {}", "ab".repeat(100))), "fewer than 400 characters of it");
+    }
 
     #[test]
     fn spots_a_reply_of_one_repeated_character() {

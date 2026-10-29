@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک. ئێستا {free} بەتاڵە.",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک.",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "وەڵامەکە بوو بە یەک پیتی دووبارەبووەوە، بۆیە Scoobert مۆدێلەکە دووبارە دەست پێدەکاتەوە و جارێکی دی دەپرسێتەوە.",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "مۆدێلەکە بەردەوام هەر یەک پیتی دەنووسی و دووبارەی دەکردەوە، بۆیە ئەرکەکە وەستا. Scoobert دووبارە دەستپێبکەنەوە، پاشان بەردەوامبوون هەڵبژێرن."
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "مۆدێلەکە بەردەوام هەر یەک پیتی دەنووسی و دووبارەی دەکردەوە، بۆیە ئەرکەکە وەستا. Scoobert دووبارە دەستپێبکەنەوە، پاشان بەردەوامبوون هەڵبژێرن.",
+  "The reply started repeating itself, so Scoobert asks again.": "وەڵامەکە دەستی کرد بە دووبارەکردنەوەی خۆی، بۆیە Scoobert جارێکی دی دەپرسێتەوە.",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "وەڵامەکە بەردەوام خۆی دووبارە دەکردەوە، بۆیە Scoobert گفتوگۆکە پوختە دەکات و جارێکی دی دەپرسێتەوە.",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "مۆدێلەکە بەردەوام خۆی دووبارە دەکردەوە، بۆیە ئەرکەکە وەستا. بۆ هەوڵدانەوە بەردەوامبوون هەڵبژێرن."
 }

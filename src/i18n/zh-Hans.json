@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存，当前可用 {free}。",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存。",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "回复变成了反复出现的同一个字符，因此 Scoobert 会重启模型并再次发送请求。",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "模型一直重复输出同一个字符，因此任务已停止。请重启 Scoobert，然后选择“继续”。"
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "模型一直重复输出同一个字符，因此任务已停止。请重启 Scoobert，然后选择“继续”。",
+  "The reply started repeating itself, so Scoobert asks again.": "回复开始重复内容，因此 Scoobert 会再次发送请求。",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "回复一直在重复内容，因此 Scoobert 会总结对话并再次发送请求。",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "模型一直在重复内容，因此任务已停止。请选择“继续”以重试。"
 }

@@ -575,5 +575,8 @@
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí. Tá {free} saor anois.",
   "Needs about {memory} of free memory besides {card} on the graphics card.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí.",
   "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Ní raibh sa fhreagra ach an carachtar céanna arís agus arís eile, mar sin atosaíonn Scoobert an tsamhail agus iarrann sé an freagra arís.",
-  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Choinnigh an tsamhail ag scríobh an charachtair chéanna arís agus arís eile, mar sin stad an tasc. Atosaigh Scoobert, ansin roghnaigh Lean ar aghaidh."
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Choinnigh an tsamhail ag scríobh an charachtair chéanna arís agus arís eile, mar sin stad an tasc. Atosaigh Scoobert, ansin roghnaigh Lean ar aghaidh.",
+  "The reply started repeating itself, so Scoobert asks again.": "Thosaigh an freagra ag athrá air féin, mar sin iarrann Scoobert an freagra arís.",
+  "The reply kept repeating itself, so Scoobert summarizes the conversation and asks again.": "Choinnigh an freagra ag athrá air féin, mar sin déanann Scoobert achoimre ar an gcomhrá agus iarrann sé an freagra arís.",
+  "The model kept repeating itself, so the task stopped. Press Continue to try again.": "Choinnigh an tsamhail ag athrá uirthi féin, mar sin stad an tasc. Roghnaigh Lean ar aghaidh chun triail eile a bhaint as."
 }
