@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} 再次意外停止，因此在 Scoobert 重启之前，现在不使用提前预测运行。",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} 多次意外停止，因此在 Scoobert 重启之前，现在以 {size}K 上下文运行。",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存，当前可用 {free}。",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存。"
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "除显卡上的 {card} 外，还需要约 {memory} 的可用内存。",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "回复变成了反复出现的同一个字符，因此 Scoobert 会重启模型并再次发送请求。",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "模型一直重复输出同一个字符，因此任务已停止。请重启 Scoobert，然后选择“继续”。"
 }

@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} wurde erneut unerwartet beendet, daher läuft es jetzt ohne Voraussagen, bis Scoobert neu startet.",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} wurde wiederholt unerwartet beendet, daher läuft es jetzt mit einem Kontext von {size}K, bis Scoobert neu startet.",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Benötigt etwa {memory} freien Speicher zusätzlich zu {card} auf der Grafikkarte. Aktuell sind {free} frei.",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "Benötigt etwa {memory} freien Speicher zusätzlich zu {card} auf der Grafikkarte."
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Benötigt etwa {memory} freien Speicher zusätzlich zu {card} auf der Grafikkarte.",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Die Antwort ist zu einem einzigen wiederholten Zeichen geworden, daher startet Scoobert das Modell neu und fragt erneut.",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Das Modell hat immer wieder dasselbe Zeichen geschrieben, daher wurde die Aufgabe gestoppt. Starte Scoobert neu und wähle dann „Fortsetzen“."
 }

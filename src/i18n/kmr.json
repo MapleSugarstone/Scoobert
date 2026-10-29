@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} dîsa ji nişkê ve rawestiya, ji ber vê yekê niha bêyî pêşbînîkirina pêşwext dixebite heta ku Scoobert ji nû ve dest pê bike.",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} dîsa û dîsa ji nişkê ve rawestiya, ji ber vê yekê niha bi çarçoveya {size}K dixebite heta ku Scoobert ji nû ve dest pê bike.",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê. Niha {free} vala ye.",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê."
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Nêzîkî {memory} bîra vala dixwaze, ji bilî {card} li ser karta grafîkê.",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Bersiv bû tenê yek tîpa dubarekirî, ji ber vê yekê Scoobert modelê ji nû ve dest pê dike û dîsa dipirse.",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Modelê dîsa û dîsa heman tîp dinivîsand, ji ber vê yekê peywir rawestiya. Scoobert ji nû ve bide destpêkirin, paşê Bidomîne bitikîne."
 }

@@ -1486,6 +1486,7 @@ impl App {
             Event::Activity { conv, .. }
             | Event::Delta { conv, .. }
             | Event::Replacing { conv }
+            | Event::Dropped { conv }
             | Event::Message { conv, .. }
             | Event::ToolStarted { conv, .. }
             | Event::ToolOutput { conv, .. }

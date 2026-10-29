@@ -221,6 +221,7 @@ impl Chat {
                     Delta::Progress { .. } => {}
                 }
             }
+            E::Dropped { .. } => self.stream = None,
             // The continued reply streams in with everything the stopped one held.
             E::Replacing { .. } => {
                 // Continue adds no message when it carries on the stopped reply.

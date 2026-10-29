@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "Huminto ulit nang hindi inaasahan ang {model}, kaya tumatakbo ito ngayon nang walang paunang hula hanggang mag-restart ang Scoobert.",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "Paulit-ulit na huminto nang hindi inaasahan ang {model}, kaya tumatakbo ito ngayon na may {size}K na konteksto hanggang mag-restart ang Scoobert.",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card. {free} ang libre ngayon.",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card."
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Kailangan ng humigit-kumulang {memory} na libreng memorya bukod pa sa {card} sa graphics card.",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Naging iisang karakter na paulit-ulit ang sagot, kaya nire-restart ng Scoobert ang modelo at muli itong tinatanong.",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Paulit-ulit na isinulat ng modelo ang iisang karakter, kaya huminto ang gawain. I-restart ang Scoobert, pagkatapos ay piliin ang Magpatuloy."
 }

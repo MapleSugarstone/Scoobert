@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "Stad {model} gan choinne arís, mar sin ritheann sé anois gan tuar roimh ré go dtí go n-atosófar Scoobert.",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "Stad {model} gan choinne arís agus arís eile, mar sin ritheann sé anois le comhthéacs {size}K go dtí go n-atosófar Scoobert.",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí. Tá {free} saor anois.",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí."
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Teastaíonn thart ar {memory} de chuimhne shaor chomh maith le {card} ar an gcárta grafaicí.",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Ní raibh sa fhreagra ach an carachtar céanna arís agus arís eile, mar sin atosaíonn Scoobert an tsamhail agus iarrann sé an freagra arís.",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Choinnigh an tsamhail ag scríobh an charachtair chéanna arís agus arís eile, mar sin stad an tasc. Atosaigh Scoobert, ansin roghnaigh Lean ar aghaidh."
 }

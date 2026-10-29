@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} دووبارە بە شێوەیەکی چاوەڕواننەکراو وەستا، بۆیە ئێستا بەبێ پێشبینیی پێشوەخت کار دەکات تا Scoobert دووبارە دەست پێبکاتەوە.",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} بەردەوام بە شێوەیەکی چاوەڕواننەکراو دەوەستا، بۆیە ئێستا لەگەڵ کۆنتێکستی {size}K کار دەکات تا Scoobert دووبارە دەست پێبکاتەوە.",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک. ئێستا {free} بەتاڵە.",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک."
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "نزیکەی {memory} بیرگەی بەتاڵی پێویستە جگە لە {card} لەسەر کارتی گرافیک.",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "وەڵامەکە بوو بە یەک پیتی دووبارەبووەوە، بۆیە Scoobert مۆدێلەکە دووبارە دەست پێدەکاتەوە و جارێکی دی دەپرسێتەوە.",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "مۆدێلەکە بەردەوام هەر یەک پیتی دەنووسی و دووبارەی دەکردەوە، بۆیە ئەرکەکە وەستا. Scoobert دووبارە دەستپێبکەنەوە، پاشان بەردەوامبوون هەڵبژێرن."
 }

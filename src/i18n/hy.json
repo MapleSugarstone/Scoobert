@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} մոդելը կրկին անսպասելիորեն կանգ առավ, ուստի այժմ աշխատում է առանց նախօրոք կանխատեսման, մինչև Scoobert-ը վերագործարկվի։",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} մոդելը բազմիցս անսպասելիորեն կանգ առավ, ուստի այժմ աշխատում է {size}K համատեքստով, մինչև Scoobert-ը վերագործարկվի։",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "Պետք է մոտ {memory} ազատ հիշողություն, ինչպես նաև {card} գրաֆիկական քարտի վրա։ Հիմա ազատ է {free}։",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "Պետք է մոտ {memory} ազատ հիշողություն, ինչպես նաև {card} գրաֆիկական քարտի վրա։"
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "Պետք է մոտ {memory} ազատ հիշողություն, ինչպես նաև {card} գրաֆիկական քարտի վրա։",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "Պատասխանը վերածվեց մեկ կրկնվող նիշի, ուստի Scoobert-ը վերագործարկում է մոդելը և նորից հարցնում։",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "Մոդելն անընդհատ գրում էր միևնույն նիշը, ուստի առաջադրանքը կանգ առավ։ Վերագործարկեք Scoobert-ը, ապա ընտրեք Շարունակել։"
 }

@@ -573,5 +573,7 @@
   "{model} stopped unexpectedly again, so it now runs without predicting ahead until Scoobert restarts.": "{model} 실행이 다시 예기치 않게 중지되어 Scoobert를 다시 시작할 때까지 미리 예측 없이 실행합니다.",
   "{model} kept stopping unexpectedly, so it now runs with a {size}K context until Scoobert restarts.": "{model} 실행이 계속 예기치 않게 중지되어 Scoobert를 다시 시작할 때까지 {size}K 컨텍스트로 실행합니다.",
   "Needs about {memory} of free memory besides {card} on the graphics card. {free} is free now.": "그래픽 카드의 {card} 외에 여유 메모리가 약 {memory} 필요합니다. 현재 여유 메모리는 {free}입니다.",
-  "Needs about {memory} of free memory besides {card} on the graphics card.": "그래픽 카드의 {card} 외에 여유 메모리가 약 {memory} 필요합니다."
+  "Needs about {memory} of free memory besides {card} on the graphics card.": "그래픽 카드의 {card} 외에 여유 메모리가 약 {memory} 필요합니다.",
+  "The reply turned into one repeated character, so Scoobert restarts the model and asks again.": "답변이 한 문자만 계속 반복되어 Scoobert가 모델을 다시 시작하고 다시 요청합니다.",
+  "The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue.": "모델이 한 문자를 계속 반복해서 출력하여 작업이 중지되었습니다. Scoobert를 다시 시작한 다음 '계속'을 선택하세요."
 }

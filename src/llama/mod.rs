@@ -386,14 +386,17 @@ impl LlamaServer {
         (gpu, cuda)
     }
 
-    /// Arguments for predicting ahead, unless that failed for this model in this run, and for a compact context.
-    fn extra_args(&self, model: &LocalModel, gpu: bool) -> Vec<String> {
+    /// Arguments for a compact context, and for predicting ahead unless that failed for this model in this run or the
+    /// server loads the image projector.
+    fn extra_args(&self, model: &LocalModel, gpu: bool, vision: bool) -> Vec<String> {
         let s = self.settings();
         let mut args = Vec::new();
         if s.compact_context {
             args.extend(["-ctk", "q8_0", "-ctv", "q8_0"].map(String::from));
         }
-        if self.spec_refused.lock().unwrap().contains(&model.name) {
+        // After a screenshot, a 35B-A3B on CUDA rejected every prediction and then wrote one character over and over,
+        // so a server that reads images does not predict ahead.
+        if vision || self.spec_refused.lock().unwrap().contains(&model.name) {
             return args;
         }
         // A model left out uses its own prediction layers when its file has them, and "off" turns them off.
@@ -451,7 +454,15 @@ impl LlamaServer {
             (self.on_status)(ServerStatus::Restarted(name, step));
         }
         let (gpu, cuda) = self.backend(&model.name);
-        let extras = self.extra_args(model, gpu);
+        // A loaded projector stays, and so do the arguments the server started with for it.
+        if let Some(running) = proc.as_mut()
+            && running.vision
+            && running.model.path == model.path
+            && matches!(running.child.try_wait(), Ok(None))
+        {
+            vision = true;
+        }
+        let extras = self.extra_args(model, gpu, vision);
         if let Some(running) = proc.as_mut() {
             let alive = matches!(running.child.try_wait(), Ok(None));
             // A variant can run on another model's file with its own steering, so the arguments count too.
@@ -538,12 +549,13 @@ impl LlamaServer {
             bail!("Another program is using port {}. Restart Scoobert to pick a free port.", self.port);
         }
         let ctx = self.context_for(model);
-        let mut need = self.memory_needed(model, ctx) + projector.and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
+        let mut need = self.memory_needed(model, ctx);
         // On the graphics card, llama.cpp puts the layers that fit in the card's own memory, less a margin it keeps
         // free, so system memory holds only the rest.
         if gpu && let Some(vram) = crate::sys::free_vram() {
             need = need.saturating_sub(vram.saturating_sub(VRAM_MARGIN)).max(MIN_SYSTEM_MEMORY);
         }
+        need += projector.and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
         let free = crate::sys::available_memory();
         if free < need {
             // The weights are memory-mapped, so with the setting on, the weights that do not fit stay on disk and the
@@ -562,8 +574,10 @@ impl LlamaServer {
         }
         let slots = paths::get().slots();
         let mut args: Vec<String> = vec!["-m".into(), path_arg(&model.path), "--alias".into(), model.name.clone()];
+        // The projector reads images on the processor, which takes seconds for a screenshot, leaves the card's memory
+        // as it is without images, and keeps the CUDA build's image path out of the request.
         if let Some(mmproj) = projector {
-            args.extend(["--mmproj".into(), path_arg(mmproj)]);
+            args.extend(["--mmproj".into(), path_arg(mmproj), "--no-mmproj-offload".into()]);
         }
         if let Some(template) = reasoning_keeping_template(model) {
             args.extend(["--chat-template-file".into(), path_arg(&template)]);
@@ -599,7 +613,7 @@ impl LlamaServer {
             args.extend(["--device", "none", "-ngl", "0"].map(String::from));
         }
         args.extend(model.args.iter().cloned());
-        let extras = self.extra_args(model, gpu);
+        let extras = self.extra_args(model, gpu, projector.is_some());
         args.extend(extras.iter().cloned());
         // For diagnosing the server, such as -v for its detailed log.
         if let Some(extra) = std::env::var_os("SCOOBERT_SERVER_ARGS") {
@@ -896,6 +910,18 @@ impl LlamaServer {
         match self.request_once(path, body, timeout, cancel).await {
             Err(err) if unreachable(&err) && self.recover().await => self.request_once(path, body, timeout, cancel).await,
             other => other,
+        }
+    }
+
+    /// Stops a server whose replies broke and counts it as a crash, so a repeat turns off predicting ahead and then
+    /// halves the context, as for one that stops by itself. The next request starts it again.
+    pub async fn restart_broken(self: &Arc<Self>, model: &LocalModel) {
+        let mut proc = self.proc.lock().await;
+        let predicted = proc.as_ref().is_some_and(|r| r.extras.iter().any(|a| a == "--spec-type"));
+        let step = self.crashed(&model.name, predicted);
+        self.stop_locked(&mut proc).await;
+        if step.is_some() {
+            (self.on_status)(ServerStatus::Restarted(model.name.clone(), step));
         }
     }
 

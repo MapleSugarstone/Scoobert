@@ -57,6 +57,8 @@ pub enum Event {
     Approval { conv: ConvId, id: u64, call: ToolCall },
     /// The stopped reply at the end of the conversation is being continued, and the next reply takes its place.
     Replacing { conv: ConvId },
+    /// The reply that was streaming in was dropped, and the request goes again.
+    Dropped { conv: ConvId },
     /// The model did not fit in free memory and loading from disk is off, so the window can offer to turn it on.
     DiskOffer { conv: ConvId },
     /// The run ended. `interrupted` is true when the task did not finish, so the window can offer Continue.
@@ -153,6 +155,8 @@ struct Live {
     step_cancel: Mutex<Option<CancellationToken>>,
     /// When the request in flight last streamed thinking.
     last_thought: Mutex<Option<std::time::Instant>>,
+    /// The request in flight was stopped because its reply repeated one character from the start.
+    degenerate: AtomicBool,
     /// Commands the model started in the background, which end when the conversation closes.
     jobs: Arc<jobs::Jobs>,
     /// The browser the model tests pages in, which closes when the task ends.
@@ -572,6 +576,7 @@ impl Host {
             turn: Mutex::new(None),
             step_cancel: Mutex::new(None),
             last_thought: Mutex::new(None),
+            degenerate: AtomicBool::new(false),
         });
         self.convs.lock().unwrap().insert(id.clone(), live.clone());
         // Loading a different model to look at a conversation would unload the one in use, so that waits for typing.
@@ -1230,6 +1235,28 @@ impl Host {
             let result = self.send_with_retries(id, &target, &ep, &body, &step).await;
             *live.step_cancel.lock().unwrap() = None;
             *live.last_thought.lock().unwrap() = None;
+            // The reply was one character over and over from its start, which a server whose state broke writes. The
+            // reply is dropped, and the server starts again as after a crash, so a repeat steps down the same way.
+            if live.degenerate.swap(false, Ordering::SeqCst) && !cancel.is_cancelled() {
+                if let Target::Local(model) = &target
+                    && crash_resumes < MAX_RETRIES
+                {
+                    crash_resumes += 1;
+                    self.llama.restart_broken(model).await;
+                    self.emit(Event::Dropped { conv: id.into() });
+                    let note = tr("The reply turned into one repeated character, so Scoobert restarts the model and asks again.");
+                    self.emit(Event::Activity { conv: id.into(), text: Some(note.into()) });
+                    if continued {
+                        let stopped = live.conv.lock().unwrap().messages.last().cloned();
+                        if let Some(message) = stopped {
+                            self.emit(Event::Message { conv: id.to_string(), message });
+                        }
+                        continuing = true;
+                    }
+                    continue;
+                }
+                bail!(tr("The model kept writing one character over and over, so the task stopped. Restart Scoobert, then press Continue."));
+            }
             // The local server stopped by itself partway through the reply. The next request starts it again, and the
             // model continues what it wrote so far.
             if ep.local
@@ -1450,12 +1477,30 @@ impl Host {
             let events = self.events.clone();
             let mut started = false;
             let live = self.live(id).ok();
+            let (mut text_run, mut thought_run) = (Repeat::default(), Repeat::default());
             let result = stream::send(&self.http, ep, body, cancel, |delta| {
                 if let Some(live) = &live {
-                    match &delta {
-                        Delta::Thinking(_) => *live.last_thought.lock().unwrap() = Some(std::time::Instant::now()),
-                        Delta::Text(_) | Delta::ToolCall(_) | Delta::ToolInput(_) => *live.last_thought.lock().unwrap() = None,
-                        _ => {}
+                    let broken = match &delta {
+                        Delta::Thinking(t) => {
+                            *live.last_thought.lock().unwrap() = Some(std::time::Instant::now());
+                            thought_run.push(t)
+                        }
+                        Delta::Text(t) => {
+                            *live.last_thought.lock().unwrap() = None;
+                            text_run.push(t)
+                        }
+                        Delta::ToolCall(_) | Delta::ToolInput(_) => {
+                            *live.last_thought.lock().unwrap() = None;
+                            false
+                        }
+                        _ => false,
+                    };
+                    if broken
+                        && ep.local
+                        && !live.degenerate.swap(true, Ordering::SeqCst)
+                        && let Some(step) = live.step_cancel.lock().unwrap().as_ref()
+                    {
+                        step.cancel();
                     }
                 }
                 if !started && !matches!(delta, Delta::Progress { .. }) {
@@ -2786,6 +2831,32 @@ fn context_overflow(error: &str) -> bool {
 }
 
 /// Errors that usually pass: dropped connections, rate limits, overloaded servers, a model server restarting.
+/// Whether streamed text is one character repeated from its start, which a model whose server state broke writes from
+/// its first token. Text that starts any other way never counts.
+#[derive(Default)]
+struct Repeat {
+    first: Option<char>,
+    count: usize,
+    mixed: bool,
+}
+
+impl Repeat {
+    const LIMIT: usize = 64;
+
+    fn push(&mut self, piece: &str) -> bool {
+        for c in piece.chars() {
+            match self.first {
+                _ if self.mixed => break,
+                None if c.is_whitespace() => {}
+                None => (self.first, self.count) = (Some(c), 1),
+                Some(f) if f == c => self.count += 1,
+                Some(_) => self.mixed = true,
+            }
+        }
+        !self.mixed && self.count >= Self::LIMIT
+    }
+}
+
 fn transient(error: &str) -> bool {
     let e = error.to_lowercase();
     !context_overflow(&e)
@@ -2834,6 +2905,19 @@ mod tests {
     use super::conversation::{AssistantMessage, Message, ToolCall, ToolResult, UserMessage};
     use super::conversation::StopReason;
     use super::{clean_title, kept_from, needs_continue};
+
+    #[test]
+    fn spots_a_reply_of_one_repeated_character() {
+        let mut slashes = super::Repeat::default();
+        assert!(!slashes.push(&"/".repeat(40)));
+        assert!(slashes.push(&format!("{}{}", "/".repeat(30), "/")));
+        let mut rule = super::Repeat::default();
+        assert!(!rule.push(&format!("Done.\n{}", "=".repeat(100))), "a line of = after text is fine");
+        let mut spaced = super::Repeat::default();
+        assert!(!spaced.push(&format!("{} {}", "-".repeat(40), "-".repeat(40))));
+        let mut padded = super::Repeat::default();
+        assert!(padded.push(&format!("\n  {}", "/".repeat(64))));
+    }
 
     #[test]
     fn shortens_only_writes_whose_result_said_so() {
